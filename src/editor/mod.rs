@@ -1,0 +1,374 @@
+//! 顶层编辑器控制器与窗口状态。
+//!
+//! [`Editor`] 负责窗口级事务，如视图模式、保存/关闭流程、
+//! 滚动状态与焦点延迟。运行时块树本身存放在
+//! [`DocumentTree`] 中，由它集中处理结构变更并缓存可见
+//! 顺序元数据。
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use rgpui::tree::TreeState;
+use rgpui::*;
+
+use self::context_menu::{ContextMenuState, LinkDialogState, TableInsertDialogState};
+use self::find::FindBarState;
+use self::tree::DocumentTree;
+use crate::components::{
+    AxisMarker, CellPosition, TableAxisHighlight, TableAxisKind, TableColumnAlignment, TableModel,
+    TableRuntime, UndoKind, cell_to_markdown,
+};
+use crate::components::{
+    Block, BlockKind, BlockRecord, FootnoteDefinitionBinding, FootnoteReferenceLocation,
+    FootnoteRegistry, FootnoteResolvedOccurrence, ImageReferenceDefinitions, InlineTextTree,
+    LinkReferenceDefinitions, parse_image_reference_definitions, parse_link_reference_definitions,
+};
+mod close;
+mod context_menu;
+mod document;
+mod editor_context;
+mod events;
+mod file_drop;
+mod find;
+mod history;
+mod persistence;
+mod render;
+mod selection;
+mod source_map;
+mod status_bar;
+mod table_edit;
+#[cfg(test)]
+mod tests;
+mod tree;
+mod window_layout;
+mod workspace;
+
+use self::workspace::WorkspaceState;
+
+/// 延迟到有 `Window` 可用时再执行的链接跳转请求。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PendingLinkOpen {
+    pub(crate) prompt_target: String,
+    pub(crate) open_target: String,
+}
+
+/// 顶层控制器，持有编辑器级状态并把树变更委托给 [`DocumentTree`]。
+///
+/// 编辑器订阅每个子块发出的 [`BlockEvent`](crate::components::BlockEvent)。
+/// 结构变更集中处理，以保持焦点、滚动、脏标记与序列化同步。
+pub struct Editor {
+    document: DocumentTree,
+    table_cells: HashMap<EntityId, CellBinding>,
+    /// 编辑器当前呈现的视图。
+    pub(crate) view_mode: ViewMode,
+    /// 有 [`Window`] 可用时在渲染阶段应用的延迟焦点目标。
+    pending_focus: Option<EntityId>,
+    active_entity_id: Option<EntityId>,
+    pending_scroll_active_block_into_view: bool,
+    pending_scroll_recheck_after_layout: bool,
+    pending_save: bool,
+    pending_save_as: bool,
+    pending_open_link: Option<PendingLinkOpen>,
+    pending_window_edited: bool,
+    pending_window_title_refresh: bool,
+    document_dirty: bool,
+    file_path: Option<PathBuf>,
+    scroll_handle: ScrollHandle,
+    last_scroll_viewport_size: Option<Size<Pixels>>,
+    /// 上一帧可见块标识，用于检测结构编辑；仅当行/块映射未变时刷新高度缓存。
+    prev_visible_block_ids: Vec<EntityId>,
+    /// 按行缓存的占用高度（行高加尾部 gap），以行首块为键。与滚动无关，
+    /// 不像原始绘制位置那样随滚动变化，因此按其累加和做窗口化始终正确。
+    /// 绘制行时填充；未知行用最小高度估计。
+    row_stride_cache: HashMap<EntityId, f32>,
+    /// 缓存占用高度时的内容列宽。行在列宽变化时会重排，因此丢弃异宽条目。
+    row_stride_width: Option<f32>,
+    /// 上一帧挂载区间在滚动容器子节点中的位置。
+    prev_mounted_run: Option<MountedRow>,
+    close_guard_installed: bool,
+    show_unsaved_changes_dialog: bool,
+    /// 为真时，下次保存成功后关闭窗口。
+    pending_close_after_save: bool,
+    /// 关闭对话框取消时要恢复的焦点目标。
+    close_dialog_restore_focus: Option<EntityId>,
+    pending_drop_replace_path: Option<PathBuf>,
+    show_drop_replace_dialog: bool,
+    pending_drop_replace_after_save: bool,
+    drop_replace_restore_focus: Option<EntityId>,
+    workspace: WorkspaceState,
+    /// 工作区文件树 tab 的框架树状态（文件列表渲染与交互由此承载）。
+    file_tree_state: Entity<TreeState>,
+    /// 工作区大纲 tab 的框架树状态（标题树渲染与交互由此承载）。
+    outline_tree_state: Entity<TreeState>,
+    /// 框架文件树点击文件的延迟打开（事件无 `Window`，在渲染侧消费）。
+    pending_workspace_open: Option<PathBuf>,
+    context_menu: Option<ContextMenuState>,
+    table_insert_dialog: Option<TableInsertDialogState>,
+    link_dialog: Option<LinkDialogState>,
+    find_bar: Option<FindBarState>,
+    table_axis_preview: Option<AxisSelection>,
+    table_axis_selection: Option<AxisSelection>,
+    cross_block_selection: Option<CrossBlockSelection>,
+    cross_block_drag: Option<CrossBlockDrag>,
+    rendered_select_all_cycle: Option<SelectAllOverlayCycle>,
+    scrollbar_hovered: bool,
+    scrollbar_visible_until: Instant,
+    scrollbar_fade_task: Option<Task<()>>,
+    /// 挂起的滚动进入视口重试完成后短暂强制重绘（目标块尚无实测
+    /// 边界时），让滚动在下一帧落定，而不必等光标闪烁。
+    scroll_recheck_task: Option<Task<()>>,
+    scrollbar_drag: Option<ScrollbarDrag>,
+    undo_history: Vec<UndoEntry>,
+    redo_history: Vec<UndoEntry>,
+    pending_undo_capture: Option<UndoCapture>,
+    last_selection_snapshot: SelectionUndoSnapshot,
+    last_stable_source_text: String,
+    history_restore_in_progress: bool,
+    image_reference_definitions: Arc<ImageReferenceDefinitions>,
+    link_reference_definitions: Arc<LinkReferenceDefinitions>,
+    footnote_registry: Arc<FootnoteRegistry>,
+}
+
+/// 表格块与某个单元格编辑器之间的运行时绑定。
+#[derive(Clone)]
+struct CellBinding {
+    table_block: Entity<Block>,
+    cell: Entity<Block>,
+    position: CellPosition,
+}
+
+/// 渲染后原生表格中选中的行或列。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct AxisSelection {
+    table_block_id: EntityId,
+    kind: TableAxisKind,
+    index: usize,
+}
+
+/// 自定义编辑器滚动条的像素几何。
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ScrollbarMetrics {
+    track_height: f32,
+    thumb_height: f32,
+    thumb_top: f32,
+    max_scroll_y: f32,
+}
+
+/// 窗口化结果：要挂载的行区间，以及代替裁掉行的占位高度。
+/// `top_h` 是区间上方的占位，`bottom_h` 是文档末尾的占位。
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ViewportWindow {
+    run_start: usize,
+    run_end: usize,
+    top_h: f32,
+    bottom_h: f32,
+    focus_island: Option<FocusHighlight>,
+}
+
+/// 一帧挂载区间在滚动容器子节点中的位置，供下一帧按下标读回
+/// 实测边界。`child_count` 用于校验映射而非默认可信。
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MountedRow {
+    row_start: usize,
+    row_end: usize,
+    child_base: usize,
+    child_count: usize,
+}
+
+/// 单独挂载的聚焦行（不在主区间内）。它相对主区间的位置由 `row`
+/// 决定，`lead_h` 是其上方的占位高度。
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FocusHighlight {
+    row: usize,
+    lead_h: f32,
+}
+
+/// 自定义滚动条滑块的活动拖拽会话。
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ScrollbarDrag {
+    pointer_offset_y: f32,
+    track_height: f32,
+    thumb_height: f32,
+    max_scroll_y: f32,
+}
+
+/// 随撤销历史保存的源码模式选区快照。
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SelectionUndoSnapshot {
+    range: std::ops::Range<usize>,
+    reversed: bool,
+}
+
+/// 单条撤销历史：源码文本与选区状态。
+#[derive(Clone, Debug)]
+struct UndoEntry {
+    source_text: String,
+    selection: SelectionUndoSnapshot,
+    timestamp: Instant,
+    kind: UndoKind,
+}
+
+/// 挂起的撤销捕获，用于合并相邻输入编辑。
+#[derive(Clone, Debug)]
+struct UndoCapture {
+    snapshot: UndoEntry,
+}
+
+/// 可见块顺序下的跨块选区端点。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct CrossBlockSelectionEndpoint {
+    pub(super) entity_id: EntityId,
+    pub(super) offset: usize,
+}
+
+/// 横跨两个可见块端点的编辑器级选区。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct CrossBlockSelection {
+    pub(super) anchor: CrossBlockSelectionEndpoint,
+    pub(super) focus: CrossBlockSelectionEndpoint,
+}
+
+/// 创建或扩展跨块选区时的拖拽状态。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct CrossBlockDrag {
+    pub(super) anchor: CrossBlockSelectionEndpoint,
+}
+
+/// 渲染模式选区升级用的短时 Ctrl/Cmd+A 计数器。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct SelectAllOverlayCycle {
+    entity_id: EntityId,
+    count: u8,
+    last_pressed_at: Instant,
+}
+
+/// 单个可见块文本区间到规范 Markdown 偏移的映射。
+#[derive(Clone)]
+pub(super) struct SourceMapEntry {
+    entity: Entity<Block>,
+    full_source_range: std::ops::Range<usize>,
+    content_to_source: Vec<usize>,
+    source_to_content: Vec<usize>,
+}
+
+/// 编辑器可呈现的两种编辑视图。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
+    /// 富文本渲染视图：按语义类型为每个块设置样式。
+    Rendered,
+    /// 纯源码视图：整个 Markdown 文档作为单个原始缓冲区编辑。
+    Source,
+}
+
+impl Editor {
+    const UNDO_LIMIT: usize = 200;
+    const UNDO_COALESCE_WINDOW: Duration = Duration::from_millis(1_000);
+    const SELECT_ALL_CYCLE_WINDOW: Duration = Duration::from_millis(750);
+
+    /// 对话框按钮统一路由：持有实体直接更新。
+    ///
+    /// 框架 `Dialog` 的构建闭包只有 `&mut App`，拿不到实体上下文；
+    /// 但按钮点击发生在事件派发中，此时窗口正被 `take`，
+    /// `downcast` + `WindowHandle::update` 必失败（app_menu 的 F12 教训），
+    /// 故调用方在有 `Context` 处取出实体并在此直连更新。
+    pub(super) fn dialog_button_click(
+        editor: Entity<Self>,
+        op: fn(&mut Self, &ClickEvent, &mut Window, &mut Context<Self>),
+    ) -> impl Fn(&ClickEvent, &mut Window, &mut App) + Send + Sync + 'static {
+        move |event, window, cx| {
+            editor.update(cx, |editor, cx| {
+                op(editor, event, window, cx);
+            });
+        }
+    }
+
+    /// 从 Markdown 文本构造编辑器（含文件路径）。
+    pub fn from_markdown(
+        cx: &mut Context<Self>,
+        markdown: String,
+        file_path: Option<PathBuf>,
+    ) -> Self {
+        let normalized = markdown.replace("\r\n", "\n").replace('\r', "\n");
+        let mut roots = Self::build_root_blocks_from_markdown(cx, &normalized);
+        if roots.is_empty() {
+            roots.push(Self::new_block(cx, BlockRecord::paragraph(String::new())));
+        }
+
+        let file_tree_state = cx.new(|cx| TreeState::new(cx));
+        let outline_tree_state = cx.new(|cx| TreeState::new(cx));
+
+        let mut document = DocumentTree::new(roots);
+        document.rebuild_metadata_and_snapshot(cx);
+        let pending_focus = document.first_root().map(|block| block.entity_id());
+
+        let mut editor = Self {
+            document,
+            table_cells: HashMap::new(),
+            view_mode: ViewMode::Rendered,
+            pending_focus,
+            active_entity_id: pending_focus,
+            pending_scroll_active_block_into_view: true,
+            pending_scroll_recheck_after_layout: true,
+            pending_save: false,
+            pending_save_as: false,
+            pending_open_link: None,
+            pending_window_edited: false,
+            pending_window_title_refresh: false,
+            document_dirty: false,
+            file_path,
+            scroll_handle: ScrollHandle::new(),
+            last_scroll_viewport_size: None,
+            prev_visible_block_ids: Vec::new(),
+            row_stride_cache: HashMap::new(),
+            row_stride_width: None,
+            prev_mounted_run: None,
+            close_guard_installed: false,
+            show_unsaved_changes_dialog: false,
+            pending_close_after_save: false,
+            close_dialog_restore_focus: None,
+            pending_drop_replace_path: None,
+            show_drop_replace_dialog: false,
+            pending_drop_replace_after_save: false,
+            drop_replace_restore_focus: None,
+            workspace: WorkspaceState::default(),
+            file_tree_state: file_tree_state.clone(),
+            outline_tree_state: outline_tree_state.clone(),
+            pending_workspace_open: None,
+            context_menu: None,
+            table_insert_dialog: None,
+            link_dialog: None,
+            find_bar: None,
+            table_axis_preview: None,
+            table_axis_selection: None,
+            cross_block_selection: None,
+            cross_block_drag: None,
+            rendered_select_all_cycle: None,
+            scrollbar_hovered: false,
+            scrollbar_visible_until: Instant::now(),
+            scrollbar_fade_task: None,
+            scroll_recheck_task: None,
+            scrollbar_drag: None,
+            undo_history: Vec::new(),
+            redo_history: Vec::new(),
+            pending_undo_capture: None,
+            last_selection_snapshot: Self::empty_selection_snapshot(),
+            last_stable_source_text: normalized,
+            history_restore_in_progress: false,
+            image_reference_definitions: Arc::default(),
+            link_reference_definitions: Arc::default(),
+            footnote_registry: Arc::default(),
+        };
+        editor.rebuild_table_runtimes(cx);
+        editor.rebuild_image_runtimes(cx);
+        cx.subscribe(&file_tree_state, Self::on_workspace_tree_event)
+            .detach();
+        cx.subscribe(&outline_tree_state, Self::on_outline_tree_event)
+            .detach();
+        editor.pending_focus = editor.first_focusable_entity_id(cx);
+        editor.active_entity_id = editor.pending_focus;
+        editor.refresh_stable_document_snapshot(cx);
+        editor
+    }
+}

@@ -1,0 +1,48 @@
+# AGENTS.md — rumark（拾墨）
+
+二进制 crate：基于 `rgpui` 的块式 Markdown 编辑器。
+
+## 构建 / 运行 / 验证
+
+- 构建：`cargo build -p rumark`；运行：`cargo run -p rumark -- [FILES...]`（无参数打开空文档）
+- 常用参数：`--help/-h`、`--version/-v`、`--detach/-d`（仅 macOS 生效，其他平台忽略）
+- 测试：`cargo test -p rumark`（单元测试全在源码内 `#[cfg(test)]` 模块，无独立 `tests/` 目录）
+- 单测聚焦：`cargo test -p rumark <模块路径::测试名>`，如 `cargo test -p rumark editor::document`
+- 校验顺序：`cargo fmt --check` → `cargo clippy -p rumark --all-targets` → `cargo test -p rumark`
+- 手动渲染回归：用 `docs/render-sample.md` 打开验证（覆盖 CommonMark + GFM 扩展、嵌套、边界用例）
+- 待办与进度交接：根目录 `TODO.md`（未提交状态、待决事项、待办任务、验证基线、已知陷阱）
+
+## 依赖与 Feature 约定
+
+- `rgpui` / `rgpui-platform` 为 crates.io 版本依赖（当前 `1.5`，`Cargo.lock` 锁定精确版本）。框架升级时同步改 `Cargo.toml` 两处版本号 + `dev-dependencies` 的 `test-support` 项（三处必须同版本，不要留旧号靠 `^` 兜底），跑通后提交 `Cargo.lock`。不要改回 path 依赖，不要在本仓 patch 框架代码。
+- 代码高亮是可选裁剪的：`code-highlight-core/official/config`、`html-native` 控制 `tree-sitter*` 依赖。默认全开。各 `build_*_config` 的 `#[cfg]` 必须与注册表里的调用点门控一致（yaml 归 `official`、toml 归 `config`），否则最小构建会引用未链接的 crate。
+  - 最小编译验证：`cargo check -p rumark --no-default-features`
+  - tree-sitter 版本全部 pin 死（`=x.y.z`），升级需整组对齐，不要单独 bump。
+- `[profile.dev.package]` 把 `rgpui`、`rgpui-macros` 按 release 优化：debug 慢先怀疑自家代码，不要动这个配置。
+- 启动重、导出重依赖已主动移除（见 git log trim 提交）。加新重型依赖前先确认必要性。
+
+## 结构与入口
+
+- 入口 `src/main.rs`：解析 CLI → `config::load_or_create_app_preferences` → 初始化 `I18nManager` / `theme::init`（rgpui 明暗主题）/ `EditorSettings` / `net::install_http_client` → `components::init_with_keybindings` + `init_app_menu`。改启动流程只动这里。
+- `src/editor/`：文档模型与交互核心（`document.rs` 块模型、`tree.rs`、`events.rs`、`history.rs`、`persistence.rs`、`workspace.rs`、`table_edit.rs`、`render.rs`、`source_mapping.rs`、`selection.rs`）。
+- `src/components/{block,markdown,latex,mermaid}/`：各类块渲染；`actions.rs` 为装配层（开关用 rgpui `Switch` 组件）。
+- `src/{config,i18n,theme,net,app_menu.rs,app_identity.rs,file_url.rs,atomic_file.rs}`：设置持久化、多语言、主题、HTTP 客户端、菜单、原子写盘。`file_url.rs` 仅 macOS（含 test 下）编译。
+- 所有落盘统一走 `atomic_file`（`write_text`/`write_bytes`/`copy_file`：同目录临时文件 → `sync_all` → 重命名，失败清理临时文件），不要再用裸 `std::fs::write`/`fs::copy` 写配置文件、文档、粘贴图片或缓存。
+- 界面文案走 rgpui 通用 `I18nManager` 包装（`src/i18n/mod.rs`，键值包 `zh-CN.json`/`en-US.json` 内嵌；热路径传 owned `I18nSnapshot`，勿持 `cx.global` 借用跨 `&mut` 调用）。键名一律下划线分层 `域[_组]_项`（如 `menu_file_save`、`keys_save`、`table_column_align_left`），域固定为 `win`/`dialog`/`menu`/`message`/`pref`/`keys`/`find`/`workspace`/`context`/`insert`/`table`/`image`/`code`/`status`/`export`；新增文案沿用该规范，两包键集必须一致。
+- 颜色直接用 rgpui `Theme` 调色板（`theme.colors.X` 经 `Deref` 可写作 `theme.X`）；布局/字排是 `theme` 模块的 `ThemeDimensions::DEFAULT` / `ThemeTypography::DEFAULT` 常量。主题只有明暗两档（id 为 `rumark`(暗)/`rumark-light`(亮)），无自定义主题包导入（`AddThemeConfig` 动作已删除）。
+- 窗口标题栏直接用 rgpui `TitleBar` 组件（`app_menu.rs` 的 `rumark_window_options` 只做选项基座；编辑器渲染单行 `TitleBar`：开头品牌名 + 框架 `Button` 菜单（`dropdown_menu` 下拉，定位/子菜单由组件处理），右侧三键由组件自动追加；有菜单时清零组件左内边距）：高度固定 34px（`TITLE_BAR_HEIGHT`），流式布局占位；窗口关闭一律走平台路径，经窗口级关闭保护拦截。
+- 块文本测量走 `Window::request_measured_layout_simple`，不要“顺手”迁到 1.5 带 `fingerprint`/`text_state` 的复用入口：`TextLayout` 只有只读访问器（`line_layouts`/`bounds` 等），外部无法写入自己的换行结果，carry 命中时会交还空状态、绘制阶段拿不到行。框架侧开放写入后再评估。
+- 内部标识（改名会破坏已存用户配置）：内置主题 id（`rumark` / `rumark-light`，映射到组件明暗两档）、action 命名空间（`rumark::...`，用户键位配置依赖）、测试临时文件 `rumark-*` 前缀（`config` 的历史记录过滤器依赖它；`AddThemeConfig` 已随自定义主题包删除而移除）。应用标识与配置/缓存目录为 `rs.launcher.Rumark`。
+- 版权：`LICENSE-APACHE` 正文为 Apache-2.0 标准文本（文件头版权为 `launcher-rs`）；不要改 `LICENSE-APACHE` 正文。
+
+## 注释与语言规范
+
+- 代码注释一律用中文（`//`、`///`、`//!` 全部中文；含测试模块内的注释）。
+- 用户可见文案走 `i18n`，不要在代码里硬编码中英文混排的新增字符串。
+- 文档（`README.md`、`AGENTS.md`）使用中文。
+
+## 平台与测试注意
+
+- 平台分支多用 `#[cfg(target_os = "macos")]`：`--detach` 重启自身、`on_open_urls` + 150ms 延迟启动窗口、`file_url`。非 macOS 改动后仍要在本机跑通测试，macOS 特有逻辑不要在 Windows/Linux 下强行验证。
+- `#[cfg(not(debug_assertions))] windows_subsystem = "windows"`：release 下 Windows 无控制台，`eprintln!` 调试信息看不到。
+- 已知被裁功能：版本更新检查、HTML/PDF 导出已删除，不要“补回”或加回 `semver`/`chromiumoxide`/`tokio`。

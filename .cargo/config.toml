@@ -1,0 +1,7 @@
+# Windows 主线程默认栈仅 1MB：深文档滚动时元素树层数多（编辑器外壳 +
+# 右键菜单包装 + 块外壳 + 内容），叠加 debug 构建偏胖的单帧，
+# 1MB 会在布局/渲染中途耗尽崩溃（曾致 test.md 下滚栈溢出）。
+# 与上游 rgpui 自身配置对齐，把主线程栈扩大到 4MB。
+# 仅扩大虚拟地址预留，不实际提交内存，release 同样无害。
+[target.'cfg(target_os = "windows")']
+rustflags = ["-C", "link-arg=/STACK:4194304"]

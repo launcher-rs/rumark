@@ -1,0 +1,96 @@
+[package]
+name = "rumark"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "拾墨 Rumark：基于 rgpui 的块式 Markdown 编辑器"
+repository = "https://github.com/launcher-rs/rumark"
+
+# 拾墨 Rumark：基于 rgpui 的块式 Markdown 编辑器。
+# 重型特性（代码高亮/tree-sitter 等）由 `#[cfg(feature = ...)]` 自动裁剪对应模块。
+
+[dependencies]
+anyhow = "1"
+base64 = "0.23"
+uuid = "1.23"
+rgpui = { version = "1.5", features = ["inspector"] }
+rgpui-platform = { version = "1.5" }
+unicode-segmentation = "1.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+futures = "0.3"
+toml = "1"
+url = "2"
+pulldown-cmark = "0.13"
+cssparser = "0.37"
+directories = "6"
+ratex-layout = "0.1.9"
+ratex-parser = "0.1.9"
+ratex-svg = { version = "0.1.9", features = ["embed-fonts", "standalone"] }
+mermaid-rs-renderer = { version = "0.3.0", default-features = false }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "default-tls"] }
+sys-locale = "0.3"
+docx-rs = { version = "0.4", optional = true }
+printpdf = { version = "0.12", default-features = false, features = ["text_layout"], optional = true }
+tree-sitter = { version = "=0.26.12", optional = true }
+tree-sitter-highlight = { version = "=0.26.12", optional = true }
+tree-sitter-rust = { version = "=0.24.2", optional = true }
+tree-sitter-javascript = { version = "=0.25.0", optional = true }
+tree-sitter-typescript = { version = "=0.23.2", optional = true }
+tree-sitter-json = { version = "=0.24.8", optional = true }
+tree-sitter-md = { version = "=0.5.3", optional = true }
+tree-sitter-bash = { version = "=0.25.1", optional = true }
+tree-sitter-c = { version = "=0.24.2", optional = true }
+tree-sitter-cpp = { version = "=0.23.4", optional = true }
+tree-sitter-c-sharp = { version = "=0.23.5", optional = true }
+tree-sitter-css = { version = "=0.25.0", optional = true }
+tree-sitter-go = { version = "=0.25.0", optional = true }
+tree-sitter-html = { version = "=0.23.2", optional = true }
+tree-sitter-java = { version = "=0.23.5", optional = true }
+tree-sitter-php = { version = "=0.24.2", optional = true }
+tree-sitter-python = { version = "=0.25.0", optional = true }
+tree-sitter-ruby = { version = "=0.23.1", optional = true }
+tree-sitter-yaml = { version = "=0.7.2", optional = true }
+tree-sitter-toml = { package = "adot-tree-sitter-toml", version = "=0.1.0", optional = true }
+
+[features]
+default = ["code-highlight-core", "code-highlight-official", "code-highlight-config", "html-native", "export-pdf", "export-docx"]
+# 导出功能按格式独立门控：最小构建用 `--no-default-features` 裁掉两者。
+export-pdf = ["dep:printpdf"]
+export-docx = ["dep:docx-rs"]
+code-highlight-core = ["dep:tree-sitter", "dep:tree-sitter-highlight"]
+html-native = ["dep:tree-sitter", "dep:tree-sitter-html"]
+code-highlight-official = [
+    "code-highlight-core",
+    "dep:tree-sitter-rust",
+    "dep:tree-sitter-javascript",
+    "dep:tree-sitter-typescript",
+    "dep:tree-sitter-json",
+    "dep:tree-sitter-md",
+    "dep:tree-sitter-bash",
+    "dep:tree-sitter-c",
+    "dep:tree-sitter-cpp",
+    "dep:tree-sitter-c-sharp",
+    "dep:tree-sitter-css",
+    "dep:tree-sitter-go",
+    "dep:tree-sitter-html",
+    "dep:tree-sitter-java",
+    "dep:tree-sitter-php",
+    "dep:tree-sitter-python",
+    "dep:tree-sitter-ruby",
+    "dep:tree-sitter-yaml",
+]
+code-highlight-config = ["dep:tree-sitter-toml"]
+
+[dev-dependencies]
+rgpui = { version = "1.5", features = ["test-support"] }
+# 仅测试用：解包生成的 docx 校验 document.xml 结构，不进正式构建。
+zip = "2"
+
+# Keep our own code in dev (fast incremental compile, debuggable), but
+# build the heavy framework crates at release-level optimization so debug
+# runs aren't dominated by per-call overhead.
+[profile.dev.package]
+rgpui = { opt-level = 3 }
+rgpui-macros = { opt-level = 3 }

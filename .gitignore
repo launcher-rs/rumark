@@ -1,0 +1,14 @@
+/target
+*.pdb
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+temp
+# 自备 PDF 中文字体（OFL 协议的 Noto Sans SC 等）：构建脚本命中即内嵌，
+# 未命中回退系统字体。`assets/fonts/.gitkeep` 保留目录结构。
+assets/fonts/*.ttf
+assets/fonts/*.otf
+assets/fonts/*.ttc
