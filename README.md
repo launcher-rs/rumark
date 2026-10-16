@@ -33,6 +33,13 @@ cargo test -p rumark
 - 最小编译验证：`cargo check -p rumark --no-default-features`。
 - 单测聚焦：`cargo test -p rumark <模块路径::测试名>`。
 
+## 参考
+
+块式编辑交互与界面设计参考了：
+
+- [Typora](https://typora.io/)
+- [velotype](https://github.com/manyougz/velotype)
+
 ## 许可
 
 Apache-2.0，见 [`LICENSE-APACHE`](./LICENSE-APACHE)。
