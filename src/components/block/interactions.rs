@@ -406,12 +406,6 @@ impl Block {
             return;
         }
 
-        if self.collapsed_caret_inherits_inline_code_style() {
-            self.prepare_undo_capture(UndoKind::NonCoalescible, cx);
-            self.replace_text_in_range(None, "\n", window, cx);
-            return;
-        }
-
         if !self.selected_range.is_empty() {
             self.replace_text_in_range(None, "", window, cx);
         }

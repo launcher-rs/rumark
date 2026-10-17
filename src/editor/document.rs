@@ -3874,11 +3874,11 @@ mod tests {
                 .expect("multiline inline code sample")
                 .entity
                 .read(cx);
-            assert!(multiline_code.rendered_text().contains("第一行\n第二行"));
+            assert!(multiline_code.rendered_text().contains("第一行 第二行"));
             let multiline_prefix = "跨行的行内代码：\n".len();
             assert!(multiline_code.inline_spans().iter().any(|span| {
                 span.style.code
-                    && span.range == (multiline_prefix..multiline_prefix + "第一行\n第二行".len())
+                    && span.range == (multiline_prefix..multiline_prefix + "第一行 第二行".len())
             }));
 
             let backtick_sample = visible
@@ -4150,7 +4150,7 @@ mod tests {
             let visible = editor.document.visible_blocks();
             assert_eq!(visible.len(), 1);
             let block = visible[0].entity.read(cx);
-            let text = "line 1\n\nline 2";
+            let text = "line 1  line 2";
             assert_eq!(block.kind(), BlockKind::Paragraph);
             assert_eq!(block.rendered_text(), text);
             assert!(
@@ -4159,7 +4159,7 @@ mod tests {
                     .iter()
                     .any(|span| { span.style.code && span.range == (0..text.len()) })
             );
-            assert_eq!(editor.document.markdown_text(cx), "`line 1\n\nline 2`");
+            assert_eq!(editor.document.markdown_text(cx), "`line 1  line 2`");
         });
     }
 

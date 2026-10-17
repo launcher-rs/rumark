@@ -404,22 +404,21 @@ fn typing_inside_manual_backticks_keeps_cursor_inside_code_span() {
 }
 
 #[rgpui::test]
-async fn enter_inside_multiline_inline_code_inserts_hard_line_without_splitting(
-    cx: &mut TestAppContext,
-) {
+async fn enter_inside_inline_code_splits_paragraph(cx: &mut TestAppContext) {
+    // 行内代码不再跨硬换行（对齐 GitHub），回车按普通段落拆分处理。
     let cx = cx.add_empty_window();
     let block = cx.new(|cx| {
         Block::with_record(
             cx,
             BlockRecord::new(
                 BlockKind::Paragraph,
-                InlineTextTree::from_markdown("`line 1\nline 2`"),
+                InlineTextTree::from_markdown("`line 1 line 2`"),
             ),
         )
     });
 
     block.update(cx, |block, cx| {
-        let offset = "line 1\n".len();
+        let offset = "line 1".len();
         block.selected_range = offset..offset;
         cx.notify();
     });
@@ -431,15 +430,14 @@ async fn enter_inside_multiline_inline_code_inserts_hard_line_without_splitting(
     });
 
     block.read_with(cx, |block, _cx| {
-        let text = "line 1\n\nline 2";
         assert_eq!(block.kind(), BlockKind::Paragraph);
-        assert_eq!(block.rendered_text(), text);
-        assert_eq!(block.selected_range, "line 1\n\n".len().."line 1\n\n".len());
+        assert_eq!(block.rendered_text(), "line 1");
+        assert_eq!(block.selected_range, "line 1".len().."line 1".len());
         assert!(
             block
                 .inline_spans()
                 .iter()
-                .any(|span| { span.style.code && span.range == (0..text.len()) })
+                .any(|span| { span.style.code && span.range == (0.."line 1".len()) })
         );
     });
 }
@@ -549,22 +547,20 @@ async fn mermaid_block_uses_raw_text_editing(cx: &mut TestAppContext) {
 }
 
 #[rgpui::test]
-async fn enter_inside_projected_inline_code_inserts_hard_line_without_splitting(
-    cx: &mut TestAppContext,
-) {
+async fn enter_inside_projected_inline_code_splits_paragraph(cx: &mut TestAppContext) {
     let cx = cx.add_empty_window();
     let block = cx.new(|cx| {
         Block::with_record(
             cx,
             BlockRecord::new(
                 BlockKind::Paragraph,
-                InlineTextTree::from_markdown("`line 1\nline 2`"),
+                InlineTextTree::from_markdown("`line 1 line 2`"),
             ),
         )
     });
 
     block.update(cx, |block, cx| {
-        let offset = "line 1\n".len();
+        let offset = "line 1".len();
         block.selected_range = offset..offset;
         block.refresh_inline_projection_for_focus(true);
         cx.notify();
@@ -577,9 +573,8 @@ async fn enter_inside_projected_inline_code_inserts_hard_line_without_splitting(
     });
 
     block.read_with(cx, |block, _cx| {
-        let text = "line 1\n\nline 2";
         assert_eq!(block.kind(), BlockKind::Paragraph);
-        assert_eq!(block.record.title.plain_text(), text);
+        assert_eq!(block.record.title.plain_text(), "line 1");
         assert!(
             block
                 .record
@@ -587,7 +582,7 @@ async fn enter_inside_projected_inline_code_inserts_hard_line_without_splitting(
                 .render_cache()
                 .spans()
                 .iter()
-                .any(|span| span.style.code && span.range == (0..text.len()))
+                .any(|span| span.style.code && span.range == (0.."line 1".len()))
         );
     });
 }

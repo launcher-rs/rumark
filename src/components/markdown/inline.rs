@@ -505,13 +505,16 @@ impl InlineTextTree {
         tree
     }
 
-    /// 规范化代码段内容：
-    /// - 回车换行统一为换行，使行内代码可跨硬换行渲染。
+    /// 规范化代码段内容（对齐 CommonMark / GitHub）：
+    /// - 换行统一转为单个空格，使行内代码始终渲染为一行。
     /// - 非全空且首尾各有一个空格时，去掉首尾空格。
     fn normalize_code_spans(&mut self) {
         for fragment in &mut self.fragments {
             if fragment.style.code && !fragment.text.is_empty() {
-                let mut s = fragment.text.replace("\r\n", "\n").replace('\r', "\n");
+                let mut s = fragment
+                    .text
+                    .replace("\r\n", " ")
+                    .replace(['\r', '\n'], " ");
                 let all_space = s.chars().all(|c| c == ' ');
                 if !all_space && s.starts_with(' ') && s.ends_with(' ') {
                     s.remove(0);
@@ -4864,27 +4867,28 @@ mod tests {
     }
 
     #[test]
-    fn code_span_newline_is_preserved_as_hard_line() {
+    fn code_span_newline_becomes_space() {
+        // CommonMark/GitHub：代码段内换行转为空格，始终渲染为一行。
         let tree = InlineTextTree::from_markdown("`a\nb`");
-        assert_eq!(tree.plain_text(), "a\nb");
+        assert_eq!(tree.plain_text(), "a b");
 
         let cache = tree.render_cache();
         assert_eq!(cache.spans().len(), 1);
         assert_eq!(cache.spans()[0].range, 0..3);
         assert!(cache.spans()[0].style.code);
-        assert_eq!(tree.serialize_markdown(), "`a\nb`");
+        assert_eq!(tree.serialize_markdown(), "`a b`");
     }
 
     #[test]
     fn code_span_blank_line_stays_inside_single_code_span() {
         let tree = InlineTextTree::from_markdown("`line 1\n\nline 2`");
-        assert_eq!(tree.plain_text(), "line 1\n\nline 2");
+        assert_eq!(tree.plain_text(), "line 1  line 2");
 
         let cache = tree.render_cache();
         assert_eq!(cache.spans().len(), 1);
-        assert_eq!(cache.spans()[0].range, 0.."line 1\n\nline 2".len());
+        assert_eq!(cache.spans()[0].range, 0.."line 1  line 2".len());
         assert!(cache.spans()[0].style.code);
-        assert_eq!(tree.serialize_markdown(), "`line 1\n\nline 2`");
+        assert_eq!(tree.serialize_markdown(), "`line 1  line 2`");
     }
 
     #[test]

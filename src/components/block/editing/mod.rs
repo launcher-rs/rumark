@@ -1619,16 +1619,6 @@ impl Block {
         None
     }
 
-    /// 判断折叠光标是否继承代码样式。
-    pub(super) fn collapsed_caret_inherits_inline_code_style(&self) -> bool {
-        self.selected_range.is_empty()
-            && !self.uses_raw_text_editing()
-            && self
-                .insertion_attributes_for_current_offset(self.caret_offset())
-                .style
-                .code
-    }
-
     /// 为块应用新标题，执行快捷检测并更新渲染缓存、光标与选区状态。
     /// 若类型或标题实际变化则发出 [`BlockEvent::Changed`]。
     // 编辑管线按扁平传参约定透传光标与选区快照，打包结构体反而引入生命周期复杂度。
