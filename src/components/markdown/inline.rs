@@ -1627,6 +1627,9 @@ fn parse_until(
     reference_definitions: &LinkReferenceDefinitions,
 ) -> InlineParseResult {
     let body_start = index;
+    let opener_index = end_delimiter
+        .map(|delimiter| body_start.saturating_sub(delimiter.emphasis_len()))
+        .unwrap_or(0);
     while index < tokens.len() {
         // 检查结束分隔符。
         if let Some(ref end_delim) = end_delimiter {
@@ -1648,6 +1651,7 @@ fn parse_until(
                 _ => {
                     matches_sequence(tokens, index, &end_delim.close())
                         && can_close_emphasis(tokens, index, *end_delim)
+                        && !emphasis_pair_blocked(tokens, opener_index, *end_delim, index)
                 }
             };
 
@@ -2727,6 +2731,11 @@ fn has_closing_delimiter(
         if matches_sequence(tokens, cursor, &close_str) {
             // 强调区间必须非空，紧贴起始符的结束符视为空区间，按字面处理。
             if requires_body && cursor == body_start {
+                cursor += 1;
+                continue;
+            }
+            // 规则 3：跳过因长度组合无法与开启符配对的结束符。
+            if emphasis_pair_blocked(tokens, index, delimiter, cursor) {
                 cursor += 1;
                 continue;
             }
@@ -3856,6 +3865,45 @@ fn delimiter_flanking(tokens: &[InlineCharToken], index: usize, len: usize) -> (
     (left, right)
 }
 
+/// 取自 `index` 起连续 `marker` 的长度。
+fn marker_run_len(tokens: &[InlineCharToken], index: usize, marker: char) -> usize {
+    let mut len = 0;
+    while tokens
+        .get(index + len)
+        .is_some_and(|token| token.ch == marker)
+    {
+        len += 1;
+    }
+    len
+}
+
+/// CommonMark「规则 3」：当开/闭分隔符之一两侧翼皆可（既可开启又可结束）时，
+/// 若两者长度之和为 3 的倍数且二者长度不全为 3 的倍数，则该对不能配对。
+///
+/// 该规则避免 `*斜体**加粗**文本*` 中的内层 `**` 被误判为外层 `*` 的结束符。
+fn emphasis_pair_blocked(
+    tokens: &[InlineCharToken],
+    opener_index: usize,
+    delimiter: EmphasisDelimiter,
+    closer_index: usize,
+) -> bool {
+    let (marker, opener_len) = match delimiter {
+        EmphasisDelimiter::BoldMarkdown { marker } => (marker, 2),
+        EmphasisDelimiter::ItalicMarkdown { marker } => (marker, 1),
+        _ => return false,
+    };
+    let closer_len = marker_run_len(tokens, closer_index, marker);
+    if closer_len == 0 {
+        return false;
+    }
+
+    let (open_left, open_right) = delimiter_flanking(tokens, opener_index, opener_len);
+    let (close_left, close_right) = delimiter_flanking(tokens, closer_index, closer_len);
+    (open_left && open_right || close_left && close_right)
+        && (opener_len + closer_len).is_multiple_of(3)
+        && !(opener_len.is_multiple_of(3) && closer_len.is_multiple_of(3))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -3942,6 +3990,46 @@ mod tests {
 
         let trailing = InlineTextTree::from_markdown("**word*");
         assert_eq!(trailing.plain_text(), "**word*");
+    }
+
+    #[test]
+    fn nested_bold_inside_italic_keeps_bold() {
+        // 内层 `**` 紧跟非空白字符时，不应被误判为外层 `*` 的结束符（CommonMark 规则 3）。
+        let tree = InlineTextTree::from_markdown("*斜体里放**加粗**文本*");
+        assert_eq!(tree.plain_text(), "斜体里放加粗文本");
+
+        let spans = tree.render_cache();
+        let text = tree.plain_text();
+        assert!(
+            spans
+                .spans()
+                .iter()
+                .any(|span| { span.style.bold && &text[span.range.clone()] == "加粗" }),
+            "内层加粗必须保留"
+        );
+        assert!(
+            spans.spans().iter().any(|span| {
+                span.style.italic && !span.style.bold && &text[span.range.clone()] == "斜体里放"
+            }),
+            "外层斜体必须保留"
+        );
+
+        let compact = InlineTextTree::from_markdown("*a**b**c*");
+        assert_eq!(compact.plain_text(), "abc");
+        let compact_text = compact.plain_text();
+        assert!(
+            compact
+                .render_cache()
+                .spans()
+                .iter()
+                .any(|span| { span.style.bold && &compact_text[span.range.clone()] == "b" })
+        );
+
+        // 往返后语义保持一致。
+        let serialized = tree.serialize_markdown();
+        let reparsed = InlineTextTree::from_markdown(&serialized);
+        assert_eq!(reparsed.plain_text(), tree.plain_text());
+        assert_eq!(reparsed.render_cache().spans(), tree.render_cache().spans());
     }
 
     #[test]
