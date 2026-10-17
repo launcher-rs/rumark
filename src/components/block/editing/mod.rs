@@ -304,6 +304,11 @@ impl Block {
         self.edit_mode == EditMode::SourceRaw
     }
 
+    /// 是否为链接/图片引用定义块（`[label]: url`），渲染视图隐藏。
+    pub(crate) fn is_reference_definition(&self) -> bool {
+        self.record.reference_definition
+    }
+
     /// 该空段落是否应在渲染时折叠为零高。
     ///
     /// 相邻列表组之间的空段落只用于在源码里分隔两组列表，渲染时对齐 Typora

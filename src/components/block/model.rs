@@ -488,6 +488,8 @@ pub struct BlockRecord {
     pub parent: Option<Uuid>,
     pub content: Vec<Uuid>,
     pub raw_fallback: Option<String>,
+    /// 是否为链接/图片引用定义块（`[label]: url`）。渲染视图隐藏，源码视图保留。
+    pub reference_definition: bool,
 }
 
 impl BlockRecord {
@@ -502,6 +504,7 @@ impl BlockRecord {
             parent: None,
             content: Vec::new(),
             raw_fallback: None,
+            reference_definition: false,
         };
         record.sync_raw_fallback();
         record
@@ -530,6 +533,18 @@ impl BlockRecord {
         let markdown = markdown.into();
         let mut record = Self::with_plain_text(BlockKind::Comment, markdown.clone());
         record.raw_fallback = Some(markdown);
+        record
+    }
+
+    /// 创建链接/图片引用定义块。
+    ///
+    /// 这类块不产生可见输出（对齐 GitHub/Typora），但仍按原始 Markdown 保留，
+    /// 在源码视图与保存时无损往返。
+    pub fn reference_definition(markdown: impl Into<String>) -> Self {
+        let markdown = markdown.into();
+        let mut record = Self::with_plain_text(BlockKind::RawMarkdown, markdown.clone());
+        record.raw_fallback = Some(markdown);
+        record.reference_definition = true;
         record
     }
 
@@ -594,7 +609,10 @@ impl BlockRecord {
         let indentation = "  ".repeat(depth);
         let title_to_markdown = self.title_markdown_for_output();
         match self.kind {
-            BlockKind::Paragraph => indent_multiline(&title_to_markdown, &indentation),
+            BlockKind::Paragraph => indent_multiline(
+                &escape_leading_block_marker(&title_to_markdown),
+                &indentation,
+            ),
             BlockKind::Separator => "---".to_string(),
             BlockKind::Heading { level } => {
                 format!(
@@ -698,6 +716,38 @@ fn indent_multiline(content: &str, indentation: &str) -> String {
         .map(|line| format!("{indentation}{line}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// 为段落首行转义会被误判为块级标记的首字符。
+///
+/// 段落文本可能因反斜杠转义而以 `#`、`>`、`-`、`+` 或有序列表标记开头，
+/// 序列化时若不还原转义，重新解析会变成标题/引用/列表等块，破坏往返。
+fn escape_leading_block_marker(content: &str) -> String {
+    match leading_block_marker_escape_index(content) {
+        Some(index) => format!("{}\\{}", &content[..index], &content[index..]),
+        None => content.to_string(),
+    }
+}
+
+/// 返回需要在首行插入反斜杠的字节下标（有序列表标记插入在 `.`/`)` 之前）。
+fn leading_block_marker_escape_index(content: &str) -> Option<usize> {
+    let first = content.chars().next()?;
+    if matches!(first, '#' | '>' | '-' | '+') {
+        return Some(0);
+    }
+
+    let digit_len = content.bytes().take_while(u8::is_ascii_digit).count();
+    if (1..=9).contains(&digit_len) {
+        let marker = *content.as_bytes().get(digit_len)?;
+        if matches!(marker, b'.' | b')') {
+            let separator = content.as_bytes().get(digit_len + 1);
+            if separator.is_none_or(|byte| matches!(byte, b' ' | b'\t')) {
+                return Some(digit_len);
+            }
+        }
+    }
+
+    None
 }
 
 /// 为多行文本添加首行与后续行前缀。
@@ -846,6 +896,35 @@ mod tests {
         assert!(!BlockKind::CodeBlock { language: None }.allows_table_insert_from_context());
         assert!(!BlockKind::MathBlock.allows_table_insert_from_context());
         assert!(!BlockKind::MermaidBlock.allows_table_insert_from_context());
+    }
+
+    #[test]
+    fn paragraph_serialization_escapes_leading_block_markers() {
+        assert_eq!(
+            BlockRecord::paragraph("# 标题符号").markdown_line(0, None),
+            "\\# 标题符号"
+        );
+        assert_eq!(
+            BlockRecord::paragraph("> 引用符号").markdown_line(0, None),
+            "\\> 引用符号"
+        );
+        assert_eq!(
+            BlockRecord::paragraph("- 列表符号").markdown_line(0, None),
+            "\\- 列表符号"
+        );
+        assert_eq!(
+            BlockRecord::paragraph("1. 有序项").markdown_line(0, None),
+            "1\\. 有序项"
+        );
+        // 普通文本与 10 位以上数字开头不受影响。
+        assert_eq!(
+            BlockRecord::paragraph("普通段落").markdown_line(0, None),
+            "普通段落"
+        );
+        assert_eq!(
+            BlockRecord::paragraph("1234567890. 文本").markdown_line(0, None),
+            "1234567890. 文本"
+        );
     }
 
     #[test]

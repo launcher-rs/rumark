@@ -633,7 +633,6 @@ fn quote_content_starts_unsupported(lines: &[String], index: usize) -> bool {
         || is_reference_definition_start(line)
         || is_root_table_candidate_line(line)
         || is_display_math_start(line)
-        || BlockKind::parse_heading_line(line).is_some()
         || BlockKind::parse_separator(line)
         || lines
             .get(index + 1)
@@ -663,7 +662,7 @@ fn collect_unsupported_quote_region(lines: &[String], start: usize) -> Option<us
     if is_display_math_start(line) {
         return Some(collect_display_math_region(lines, start));
     }
-    if BlockKind::parse_heading_line(line).is_some() || BlockKind::parse_separator(line) {
+    if BlockKind::parse_separator(line) {
         return Some(start + 1);
     }
     if lines
@@ -829,6 +828,11 @@ fn raw_block(cx: &mut Context<Editor>, markdown: String) -> Entity<super::Block>
 /// 构造 HTML 注释块实体。
 fn comment_block(cx: &mut Context<Editor>, markdown: String) -> Entity<super::Block> {
     Editor::new_block(cx, BlockRecord::comment(markdown))
+}
+
+/// 构造链接/图片引用定义块实体（渲染视图隐藏）。
+fn reference_definition_block(cx: &mut Context<Editor>, markdown: String) -> Entity<super::Block> {
+    Editor::new_block(cx, BlockRecord::reference_definition(markdown))
 }
 
 /// 语义 HTML 落为原生块，否则回退为源码块。
@@ -1078,7 +1082,7 @@ impl Editor {
 
             if is_reference_definition_start(line) {
                 let end = collect_reference_definition_region(lines, index);
-                roots.push(raw_block(cx, lines[index..end].join("\n")));
+                roots.push(reference_definition_block(cx, lines[index..end].join("\n")));
                 index = end;
                 continue;
             }
@@ -1342,6 +1346,19 @@ impl Editor {
                 continue;
             }
 
+            if let Some((level, content)) = BlockKind::parse_heading_line(line) {
+                if pending_blank_lines > 0
+                    && (!title_to_markdown.is_empty() || !children.is_empty())
+                {
+                    append_quote_separator_children(&mut children, pending_blank_lines, cx);
+                }
+                children.push(native_block(cx, BlockKind::Heading { level }, content));
+                saw_child = true;
+                pending_blank_lines = 0;
+                index += 1;
+                continue;
+            }
+
             if let Some(unsupported_end) = collect_unsupported_quote_region(lines, index) {
                 if pending_blank_lines > 0
                     && (!title_to_markdown.is_empty() || !children.is_empty())
@@ -1444,6 +1461,7 @@ impl Editor {
                     || parse_list_marker(next).is_some()
                     || parse_opening_fence(next).is_some()
                     || strip_indented_code_prefix(next).is_some()
+                    || BlockKind::parse_heading_line(next).is_some()
                     || quote_content_starts_unsupported(lines, index)
                 {
                     break;
@@ -1567,6 +1585,12 @@ impl Editor {
                 continue;
             }
 
+            if let Some((level, content)) = BlockKind::parse_heading_line(line) {
+                children.push(native_block(cx, BlockKind::Heading { level }, content));
+                index += 1;
+                continue;
+            }
+
             if let Some(unsupported_end) = collect_unsupported_quote_region(lines, index) {
                 children.push(raw_block(cx, lines[index..unsupported_end].join("\n")));
                 index = unsupported_end;
@@ -1627,6 +1651,7 @@ impl Editor {
                     || parse_list_marker(next).is_some()
                     || parse_opening_fence(next).is_some()
                     || strip_indented_code_prefix(next).is_some()
+                    || BlockKind::parse_heading_line(next).is_some()
                     || quote_content_starts_unsupported(lines, index)
                 {
                     break;
@@ -1780,7 +1805,10 @@ impl Editor {
                         let consumed = collect_reference_definition_region(&anchor_dedented, 0);
                         attach_child_blocks(
                             &block,
-                            vec![raw_block(cx, anchor_dedented[..consumed].join("\n"))],
+                            vec![reference_definition_block(
+                                cx,
+                                anchor_dedented[..consumed].join("\n"),
+                            )],
                             cx,
                         );
                         body_index += consumed;
@@ -2308,6 +2336,41 @@ mod tests {
     }
 
     #[rgpui::test]
+    async fn imports_deeply_nested_list_levels(cx: &mut TestAppContext) {
+        let editor = cx.new(|cx| {
+            Editor::from_markdown(
+                cx,
+                "- 深层嵌套：\n  1. 第一层有序\n     - 第二层无序\n       - 第三层无序\n         1. 第四层有序"
+                    .to_string(),
+                None,
+            )
+        });
+
+        editor.update(cx, |editor, cx| {
+            let visible = editor.document.visible_blocks();
+            let kinds = visible
+                .iter()
+                .map(|block| block.entity.read(cx).kind().clone())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                kinds,
+                vec![
+                    BlockKind::BulletedListItem,
+                    BlockKind::NumberedListItem,
+                    BlockKind::BulletedListItem,
+                    BlockKind::BulletedListItem,
+                    BlockKind::NumberedListItem,
+                ]
+            );
+            let depths = visible
+                .iter()
+                .map(|block| block.entity.read(cx).render_depth)
+                .collect::<Vec<_>>();
+            assert_eq!(depths, vec![0, 1, 2, 3, 4]);
+        });
+    }
+
+    #[rgpui::test]
     async fn imports_indented_code_block_as_native_list_child(cx: &mut TestAppContext) {
         let editor = cx.new(|cx| {
             Editor::from_markdown(
@@ -2656,6 +2719,40 @@ mod tests {
             assert_eq!(
                 editor.document.markdown_text(cx),
                 "> Quote with code block:\n> \n> ```\n> fn main() {\n>     println!(\"hi\");\n> }\n> ```"
+            );
+        });
+    }
+
+    #[rgpui::test]
+    async fn imports_quote_with_heading_child(cx: &mut TestAppContext) {
+        let editor = cx.new(|cx| {
+            Editor::from_markdown(
+                cx,
+                "> Quote with heading:\n>\n> #### Inner heading".to_string(),
+                None,
+            )
+        });
+
+        editor.update(cx, |editor, cx| {
+            let visible = editor.document.visible_blocks();
+            assert_eq!(visible.len(), 3);
+            assert_eq!(visible[0].entity.read(cx).kind(), BlockKind::Quote);
+            assert_eq!(
+                visible[0].entity.read(cx).rendered_text(),
+                "Quote with heading:"
+            );
+            assert_eq!(visible[1].entity.read(cx).kind(), BlockKind::Paragraph);
+            assert_eq!(visible[1].entity.read(cx).rendered_text(), "");
+            assert_eq!(visible[1].entity.read(cx).quote_depth, 1);
+            assert_eq!(
+                visible[2].entity.read(cx).kind(),
+                BlockKind::Heading { level: 4 }
+            );
+            assert_eq!(visible[2].entity.read(cx).rendered_text(), "Inner heading");
+            assert_eq!(visible[2].entity.read(cx).quote_depth, 1);
+            assert_eq!(
+                editor.document.markdown_text(cx),
+                "> Quote with heading:\n> \n> #### Inner heading"
             );
         });
     }
@@ -3517,6 +3614,22 @@ mod tests {
             assert_eq!(visible.len(), 1);
             assert_eq!(visible[0].entity.read(cx).kind(), BlockKind::Comment);
             assert_eq!(visible[0].entity.read(cx).rendered_text(), markdown);
+            assert_eq!(editor.document.markdown_text(cx), markdown);
+        });
+    }
+
+    #[rgpui::test]
+    async fn imports_reference_definitions_as_hidden_raw_blocks(cx: &mut TestAppContext) {
+        let markdown =
+            "[ref-link]: https://example.com\n\n[ref-image]: https://example.com/image.png \"标题\""
+                .to_string();
+        let editor = cx.new(|cx| Editor::from_markdown(cx, markdown.clone(), None));
+
+        editor.update(cx, |editor, cx| {
+            let visible = editor.document.visible_blocks();
+            assert_eq!(visible.len(), 2);
+            assert!(visible[0].entity.read(cx).is_reference_definition());
+            assert!(visible[1].entity.read(cx).is_reference_definition());
             assert_eq!(editor.document.markdown_text(cx), markdown);
         });
     }

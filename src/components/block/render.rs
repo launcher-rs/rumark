@@ -1926,6 +1926,20 @@ impl Render for Block {
                 .into_any_element();
         }
 
+        // HTML 注释与引用定义在渲染视图的非聚焦态完全隐藏（对齐 GitHub/Typora）；
+        // 聚焦或源码文档视图时回退到源码显示，以便继续编辑。
+        if (self.kind() == BlockKind::Comment || self.is_reference_definition())
+            && !focused
+            && !self.show_source_line_numbers()
+        {
+            return div()
+                .h(px(0.0))
+                .min_h(px(0.0))
+                .py(px(0.0))
+                .overflow_hidden()
+                .into_any_element();
+        }
+
         // 源码模式渲染：无格式的纯文本。数学公式与 Mermaid 块例外——聚焦时仍保留
         // 渲染结果，由下方分支叠加源码行（与图片编辑态一致）。
         if self.is_source_raw_mode()

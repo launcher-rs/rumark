@@ -1383,6 +1383,23 @@ impl EmphasisDelimiter {
             Self::BoldHtml | Self::ItalicHtml | Self::SuperscriptHtml | Self::SubscriptHtml
         )
     }
+
+    /// 取 Markdown 强调分隔符的标记字符，超文本与代码段返回 `None`。
+    fn emphasis_marker(self) -> Option<char> {
+        match self {
+            Self::BoldMarkdown { marker } | Self::ItalicMarkdown { marker } => Some(marker),
+            Self::StrikethroughMarkdown => Some('~'),
+            _ => None,
+        }
+    }
+
+    /// 取 Markdown 强调分隔符的标记长度。
+    fn emphasis_len(self) -> usize {
+        match self {
+            Self::BoldMarkdown { .. } => 2,
+            _ => 1,
+        }
+    }
 }
 
 /// 编辑命令可寻址的行内样式标志。
@@ -1500,6 +1517,43 @@ impl InlineNormalizer {
         });
     }
 
+    /// 输出一段解码后的文本（如 HTML 实体），并把其源码范围映射回归一化偏移。
+    fn emit_decoded(
+        &mut self,
+        source_range: Range<usize>,
+        text: &str,
+        style: InlineStyle,
+        html_style: Option<HtmlInlineStyle>,
+    ) {
+        let normalized_start = self.normalized_len;
+        let source_len = source_range.len().max(1);
+        for boundary in source_range.start..=source_range.end {
+            let mapped = text.len() * (boundary - source_range.start) / source_len;
+            self.visible_to_normalized[boundary] = normalized_start + mapped;
+        }
+        self.normalized_len += text.len();
+
+        if let Some(last) = self.fragments.last_mut()
+            && last.style == style
+            && last.html_style == html_style
+            && last.link.is_none()
+            && last.footnote.is_none()
+            && last.math.is_none()
+        {
+            last.text.push_str(text);
+            return;
+        }
+
+        self.fragments.push(InlineFragment {
+            text: text.to_string(),
+            style,
+            html_style,
+            link: None,
+            footnote: None,
+            math: None,
+        });
+    }
+
     /// 输出行内公式片段。
     fn emit_inline_math(
         &mut self,
@@ -1581,14 +1635,19 @@ fn parse_until(
                     tokens[index].ch == '`' && backtick_run_len(tokens, index) == *run_len
                 }
                 EmphasisDelimiter::SuperscriptMarkdown => {
-                    tokens[index].ch == '^' && can_close_emphasis(tokens, index)
+                    tokens[index].ch == '^' && can_close_emphasis(tokens, index, *end_delim)
                 }
                 EmphasisDelimiter::SubscriptMarkdown => {
-                    is_single_tilde_delimiter(tokens, index) && can_close_emphasis(tokens, index)
+                    is_single_tilde_delimiter(tokens, index)
+                        && can_close_emphasis(tokens, index, *end_delim)
+                }
+                EmphasisDelimiter::StrikethroughMarkdown => {
+                    is_exactly_two_tildes(tokens, index)
+                        && can_close_emphasis(tokens, index, *end_delim)
                 }
                 _ => {
                     matches_sequence(tokens, index, &end_delim.close())
-                        && can_close_emphasis(tokens, index)
+                        && can_close_emphasis(tokens, index, *end_delim)
                 }
             };
 
@@ -1628,6 +1687,41 @@ fn parse_until(
                 builder.emit_token(token, extra_style, extra_html_style);
             }
             index = escaped_end;
+            continue;
+        }
+
+        if !inside_code
+            && tokens[index].ch == '\\'
+            && let Some(next) = tokens.get(index + 1)
+            && matches!(next.ch, '\n' | '\r')
+        {
+            // 行尾反斜杠为硬换行：转为两空格硬换行，隐藏反斜杠且保持往返。
+            let source_range = tokens[index].source_range.start..next.source_range.end;
+            let replacement = format!("  {}", next.ch);
+            builder.emit_decoded(source_range, &replacement, extra_style, extra_html_style);
+            index += 2;
+            continue;
+        }
+
+        if !inside_code
+            && tokens[index].ch == '&'
+            && let Some((consumed, decoded)) = decode_html_entity(tokens, index)
+        {
+            let source_range =
+                tokens[index].source_range.start..tokens[index + consumed - 1].source_range.end;
+            builder.emit_decoded(source_range, &decoded, extra_style, extra_html_style);
+            index += consumed;
+            continue;
+        }
+
+        if !inside_code
+            && tokens[index].ch == ':'
+            && let Some((consumed, emoji)) = decode_emoji_shortcode(tokens, index)
+        {
+            let source_range =
+                tokens[index].source_range.start..tokens[index + consumed - 1].source_range.end;
+            builder.emit_decoded(source_range, emoji, extra_style, extra_html_style);
+            index += consumed;
             continue;
         }
 
@@ -2537,19 +2631,19 @@ fn match_open_delimiter(tokens: &[InlineCharToken], index: usize) -> Option<Emph
         Some(EmphasisDelimiter::ItalicHtml)
     } else if matches_sequence(tokens, index, "<u>") {
         Some(EmphasisDelimiter::Underline)
-    } else if matches_sequence(tokens, index, "~~") {
+    } else if matches_sequence(tokens, index, "~~") && is_exactly_two_tildes(tokens, index) {
         Some(EmphasisDelimiter::StrikethroughMarkdown)
     } else if matches_sequence(tokens, index, "^") && can_open_script(tokens, index, '^') {
         Some(EmphasisDelimiter::SuperscriptMarkdown)
     } else if is_single_tilde_delimiter(tokens, index) && can_open_script(tokens, index, '~') {
         Some(EmphasisDelimiter::SubscriptMarkdown)
-    } else if matches_sequence(tokens, index, "**") && can_open_emphasis(tokens, index, 2) {
+    } else if matches_sequence(tokens, index, "**") && can_open_emphasis(tokens, index, 2, '*') {
         Some(EmphasisDelimiter::BoldMarkdown { marker: '*' })
-    } else if matches_sequence(tokens, index, "__") && can_open_emphasis(tokens, index, 2) {
+    } else if matches_sequence(tokens, index, "__") && can_open_emphasis(tokens, index, 2, '_') {
         Some(EmphasisDelimiter::BoldMarkdown { marker: '_' })
-    } else if matches_sequence(tokens, index, "*") && can_open_emphasis(tokens, index, 1) {
+    } else if matches_sequence(tokens, index, "*") && can_open_emphasis(tokens, index, 1, '*') {
         Some(EmphasisDelimiter::ItalicMarkdown { marker: '*' })
-    } else if matches_sequence(tokens, index, "_") && can_open_emphasis(tokens, index, 1) {
+    } else if matches_sequence(tokens, index, "_") && can_open_emphasis(tokens, index, 1, '_') {
         Some(EmphasisDelimiter::ItalicMarkdown { marker: '_' })
     } else if tokens[index].ch == '`' {
         // 统计连续反引号的长度。
@@ -2707,6 +2801,16 @@ fn is_single_tilde_delimiter(tokens: &[InlineCharToken], index: usize) -> bool {
         && tokens.get(index + 1).is_none_or(|token| token.ch != '~')
 }
 
+/// 判断是否恰为两个波浪号（删除线分隔符不允许夹在更长的波浪号串中）。
+fn is_exactly_two_tildes(tokens: &[InlineCharToken], index: usize) -> bool {
+    matches_sequence(tokens, index, "~~")
+        && index
+            .checked_sub(1)
+            .and_then(|prev| tokens.get(prev))
+            .is_none_or(|token| token.ch != '~')
+        && tokens.get(index + 2).is_none_or(|token| token.ch != '~')
+}
+
 /// 判断是否匹配字符序列。
 fn matches_sequence(tokens: &[InlineCharToken], index: usize, sequence: &str) -> bool {
     sequence
@@ -2734,19 +2838,393 @@ fn escaped_sequence_token_len(tokens: &[InlineCharToken], index: usize) -> Optio
         Some(4)
     } else if matches_sequence(tokens, next_index, "<u>") {
         Some(3)
-    } else if matches_sequence(tokens, next_index, "\\")
-        || matches_sequence(tokens, next_index, "*")
-        || matches_sequence(tokens, next_index, "_")
-        || matches_sequence(tokens, next_index, "~")
-        || matches_sequence(tokens, next_index, "[")
-        || matches_sequence(tokens, next_index, "]")
-        || matches_sequence(tokens, next_index, "`")
-        || matches_sequence(tokens, next_index, "^")
-    {
+    } else if tokens[next_index].ch.is_ascii_punctuation() {
+        // CommonMark：反斜杠可转义任意 ASCII 标点，转义后该字符按字面处理。
         Some(1)
     } else {
         None
     }
+}
+
+/// 解析从 `&` 起的 HTML 实体，返回消费的字符数与解码结果。
+fn decode_html_entity(tokens: &[InlineCharToken], index: usize) -> Option<(usize, String)> {
+    let mut cursor = index + 1;
+    if tokens.get(cursor)?.ch != '#' {
+        // 具名实体：`&name;`
+        let start = cursor;
+        while tokens
+            .get(cursor)
+            .is_some_and(|token| token.ch.is_ascii_alphanumeric())
+        {
+            cursor += 1;
+        }
+        if cursor == start || tokens.get(cursor)?.ch != ';' {
+            return None;
+        }
+        let name: String = tokens[start..cursor].iter().map(|token| token.ch).collect();
+        let decoded = named_entity(&name)?;
+        return Some((cursor - index + 1, decoded.to_string()));
+    }
+
+    // 数字实体：`&#123;` 或 `&#x1F600;`
+    cursor += 1;
+    let hexadecimal = tokens
+        .get(cursor)
+        .is_some_and(|token| matches!(token.ch, 'x' | 'X'));
+    if hexadecimal {
+        cursor += 1;
+    }
+    let start = cursor;
+    while tokens.get(cursor).is_some_and(|token| {
+        if hexadecimal {
+            token.ch.is_ascii_hexdigit()
+        } else {
+            token.ch.is_ascii_digit()
+        }
+    }) {
+        cursor += 1;
+    }
+    if cursor == start || tokens.get(cursor)?.ch != ';' {
+        return None;
+    }
+
+    let digits: String = tokens[start..cursor].iter().map(|token| token.ch).collect();
+    let code = if hexadecimal {
+        u32::from_str_radix(&digits, 16).ok()?
+    } else {
+        digits.parse::<u32>().ok()?
+    };
+    // 无效码点（0、代理区、越界）按 CommonMark 替换为 U+FFFD。
+    let decoded = if code == 0 || (0xD800..=0xDFFF).contains(&code) {
+        '\u{FFFD}'
+    } else {
+        char::from_u32(code).unwrap_or('\u{FFFD}')
+    };
+    Some((cursor - index + 1, decoded.to_string()))
+}
+
+/// HTML5 具名实体的常用子集。
+fn named_entity(name: &str) -> Option<char> {
+    Some(match name {
+        "amp" => '&',
+        "lt" => '<',
+        "gt" => '>',
+        "quot" => '"',
+        "apos" => '\'',
+        "copy" => '©',
+        "reg" => '®',
+        "trade" => '™',
+        "nbsp" => '\u{00A0}',
+        "hellip" => '…',
+        "mdash" => '—',
+        "ndash" => '–',
+        "laquo" => '«',
+        "raquo" => '»',
+        "ldquo" => '“',
+        "rdquo" => '”',
+        "lsquo" => '‘',
+        "rsquo" => '’',
+        "bull" => '•',
+        "middot" => '·',
+        "dagger" => '†',
+        "Dagger" => '‡',
+        "sect" => '§',
+        "para" => '¶',
+        "permil" => '‰',
+        "prime" => '′',
+        "Prime" => '″',
+        "deg" => '°',
+        "plusmn" => '±',
+        "times" => '×',
+        "divide" => '÷',
+        "minus" => '−',
+        "lowast" => '∗',
+        "frac12" => '½',
+        "frac14" => '¼',
+        "frac34" => '¾',
+        "sup1" => '¹',
+        "sup2" => '²',
+        "sup3" => '³',
+        "micro" => 'µ',
+        "pound" => '£',
+        "euro" => '€',
+        "yen" => '¥',
+        "cent" => '¢',
+        "curren" => '¤',
+        "larr" => '←',
+        "uarr" => '↑',
+        "rarr" => '→',
+        "darr" => '↓',
+        "harr" => '↔',
+        "infin" => '∞',
+        "ne" => '≠',
+        "le" => '≤',
+        "ge" => '≥',
+        "asymp" => '≈',
+        "equiv" => '≡',
+        "sum" => '∑',
+        "prod" => '∏',
+        "radic" => '√',
+        "int" => '∫',
+        "part" => '∂',
+        "nabla" => '∇',
+        "and" => '∧',
+        "or" => '∨',
+        "cap" => '∩',
+        "cup" => '∪',
+        "isin" => '∈',
+        "notin" => '∉',
+        "ni" => '∋',
+        "empty" => '∅',
+        "forall" => '∀',
+        "exist" => '∃',
+        "there4" => '∴',
+        "ang" => '∠',
+        "alpha" => 'α',
+        "beta" => 'β',
+        "gamma" => 'γ',
+        "delta" => 'δ',
+        "epsilon" => 'ε',
+        "theta" => 'θ',
+        "lambda" => 'λ',
+        "mu" => 'μ',
+        "pi" => 'π',
+        "sigma" => 'σ',
+        "phi" => 'φ',
+        "omega" => 'ω',
+        "spades" => '♠',
+        "clubs" => '♣',
+        "hearts" => '♥',
+        "diams" => '♦',
+        "star" => '☆',
+        "starf" => '★',
+        "check" => '✓',
+        "verbar" => '|',
+        "lowbar" => '_',
+        "sol" => '/',
+        _ => return None,
+    })
+}
+
+/// 解析从 `:` 起的 Emoji 短代码，返回消费的字符数与替换文本。
+fn decode_emoji_shortcode(
+    tokens: &[InlineCharToken],
+    index: usize,
+) -> Option<(usize, &'static str)> {
+    if tokens.get(index)?.ch != ':' {
+        return None;
+    }
+
+    let mut cursor = index + 1;
+    let start = cursor;
+    while tokens.get(cursor).is_some_and(|token| {
+        token.ch.is_ascii_alphanumeric() || matches!(token.ch, '_' | '-' | '+')
+    }) {
+        cursor += 1;
+    }
+    if cursor == start || tokens.get(cursor)?.ch != ':' {
+        return None;
+    }
+
+    let name: String = tokens[start..cursor].iter().map(|token| token.ch).collect();
+    let emoji = emoji_shortcode(&name)?;
+    Some((cursor - index + 1, emoji))
+}
+
+/// GitHub Emoji 短代码的常用子集。
+fn emoji_shortcode(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "smile" => "😄",
+        "grin" => "😁",
+        "laughing" | "satisfied" => "😆",
+        "blush" => "😊",
+        "heart_eyes" => "😍",
+        "kissing_heart" => "😘",
+        "wink" => "😉",
+        "smirk" => "😏",
+        "joy" => "😂",
+        "cry" => "😢",
+        "sob" => "😭",
+        "angry" => "😠",
+        "rage" => "😡",
+        "scream" => "😱",
+        "sunglasses" => "😎",
+        "thinking" => "🤔",
+        "neutral_face" => "😐",
+        "expressionless" => "😑",
+        "sleeping" => "😴",
+        "mask" => "😷",
+        "nerd_face" => "🤓",
+        "triumph" => "😤",
+        "sunglasses_face" => "😎",
+        "heart" => "❤️",
+        "broken_heart" => "💔",
+        "two_hearts" => "💕",
+        "sparkling_heart" => "💖",
+        "heartpulse" => "💗",
+        "blue_heart" => "💙",
+        "green_heart" => "💚",
+        "yellow_heart" => "💛",
+        "purple_heart" => "💜",
+        "black_heart" => "🖤",
+        "orange_heart" => "🧡",
+        "thumbsup" | "+1" => "👍",
+        "thumbsdown" | "-1" => "👎",
+        "ok_hand" => "👌",
+        "clap" => "👏",
+        "pray" => "🙏",
+        "muscle" => "💪",
+        "wave" => "👋",
+        "point_up" => "☝️",
+        "point_right" => "👉",
+        "point_left" => "👈",
+        "point_down" => "👇",
+        "raised_hands" => "🙌",
+        "handshake" => "🤝",
+        "eyes" => "👀",
+        "fire" => "🔥",
+        "rocket" => "🚀",
+        "star" => "⭐",
+        "star2" => "🌟",
+        "sparkles" => "✨",
+        "zap" => "⚡",
+        "boom" | "collision" => "💥",
+        "warning" => "⚠️",
+        "exclamation" => "❗",
+        "question" => "❓",
+        "heavy_check_mark" => "✔️",
+        "white_check_mark" => "✅",
+        "x" => "❌",
+        "heavy_multiplication_x" => "✖️",
+        "bangbang" => "‼️",
+        "bulb" => "💡",
+        "gear" => "⚙️",
+        "wrench" => "🔧",
+        "hammer" => "🔨",
+        "lock" => "🔒",
+        "unlock" => "🔓",
+        "key" => "🔑",
+        "mag" => "🔍",
+        "bell" => "🔔",
+        "calendar" | "date" => "📅",
+        "hourglass" => "⌛",
+        "alarm_clock" => "⏰",
+        "gift" => "🎁",
+        "trophy" => "🏆",
+        "medal_sports" => "🏅",
+        "soccer" => "⚽",
+        "basketball" => "🏀",
+        "football" => "🏈",
+        "baseball" => "⚾",
+        "tennis" => "🎾",
+        "golf" => "⛳",
+        "dart" => "🎯",
+        "video_game" => "🎮",
+        "musical_note" => "🎵",
+        "notes" => "🎶",
+        "book" => "📖",
+        "books" => "📚",
+        "memo" => "📝",
+        "pencil2" => "✏️",
+        "paperclip" => "📎",
+        "pushpin" => "📌",
+        "round_pushpin" => "📍",
+        "scissors" => "✂️",
+        "email" => "✉️",
+        "phone" => "☎️",
+        "computer" => "💻",
+        "iphone" => "📱",
+        "camera" => "📷",
+        "video_camera" => "📹",
+        "tv" => "📺",
+        "floppy_disk" => "💾",
+        "package" => "📦",
+        "mailbox" => "📫",
+        "moneybag" => "💰",
+        "dollar" => "💵",
+        "credit_card" => "💳",
+        "chart_with_upwards_trend" => "📈",
+        "chart_with_downwards_trend" => "📉",
+        "bar_chart" => "📊",
+        "clipboard" => "📋",
+        "coffee" => "☕",
+        "beer" => "🍺",
+        "beers" => "🍻",
+        "wine_glass" => "🍷",
+        "cocktail" => "🍸",
+        "pizza" => "🍕",
+        "hamburger" => "🍔",
+        "fries" => "🍟",
+        "apple" => "🍎",
+        "banana" => "🍌",
+        "cake" => "🍰",
+        "birthday" => "🎂",
+        "icecream" => "🍦",
+        "sun" | "sunny" => "☀️",
+        "cloud" => "☁️",
+        "umbrella" => "☔",
+        "snowflake" => "❄️",
+        "snowman" => "⛄",
+        "rainbow" => "🌈",
+        "ocean" => "🌊",
+        "earth_asia" => "🌏",
+        "globe_with_meridians" => "🌐",
+        "moon" => "🌙",
+        "sunrise" => "🌅",
+        "dog" => "🐶",
+        "cat" => "🐱",
+        "mouse" => "🐭",
+        "hamster" => "🐹",
+        "rabbit" => "🐰",
+        "bear" => "🐻",
+        "panda_face" => "🐼",
+        "penguin" => "🐧",
+        "bird" => "🐦",
+        "bug" => "🐛",
+        "bee" => "🐝",
+        "ant" => "🐜",
+        "snake" => "🐍",
+        "turtle" => "🐢",
+        "whale" => "🐳",
+        "dolphin" => "🐬",
+        "fish" => "🐟",
+        "dragon" => "🐉",
+        "horse" => "🐴",
+        "cow" => "🐮",
+        "monkey" => "🐒",
+        "skull" => "💀",
+        "ghost" => "👻",
+        "alien" => "👽",
+        "robot" => "🤖",
+        "poop" | "hankey" => "💩",
+        "100" => "💯",
+        "ok" => "🆗",
+        "new" => "🆕",
+        "free" => "🆓",
+        "top" => "🔝",
+        "soon" => "🔜",
+        "no_entry" => "⛔",
+        "heavy_plus_sign" => "➕",
+        "heavy_minus_sign" => "➖",
+        "heavy_division_sign" => "➗",
+        "arrow_up" => "⬆️",
+        "arrow_down" => "⬇️",
+        "arrow_left" => "⬅️",
+        "arrow_right" => "➡️",
+        "recycle" => "♻️",
+        "anchor" => "⚓",
+        "dizzy" => "💫",
+        "thought_balloon" => "💭",
+        "speech_balloon" => "💬",
+        "crown" => "👑",
+        "gem" => "💎",
+        "ring" => "💍",
+        "tada" => "🎉",
+        "confetti_ball" => "🎊",
+        "balloon" => "🎈",
+        "checkered_flag" => "🏁",
+        _ => return None,
+    })
 }
 
 /// 转义普通文本并建映射。
@@ -3297,11 +3775,40 @@ fn set_style_flag(mut style: InlineStyle, flag: InlineStyleFlag, enabled: bool) 
 }
 
 /// 判断能否开启强调。
-fn can_open_emphasis(tokens: &[InlineCharToken], index: usize, len: usize) -> bool {
+///
+/// `_` 采用 CommonMark 侧翼（flanking）规则，单词内部的下划线不作为强调起始；
+/// `*` 保持原有的简化判定以避免影响既有行为。
+fn can_open_emphasis(tokens: &[InlineCharToken], index: usize, len: usize, marker: char) -> bool {
+    if marker == '_' {
+        let (left, right) = delimiter_flanking(tokens, index, len);
+        let before_punct = delimiter_char_before(tokens, index).is_some_and(is_ascii_punctuation);
+        return left && (!right || before_punct);
+    }
+
     tokens
         .get(index + len)
         .map(|token| !token.ch.is_whitespace())
         .unwrap_or(false)
+}
+
+/// 判断能否结束强调。
+///
+/// `_` 采用 CommonMark 侧翼规则，单词内部的下划线不作为强调结束。
+fn can_close_emphasis(
+    tokens: &[InlineCharToken],
+    index: usize,
+    delimiter: EmphasisDelimiter,
+) -> bool {
+    if delimiter.emphasis_marker() == Some('_') {
+        let len = delimiter.emphasis_len();
+        let (left, right) = delimiter_flanking(tokens, index, len);
+        let after_punct = tokens
+            .get(index + len)
+            .is_some_and(|token| is_ascii_punctuation(token.ch));
+        return right && (!left || after_punct);
+    }
+
+    index > 0 && !tokens[index - 1].ch.is_whitespace()
 }
 
 /// 判断能否开启上下标。
@@ -3321,9 +3828,32 @@ fn can_open_script(tokens: &[InlineCharToken], index: usize, marker: char) -> bo
             .is_some_and(|token| token.ch.is_ascii_alphanumeric())
 }
 
-/// 判断能否结束强调。
-fn can_close_emphasis(tokens: &[InlineCharToken], index: usize) -> bool {
-    index > 0 && !tokens[index - 1].ch.is_whitespace()
+/// 取指定位置之前的字符。
+fn delimiter_char_before(tokens: &[InlineCharToken], index: usize) -> Option<char> {
+    index
+        .checked_sub(1)
+        .and_then(|prev| tokens.get(prev))
+        .map(|token| token.ch)
+}
+
+/// 判断字符是否为 ASCII 标点（CommonMark 标点集合的近似）。
+fn is_ascii_punctuation(ch: char) -> bool {
+    ch.is_ascii_punctuation()
+}
+
+/// 计算强调分隔符的左右侧翼状态，返回 `(left_flanking, right_flanking)`。
+fn delimiter_flanking(tokens: &[InlineCharToken], index: usize, len: usize) -> (bool, bool) {
+    let before = delimiter_char_before(tokens, index);
+    let after = tokens.get(index + len).map(|token| token.ch);
+
+    let before_whitespace = before.is_none_or(char::is_whitespace);
+    let after_whitespace = after.is_none_or(char::is_whitespace);
+    let before_punct = before.is_some_and(is_ascii_punctuation);
+    let after_punct = after.is_some_and(is_ascii_punctuation);
+
+    let left = !after_whitespace && (!after_punct || before_whitespace || before_punct);
+    let right = !before_whitespace && (!before_punct || after_whitespace || after_punct);
+    (left, right)
 }
 
 #[cfg(test)]
@@ -3359,6 +3889,34 @@ mod tests {
 
         assert_eq!(tree.plain_text(), "* a * _ b _");
         assert_eq!(tree.serialize_markdown(), "\\* a \\* \\_ b \\_");
+    }
+
+    #[test]
+    fn intraword_underscore_does_not_emphasize() {
+        let tree = InlineTextTree::from_markdown("foo_bar_baz");
+
+        assert_eq!(tree.plain_text(), "foo_bar_baz");
+        assert!(
+            tree.render_cache()
+                .spans()
+                .iter()
+                .all(|span| !span.style.italic && !span.style.bold),
+            "intraword underscores must stay literal"
+        );
+    }
+
+    #[test]
+    fn triple_tilde_is_not_strikethrough() {
+        let tree = InlineTextTree::from_markdown("~~~三个波浪号~~~");
+
+        assert_eq!(tree.plain_text(), "~~~三个波浪号~~~");
+        assert!(
+            tree.render_cache()
+                .spans()
+                .iter()
+                .all(|span| !span.style.strikethrough),
+            "a run of three tildes must not open strikethrough"
+        );
     }
 
     #[test]
@@ -3481,6 +4039,84 @@ mod tests {
 
         assert_eq!(tree.plain_text(), "**<u>text</u>\\");
         assert_eq!(tree.serialize_markdown(), "\\*\\*\\<u>text\\</u>\\\\");
+    }
+
+    #[test]
+    fn backslash_escapes_any_ascii_punctuation_to_literal() {
+        let tree = InlineTextTree::from_markdown("\\# \\> \\- \\. \\! \\&");
+
+        assert_eq!(tree.plain_text(), "# > - . ! &");
+        assert!(
+            tree.render_cache()
+                .spans()
+                .iter()
+                .all(|span| !span.style.bold && !span.style.italic && !span.style.strikethrough)
+        );
+    }
+
+    #[test]
+    fn decodes_named_and_numeric_html_entities() {
+        let tree =
+            InlineTextTree::from_markdown("实体：&copy; &amp; &lt; &gt; &quot; &hellip; &mdash;");
+        assert_eq!(tree.plain_text(), "实体：© & < > \" … —");
+
+        let numeric = InlineTextTree::from_markdown("&#x2764; &#10084;");
+        assert_eq!(numeric.plain_text(), "❤ ❤");
+    }
+
+    #[test]
+    fn unknown_entity_names_stay_literal() {
+        let tree = InlineTextTree::from_markdown("&notarealentity;");
+        assert_eq!(tree.plain_text(), "&notarealentity;");
+    }
+
+    #[test]
+    fn decodes_emoji_shortcodes() {
+        let tree = InlineTextTree::from_markdown(":smile: :rocket: :warning: :thumbsup:");
+        assert_eq!(tree.plain_text(), "😄 🚀 ⚠️ 👍");
+
+        let literal = InlineTextTree::from_markdown(":notanemoji:");
+        assert_eq!(literal.plain_text(), ":notanemoji:");
+    }
+
+    #[test]
+    fn trailing_backslash_becomes_hard_break_without_visible_backslash() {
+        let tree = InlineTextTree::from_markdown("硬换行。\\\n下一行。");
+
+        assert_eq!(tree.plain_text(), "硬换行。  \n下一行。");
+        assert!(!tree.plain_text().contains('\\'));
+        assert_eq!(tree.serialize_markdown(), "硬换行。  \n下一行。");
+    }
+
+    #[test]
+    fn escaped_block_markers_render_as_literal_text() {
+        for (source, expected) in [
+            ("\\* 转义星号 \\*", "* 转义星号 *"),
+            ("\\_ 转义下划线 \\_", "_ 转义下划线 _"),
+            ("\\` 转义反引号 \\`", "` 转义反引号 `"),
+            ("\\[ 转义方括号 \\]", "[ 转义方括号 ]"),
+            ("\\# 转义标题符号", "# 转义标题符号"),
+            ("\\> 转义引用符号", "> 转义引用符号"),
+            ("\\- 转义列表符号", "- 转义列表符号"),
+            ("\\. 转义有序列表点", ". 转义有序列表点"),
+            ("\\! 转义感叹号", "! 转义感叹号"),
+            ("\\& 转义与号", "& 转义与号"),
+        ] {
+            assert_eq!(
+                InlineTextTree::from_markdown(source).plain_text(),
+                expected,
+                "source: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn lone_markers_and_ampersands_stay_literal() {
+        let lone = "孤立标记符：* 星号、_ 下划线、~ 波浪号、` 反引号。";
+        assert_eq!(InlineTextTree::from_markdown(lone).plain_text(), lone);
+
+        assert_eq!(InlineTextTree::from_markdown("AT&T").plain_text(), "AT&T");
+        assert_eq!(InlineTextTree::from_markdown("a & b").plain_text(), "a & b");
     }
 
     #[test]
