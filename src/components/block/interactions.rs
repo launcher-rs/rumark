@@ -1387,6 +1387,20 @@ impl Block {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // 行虚拟化与布局切换期间，上一帧的命中盒可能把按下事件投递到本块之外的位置；
+        // 若按下点明显落在本块最近一次绘制出的外壳之外，直接忽略，
+        // 避免误聚焦抢走相邻块（例如正文 HTML 块源码行）的光标。
+        if let Some(shell) = self.last_shell_bounds {
+            let tolerance = rgpui::px(2.0);
+            let within = event.position.x >= shell.left() - tolerance
+                && event.position.x <= shell.right() + tolerance
+                && event.position.y >= shell.top() - tolerance
+                && event.position.y <= shell.bottom() + tolerance;
+            if !within {
+                cx.stop_propagation();
+                return;
+            }
+        }
         if self.showing_rendered_image() {
             self.is_selecting = false;
             self.request_image_edit_expansion();

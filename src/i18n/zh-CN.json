@@ -30,6 +30,7 @@
   "menu_file_recent": "打开最近文件",
   "menu_file_preferences": "偏好设置",
   "menu_file_recent_empty": "无最近文件",
+  "menu_file_recent_clear": "清除最近文件",
   "menu_file_save": "保存",
   "menu_file_save_as": "另存为",
   "menu_file_quit": "退出",

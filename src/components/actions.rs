@@ -54,6 +54,7 @@ actions!(
         OpenFile,
         OpenPreferences,
         NoRecentFiles,
+        ClearRecentFiles,
         SaveDocumentAs,
         AddLanguageConfig,
         AddThemeConfig,

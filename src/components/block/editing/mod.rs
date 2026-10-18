@@ -128,6 +128,8 @@ pub struct Block {
     pub marked_range: Option<Range<usize>>,
     pub last_layout: Option<Vec<WrappedLine>>,
     pub last_bounds: Option<Bounds<Pixels>>,
+    /// 最近一次绘制出的整块外壳边界（含内边距）。用于将明显落在本块之外的误投递鼠标按下挡掉。
+    pub(crate) last_shell_bounds: Option<Bounds<Pixels>>,
     pub last_line_height: Pixels,
     pub render_depth: usize,
     pub quote_depth: usize,
@@ -237,6 +239,7 @@ impl Block {
             marked_range: None,
             last_layout: None,
             last_bounds: None,
+            last_shell_bounds: None,
             last_line_height: px(20.0),
             render_depth: 0,
             quote_depth: 0,

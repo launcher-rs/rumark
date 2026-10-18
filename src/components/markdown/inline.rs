@@ -502,6 +502,7 @@ impl InlineTextTree {
             .normalize_inline_syntax_with_link_references(reference_definitions)
             .tree;
         tree.normalize_code_spans();
+        tree.normalize_soft_breaks();
         tree
     }
 
@@ -522,6 +523,55 @@ impl InlineTextTree {
                 }
                 fragment.text = s;
             }
+        }
+        self.normalize_fragments();
+    }
+
+    /// 规范化段落内软换行（对齐 CommonMark / GitHub README）：
+    /// 段内裸换行折叠为空格，仅硬换行（行尾两空格或反斜杠，序列化为 `"  \n"`）
+    /// 与空行（段落分隔）保留换行。
+    fn normalize_soft_breaks(&mut self) {
+        let text = self.plain_text();
+        if !text.contains(['\n', '\r']) {
+            return;
+        }
+        let bytes = text.as_bytes();
+        let len = bytes.len();
+        let mut collapse = vec![false; len];
+        let mut line_start = 0usize;
+        let mut index = 0usize;
+        while index < len {
+            if bytes[index] != b'\n' && bytes[index] != b'\r' {
+                index += 1;
+                continue;
+            }
+            let prev_blank = text[line_start..index].trim().is_empty();
+            let next_start = index + 1;
+            let next_end = text[next_start..]
+                .find(['\n', '\r'])
+                .map(|offset| next_start + offset)
+                .unwrap_or(len);
+            let next_blank = text[next_start..next_end].trim().is_empty();
+            let hard =
+                index >= line_start + 2 && bytes[index - 1] == b' ' && bytes[index - 2] == b' ';
+            if !prev_blank && !next_blank && !hard {
+                collapse[index] = true;
+            }
+            line_start = next_start;
+            index = next_start;
+        }
+
+        let mut base = 0usize;
+        for fragment in &mut self.fragments {
+            let fragment_len = fragment.text.len();
+            if !fragment.style.code && fragment.text.contains(['\n', '\r']) {
+                let mut out = String::with_capacity(fragment_len);
+                for (offset, ch) in fragment.text.char_indices() {
+                    out.push(if collapse[base + offset] { ' ' } else { ch });
+                }
+                fragment.text = out;
+            }
+            base += fragment_len;
         }
         self.normalize_fragments();
     }
@@ -4177,6 +4227,27 @@ mod tests {
         assert_eq!(tree.plain_text(), "硬换行。  \n下一行。");
         assert!(!tree.plain_text().contains('\\'));
         assert_eq!(tree.serialize_markdown(), "硬换行。  \n下一行。");
+    }
+
+    #[test]
+    fn soft_break_collapses_to_space() {
+        let tree = InlineTextTree::from_markdown("first line\nsecond line");
+
+        assert_eq!(tree.plain_text(), "first line second line");
+        assert_eq!(tree.serialize_markdown(), "first line second line");
+    }
+
+    #[test]
+    fn blank_line_and_hard_break_keep_newline() {
+        let blank = InlineTextTree::from_markdown("first\n\nsecond");
+        assert_eq!(blank.plain_text(), "first\n\nsecond");
+
+        let spaced = InlineTextTree::from_markdown("first  \nsecond");
+        assert_eq!(spaced.plain_text(), "first  \nsecond");
+        assert_eq!(spaced.serialize_markdown(), "first  \nsecond");
+
+        let backslash = InlineTextTree::from_markdown("first\\\nsecond");
+        assert_eq!(backslash.plain_text(), "first  \nsecond");
     }
 
     #[test]

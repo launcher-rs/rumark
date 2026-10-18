@@ -2155,11 +2155,11 @@ mod tests {
             assert_eq!(visible[1].entity.read(cx).kind(), BlockKind::Paragraph);
             assert_eq!(
                 visible[1].entity.read(cx).rendered_text(),
-                "first line\nsecond line"
+                "first line second line"
             );
             assert_eq!(
                 editor.document.markdown_text(cx),
-                "## Heading\n\nfirst line\nsecond line"
+                "## Heading\n\nfirst line second line"
             );
         });
     }
@@ -2943,7 +2943,7 @@ mod tests {
 
     #[rgpui::test]
     async fn quote_does_not_promote_multiline_image_paragraph_to_child(cx: &mut TestAppContext) {
-        let markdown = "> ![alt](./img.png)\n> tail".to_string();
+        let markdown = "> ![alt](./img.png)  \n> tail".to_string();
         let editor = cx.new(|cx| Editor::from_markdown(cx, markdown.clone(), None));
 
         editor.update(cx, |editor, cx| {
@@ -4078,7 +4078,7 @@ mod tests {
             assert_eq!(visible[0].entity.read(cx).kind(), BlockKind::Quote);
             assert_eq!(
                 visible[0].entity.read(cx).rendered_text(),
-                "quoted line\nsecond line"
+                "quoted line second line"
             );
             assert_eq!(visible[1].entity.read(cx).kind(), BlockKind::Separator);
             assert_eq!(
@@ -4227,6 +4227,26 @@ mod tests {
             assert_eq!(visible[0].entity.read(cx).kind(), BlockKind::Paragraph);
             assert_eq!(visible[0].entity.read(cx).rendered_text(), "");
             assert_eq!(editor.document.markdown_text(cx), "");
+        });
+    }
+
+    #[rgpui::test]
+    async fn multiline_paragraph_collapses_soft_break_to_single_line(cx: &mut TestAppContext) {
+        let editor = cx.new(|cx| {
+            Editor::from_markdown(cx, "跨行的行内代码：\n`第一行\n第二行`".to_string(), None)
+        });
+
+        editor.update(cx, |editor, cx| {
+            let visible = editor.document.visible_blocks();
+            assert_eq!(visible.len(), 1);
+            assert_eq!(
+                visible[0].entity.read(cx).rendered_text(),
+                "跨行的行内代码： 第一行 第二行"
+            );
+            assert_eq!(
+                editor.document.markdown_text(cx),
+                "跨行的行内代码： `第一行 第二行`"
+            );
         });
     }
 }

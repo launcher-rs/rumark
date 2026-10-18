@@ -20,18 +20,21 @@ use crate::components::{
 use crate::i18n::{I18nManager, I18nSnapshot};
 use crate::theme::{ThemeDimensions, ThemeTypography};
 
-// 不同嵌套层级的 Unicode 项目符号。
-const BULLET_DISC: &str = "\u{2022}";
-const BULLET_CIRCLE: &str = "\u{25E6}";
-const BULLET_SQUARE: &str = "\u{25A1}";
 const TASK_CHECK: &str = "\u{2713}";
 
-/// 取项目符号标记。
-fn bulleted_list_marker(depth: usize) -> &'static str {
+/// 按嵌套层级取项目符号几何图形（不依赖字体字形）。
+///
+/// 0 → 实心圆，1 → 空心圆，更深 → 实心方。
+fn bulleted_list_marker(depth: usize, theme: &Theme, text_size: f32) -> Div {
+    let diameter = (text_size * 0.32).clamp(4.0, 8.0);
+    let marker = div().size(px(diameter));
     match depth {
-        0 => BULLET_DISC,
-        1 => BULLET_CIRCLE,
-        _ => BULLET_SQUARE,
+        0 => marker.rounded(px(diameter / 2.0)).bg(theme.foreground),
+        1 => marker
+            .rounded(px(diameter / 2.0))
+            .border(px(1.0))
+            .border_color(theme.foreground),
+        _ => marker.bg(theme.foreground),
     }
 }
 
@@ -414,6 +417,41 @@ fn html_node_visual_style(node: &HtmlNode, parent: HtmlStyle, theme: &Theme) -> 
         computed,
         background,
     }
+}
+
+/// 判断 HTML 节点是否按块级（独占一行）排布。
+///
+/// 行内标签与文本节点归入行内流；`br`/`img` 虽属块级标签，仍在行内流中渲染；
+/// 原始回退内容独占整块。
+fn html_node_is_block_level(node: &HtmlNode) -> bool {
+    match node.kind {
+        HtmlNodeKind::InlineSemantic => false,
+        HtmlNodeKind::RawTextBlock => true,
+        HtmlNodeKind::BlockSemantic => !matches!(node.tag_name.as_str(), "br" | "img"),
+    }
+}
+
+/// 纯空白文本节点：HTML 折叠空白，结构性换行/缩进本身不产生内容。
+fn html_is_whitespace_text(node: &HtmlNode) -> bool {
+    node.tag_name == "#text" && node.raw_source.chars().all(char::is_whitespace)
+}
+
+/// 把一个行内游程收束为可换行的行内容器；空游程跳过。
+fn push_html_inline_run(run: &mut Vec<AnyElement>, out: &mut Vec<AnyElement>) {
+    if run.is_empty() {
+        return;
+    }
+    let items = std::mem::take(run);
+    out.push(
+        div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .min_w(px(0.0))
+            .children(items)
+            .into_any_element(),
+    );
 }
 
 impl Block {
@@ -1165,7 +1203,7 @@ impl Block {
         }
 
         let children =
-            self.render_html_children(&document.nodes, theme, HtmlStyle::root(theme), cx);
+            self.render_html_flow_children(&document.nodes, theme, HtmlStyle::root(theme), cx);
         div()
             .w_full()
             .min_w(px(0.0))
@@ -1195,6 +1233,119 @@ impl Block {
             rendered.push(self.render_html_node(child, theme, style, cx));
         }
         rendered
+    }
+
+    /// 表格结构容器（`table`/`thead`/`tbody`/`tfoot`/`tr`）的子节点渲染：
+    /// 丢弃纯空白文本节点。
+    ///
+    /// 这些元素的内容模型只允许表格元素，源码里的换行与缩进是结构性空白，
+    /// 依 HTML 折叠规则不产生内容；照常渲染会在单元格之间多出空白列/空行。
+    fn render_html_structural_children(
+        &self,
+        children: &[HtmlNode],
+        theme: &Theme,
+        style: HtmlStyle,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let mut rendered = Vec::with_capacity(children.len());
+        for child in children {
+            if html_is_whitespace_text(child) {
+                continue;
+            }
+            rendered.push(self.render_html_node(child, theme, style, cx));
+        }
+        rendered
+    }
+
+    /// 按 HTML 匿名盒模型渲染子节点：连续行内子节点合成一个可换行的行内流，
+    /// 块级子节点各自成块。
+    ///
+    /// rgpui 默认 `display: block`，会把每个行内子节点拆成独立行，段内文本被
+    /// 逐段断行、块高异常；此处显式还原行内流。文本节点按空白切成词块，使
+    /// 行内流可在词间断行。
+    fn render_html_flow_children(
+        &self,
+        children: &[HtmlNode],
+        theme: &Theme,
+        style: HtmlStyle,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let mut out: Vec<AnyElement> = Vec::with_capacity(children.len());
+        let mut run: Vec<AnyElement> = Vec::new();
+        for (index, child) in children.iter().enumerate() {
+            if html_is_whitespace_text(child) {
+                // 结构性空白：HTML 折叠空白，块级元素之间的换行/缩进不渲染。
+                // 仅当夹在两个行内节点之间时才折叠成一个空格，否则整段丢弃。
+                let prev_inline = index
+                    .checked_sub(1)
+                    .is_some_and(|prev| !html_node_is_block_level(&children[prev]));
+                let next_inline = children
+                    .get(index + 1)
+                    .is_some_and(|next| !html_node_is_block_level(next));
+                if prev_inline && next_inline && !run.is_empty() {
+                    run.push(
+                        div()
+                            .text_size(px(style.font_size))
+                            .text_color(style.color)
+                            .child(SharedString::from(" "))
+                            .into_any_element(),
+                    );
+                }
+                continue;
+            }
+            if html_node_is_block_level(child) {
+                push_html_inline_run(&mut run, &mut out);
+                out.push(self.render_html_node(child, theme, style, cx));
+            } else if child.tag_name == "#text" {
+                match split_html_text_at_blank_line(&child.raw_source) {
+                    Some((html_part, markdown_part)) => {
+                        // 空行之前的缩进/换行只是 HTML 块内结构空白，折叠后丢弃。
+                        let html_part = html_part.trim();
+                        if !html_part.is_empty() {
+                            for chunk in inline_word_chunks(html_part, false, false) {
+                                run.push(
+                                    div()
+                                        .min_w(px(0.0))
+                                        .text_size(px(style.font_size))
+                                        .text_color(style.color)
+                                        .child(SharedString::from(chunk.to_string()))
+                                        .into_any_element(),
+                                );
+                            }
+                        }
+                        // 空行之后按 Markdown 解析，使折叠区正文里的行内代码/强调正常渲染。
+                        let markdown = markdown_part.trim();
+                        if !markdown.is_empty() {
+                            let tree = crate::components::InlineTextTree::from_markdown(markdown);
+                            run.extend(self.render_inline_tree_children(
+                                &tree,
+                                theme,
+                                style.color,
+                                style.font_size,
+                                FontWeight::NORMAL,
+                                cx,
+                            ));
+                        }
+                    }
+                    None => {
+                        for chunk in inline_word_chunks(&child.raw_source, false, false) {
+                            run.push(
+                                div()
+                                    .min_w(px(0.0))
+                                    .text_size(px(style.font_size))
+                                    .text_color(style.color)
+                                    .child(SharedString::from(chunk.to_string()))
+                                    .into_any_element(),
+                            );
+                        }
+                    }
+                }
+            } else {
+                run.push(self.render_html_node(child, theme, style, cx));
+            }
+        }
+        push_html_inline_run(&mut run, &mut out);
+        out
     }
 
     /// 渲染 HTML 节点。
@@ -1362,7 +1513,8 @@ impl Block {
         node_style: HtmlVisualStyle,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let children = self.render_html_children(&node.children, theme, node_style.computed, cx);
+        let children =
+            self.render_html_structural_children(&node.children, theme, node_style.computed, cx);
         let mut element = div()
             .w_full()
             .flex()
@@ -1389,7 +1541,8 @@ impl Block {
         let mut element = div()
             .min_w(px(0.0))
             .flex_grow(1.)
-            .border(px(1.0))
+            .border_r(px(1.0))
+            .border_b(px(1.0))
             .border_color(theme.table_row_border)
             .px(px(d.table_cell_padding_x))
             .py(px(d.table_cell_padding_y))
@@ -1482,9 +1635,13 @@ impl Block {
         node_style: HtmlVisualStyle,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let children = self.render_html_children(&node.children, theme, node_style.computed, cx);
+        let children =
+            self.render_html_flow_children(&node.children, theme, node_style.computed, cx);
         let mut element = div()
             .w_full()
+            .min_w(px(0.0))
+            .flex()
+            .flex_col()
             .text_size(px(node_style.computed.font_size))
             .text_color(node_style.computed.color)
             .children(children);
@@ -1592,10 +1749,15 @@ impl Block {
         node_style: HtmlVisualStyle,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let children = self.render_html_children(&node.children, theme, node_style.computed, cx);
+        // 外框只画上/左两条边，单元格各自画右/下两条边：相邻格线不叠加成 2px，
+        // 整表得到 1px 的规整网格（对齐 GitHub 的 collapse 边框）。
+        let children =
+            self.render_html_structural_children(&node.children, theme, node_style.computed, cx);
         let mut element = div()
             .w_full()
-            .border(px(1.0))
+            .rounded_sm()
+            .border_t(px(1.0))
+            .border_l(px(1.0))
             .border_color(theme.table_row_border)
             .text_size(px(node_style.computed.font_size))
             .text_color(node_style.computed.color)
@@ -1614,7 +1776,8 @@ impl Block {
         node_style: HtmlVisualStyle,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let children = self.render_html_children(&node.children, theme, node_style.computed, cx);
+        let children =
+            self.render_html_structural_children(&node.children, theme, node_style.computed, cx);
         let mut element = div()
             .w_full()
             .flex()
@@ -1640,18 +1803,15 @@ impl Block {
             .children
             .iter()
             .find(|child| child.tag_name == "summary");
-        let body: Vec<&HtmlNode> = node
+        let body: Vec<HtmlNode> = node
             .children
             .iter()
             .filter(|child| child.tag_name != "summary")
+            .cloned()
             .collect();
         let mut summary_children = Vec::with_capacity(1);
         if let Some(summary) = summary {
             summary_children.push(self.render_html_node(summary, theme, node_style.computed, cx));
-        }
-        let mut body_children = Vec::with_capacity(body.len());
-        for child in body {
-            body_children.push(self.render_html_node(child, theme, node_style.computed, cx));
         }
 
         let mut container = div()
@@ -1682,6 +1842,10 @@ impl Block {
         }
 
         if is_open {
+            // 折叠区正文按 HTML 流渲染：结构空白折叠、空行后的内容按 Markdown 解析，
+            // 与 GitHub（HTML 块遇空行结束、其后为 Markdown 段落）保持一致。
+            let body_children =
+                self.render_html_flow_children(&body, theme, node_style.computed, cx);
             container = container.child(
                 div()
                     .w_full()
@@ -1750,15 +1914,20 @@ impl Block {
             .pr(px(padding_right))
             .cursor(cursor_style);
 
-        // 分隔线没有文本元素，自身不会记录块边界；这里补一次，
-        // 好让跨块选区按点命中能把它当成整块（点击即可选中）。
-        let base = if self.kind().is_separator() {
+        // 记录整块外壳边界：分隔线没有文本元素，自身不会记录块边界，
+        // 这里补一次好让跨块选区按点命中能把它当成整块（点击即可选中）；
+        // 其余块也记一份外壳边界，供鼠标按下时挡掉落在本块之外的误投递。
+        let base = {
             let entity = cx.entity();
+            let is_separator = self.kind().is_separator();
             base.on_prepaint(move |bounds, _window, cx| {
-                entity.update(cx, |block, _| block.last_bounds = Some(bounds));
+                entity.update(cx, |block, _| {
+                    block.last_shell_bounds = Some(bounds);
+                    if is_separator {
+                        block.last_bounds = Some(bounds);
+                    }
+                });
             })
-        } else {
-            base
         };
 
         if source_mode {
@@ -1942,7 +2111,12 @@ impl Render for Block {
 
         // 源码模式渲染：无格式的纯文本。数学公式与 Mermaid 块例外——聚焦时仍保留
         // 渲染结果，由下方分支叠加源码行（与图片编辑态一致）。
+        // HTML 块在正常渲染模式下同理：始终渲染预览，聚焦时由其分支叠加源码行；
+        // 源码文档模式下仍与其它源码块一样按纯源码渲染（含行号）。
+        let html_preview_mode =
+            self.kind() == BlockKind::HtmlBlock && !self.show_source_line_numbers();
         if self.is_source_raw_mode()
+            && !html_preview_mode
             && !matches!(self.kind(), BlockKind::MathBlock | BlockKind::MermaidBlock)
             && (focused
                 || !matches!(
@@ -2185,7 +2359,10 @@ impl Render for Block {
                 .children([
                     div()
                         .min_w(px(d.list_marker_width))
-                        .child(SharedString::new(bulleted_list_marker(self.render_depth))),
+                        .h(px(t.text_size * t.text_line_height))
+                        .flex()
+                        .items_center()
+                        .child(bulleted_list_marker(self.render_depth, &theme, t.text_size)),
                     if showing_rendered_image || self.showing_image_source_with_render() {
                         self.render_list_item_image(
                             focused,
@@ -3088,6 +3265,13 @@ impl Render for Block {
                 }
             }
             BlockKind::HtmlBlock => {
+                if !focused {
+                    self.cursor_blink_task = None;
+                    self.last_layout = None;
+                    self.last_bounds = None;
+                } else if self.cursor_blink_task.is_none() {
+                    self.start_cursor_blink(cx);
+                }
                 let html = self.record.html.as_ref().cloned().unwrap_or_else(|| {
                     crate::components::parse_html_document(
                         self.record
@@ -3096,11 +3280,35 @@ impl Render for Block {
                             .unwrap_or_else(|| self.rendered_text()),
                     )
                 });
+                let rendered = self.render_html_document(&html, &theme, cx);
+                // 聚焦时源码行叠加在预览上方，预览保持可见、可直接编辑源码（对齐图片/公式/图表）。
+                let child = if focused {
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .gap(px(d.block_padding_y))
+                        .child(TextBlockElement::new(cx.entity(), is_placeholder))
+                        .child(rendered)
+                        .into_any_element()
+                } else {
+                    rendered.into_any_element()
+                };
+                // 未聚焦时没有文本元素写入 `last_bounds`，这里补整块边界，供跨块选区按点命中。
+                let entity = cx.entity();
                 focused_base
                     .text_size(px(t.text_size))
                     .text_color(theme.foreground)
                     .line_height(rems(t.text_line_height))
-                    .child(self.render_html_document(&html, &theme, cx))
+                    .w_full()
+                    .child(child)
+                    .on_prepaint(move |bounds, _window, cx| {
+                        entity.update(cx, |block, _| {
+                            if block.last_layout.is_none() {
+                                block.last_bounds = Some(bounds);
+                            }
+                        });
+                    })
                     .into_any_element()
             }
             BlockKind::MathBlock => {
@@ -3259,6 +3467,25 @@ impl Element for LinkCursor {
     }
 }
 
+/// 按 CommonMark 的 HTML 块规则拆分文本节点：遇到首个空行即结束 HTML 块，
+/// 其后的内容按 Markdown 解析（GitHub 同此，例如 `<details>` 折叠区正文）。
+/// 返回 `(HTML 块内原文, 空行之后的 Markdown)`；无空行时返回 `None`，整段仍是 HTML 块内文本。
+fn split_html_text_at_blank_line(raw: &str) -> Option<(&str, &str)> {
+    let bytes = raw.as_bytes();
+    let mut line_start = 0usize;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] == b'\n' {
+            if raw[line_start..index].trim().is_empty() {
+                return Some((&raw[..line_start], &raw[index + 1..]));
+            }
+            line_start = index + 1;
+        }
+        index += 1;
+    }
+    None
+}
+
 /// 切分行内词块以供换行。
 fn inline_word_chunks(text: &str, code: bool, has_background: bool) -> Vec<&str> {
     if text.is_empty() {
@@ -3273,7 +3500,8 @@ fn inline_word_chunks(text: &str, code: bool, has_background: bool) -> Vec<&str>
 #[cfg(test)]
 mod tests {
     use super::{
-        HtmlStyle, column_axis_gutter_visible, html_node_visual_style, inline_word_chunks,
+        HtmlStyle, column_axis_gutter_visible, html_is_whitespace_text, html_node_is_block_level,
+        html_node_visual_style, inline_word_chunks, split_html_text_at_blank_line,
     };
     use crate::components::{AxisMarker, TableAxisKind};
     use crate::components::{Block, BlockKind, BlockRecord, InlineTextTree, parse_html_document};
@@ -3282,7 +3510,6 @@ mod tests {
 
     #[test]
     fn top_gutter_only_appears_for_column_axis_state() {
-        assert!(!column_axis_gutter_visible(None, None));
         assert!(!column_axis_gutter_visible(
             Some(AxisMarker {
                 kind: TableAxisKind::Row,
@@ -3290,6 +3517,7 @@ mod tests {
             }),
             None,
         ));
+        assert!(!column_axis_gutter_visible(None, None));
         assert!(column_axis_gutter_visible(
             Some(AxisMarker {
                 kind: TableAxisKind::Column,
@@ -3314,6 +3542,57 @@ mod tests {
         assert!((channel(color.g) - green as i16).abs() <= 1);
         assert!((channel(color.b) - blue as i16).abs() <= 1);
         assert!((channel(color.a) - alpha as i16).abs() <= 1);
+    }
+
+    #[test]
+    fn html_flow_treats_br_and_img_as_inline() {
+        // 行内标签、文本节点以及 br/img 都归入行内流；嵌套块级标签各自成块。
+        let doc = parse_html_document("<p>a<br>b</p>");
+        let paragraph = &doc.nodes[0];
+        assert!(html_node_is_block_level(paragraph));
+        assert!(
+            paragraph
+                .children
+                .iter()
+                .all(|child| !html_node_is_block_level(child))
+        );
+
+        let nested = parse_html_document("<div><p>x</p></div>");
+        assert!(html_node_is_block_level(&nested.nodes[0]));
+        assert!(html_node_is_block_level(&nested.nodes[0].children[0]));
+    }
+
+    #[test]
+    fn html_table_structural_children_drop_whitespace() {
+        // 表格结构容器只保留表格元素，源码缩进/换行属结构性空白。
+        let doc = parse_html_document(
+            "<table>\n  <thead>\n    <tr><th>a</th></tr>\n  </thead>\n  <tbody></tbody>\n</table>",
+        );
+        let table = &doc.nodes[0];
+        let significant: Vec<&str> = table
+            .children
+            .iter()
+            .filter(|child| !html_is_whitespace_text(child))
+            .map(|child| child.tag_name.as_str())
+            .collect();
+        assert_eq!(significant, vec!["thead", "tbody"]);
+        assert!(
+            table.children.iter().any(html_is_whitespace_text),
+            "样例源码应含结构性空白，否则本测试失去意义"
+        );
+    }
+
+    #[test]
+    fn html_text_after_blank_line_splits_for_markdown() {
+        // 空行结束 HTML 块：之前是块内原文，之后按 Markdown 解析。
+        assert_eq!(
+            split_html_text_at_blank_line("\n\n隐藏内容，含 `code`。\n\n"),
+            Some(("", "\n隐藏内容，含 `code`。\n\n")),
+        );
+        assert_eq!(split_html_text_at_blank_line("a\n\nb"), Some(("a\n", "b")));
+        // 无空行：整段仍属 HTML 块内文本，保持原样。
+        assert_eq!(split_html_text_at_blank_line("foo\nbar"), None);
+        assert_eq!(split_html_text_at_blank_line(""), None);
     }
 
     #[test]

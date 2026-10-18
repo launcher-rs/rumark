@@ -10,15 +10,15 @@ use rgpui::*;
 
 use crate::app_identity::RUMARK_APP_ID;
 use crate::components::{
-    AddLanguageConfig, AddThemeConfig, CloseWindow, CopyHtml, CopyMarkdown, ExportDocx, ExportHtml,
-    ExportPdf, InstallCliTool, NewWindow, NoRecentFiles, OpenFile, OpenPreferences, OpenRecentFile,
-    QuitApplication, SaveDocument, SaveDocumentAs, SelectLanguage, SelectTheme, ShowAbout,
-    ToggleWorkspace, UninstallCliTool,
+    AddLanguageConfig, AddThemeConfig, ClearRecentFiles, CloseWindow, CopyHtml, CopyMarkdown,
+    ExportDocx, ExportHtml, ExportPdf, InstallCliTool, NewWindow, NoRecentFiles, OpenFile,
+    OpenPreferences, OpenRecentFile, QuitApplication, SaveDocument, SaveDocumentAs, SelectLanguage,
+    SelectTheme, ShowAbout, ToggleWorkspace, UninstallCliTool,
 };
 use crate::config::{
-    apply_configured_language, apply_configured_theme, import_language_config_and_select,
-    import_theme_config_and_select, open_preferences_window, read_recent_files, record_recent_file,
-    remove_recent_file,
+    apply_configured_language, apply_configured_theme, clear_recent_files,
+    import_language_config_and_select, import_theme_config_and_select, open_preferences_window,
+    read_recent_files, record_recent_file, remove_recent_file,
 };
 use crate::editor::Editor;
 use crate::i18n::I18nManager;
@@ -143,6 +143,16 @@ pub(crate) fn open_file_preferring_blank_window(
 fn record_recent_file_and_refresh(path: &Path, cx: &mut App) {
     if let Err(err) = record_recent_file(path) {
         eprintln!("failed to update recent file history: {err}");
+        return;
+    }
+    install_menus(cx);
+    cx.refresh_windows();
+}
+
+/// 清空最近文件历史并刷新菜单与窗口。
+fn clear_recent_files_and_refresh(cx: &mut App) {
+    if let Err(err) = clear_recent_files() {
+        eprintln!("failed to clear recent file history: {err}");
         return;
     }
     install_menus(cx);
@@ -564,6 +574,8 @@ pub(crate) fn dispatch_menu_action(action: &dyn Action, cx: &mut App) {
     } else if let Some(action) = action.as_any().downcast_ref::<OpenRecentFile>() {
         open_recent_file(cx, PathBuf::from(&action.path));
     } else if action.as_any().is::<NoRecentFiles>() {
+    } else if action.as_any().is::<ClearRecentFiles>() {
+        clear_recent_files_and_refresh(cx);
     } else if action.as_any().is::<AddLanguageConfig>() {
         prompt_and_import_language_config(cx);
     } else if action.as_any().is::<AddThemeConfig>() {
@@ -703,7 +715,7 @@ fn build_menus(
             NoRecentFiles,
         )]
     } else {
-        recent_files
+        let mut items = recent_files
             .iter()
             .map(|path| {
                 // `into_owned` 在常见的有效 UTF-8 路径下复用 `Cow::Owned` 不再拷贝，
@@ -711,7 +723,13 @@ fn build_menus(
                 let label = path.to_string_lossy().into_owned();
                 MenuItem::action(label.clone(), OpenRecentFile { path: label })
             })
-            .collect()
+            .collect::<Vec<_>>();
+        items.push(MenuItem::separator());
+        items.push(MenuItem::action(
+            i18n_manager.t("menu_file_recent_clear", &[]),
+            ClearRecentFiles,
+        ));
+        items
     };
 
     #[cfg(target_os = "macos")]
@@ -1064,6 +1082,9 @@ pub(crate) fn init(cx: &mut App) {
     cx.on_action(|_: &NoRecentFiles, cx| {
         dispatch_menu_action(&NoRecentFiles, cx);
     });
+    cx.on_action(|_: &ClearRecentFiles, cx| {
+        dispatch_menu_action(&ClearRecentFiles, cx);
+    });
     cx.on_action(|_: &AddLanguageConfig, cx| {
         dispatch_menu_action(&AddLanguageConfig, cx);
     });
@@ -1118,8 +1139,8 @@ pub(crate) fn init(cx: &mut App) {
 mod tests {
     use super::{applescript_string_literal, build_menus};
     use crate::components::{
-        AddLanguageConfig, AddThemeConfig, NoRecentFiles, OpenRecentFile, SelectLanguage,
-        SelectTheme, ShowAbout,
+        AddLanguageConfig, AddThemeConfig, ClearRecentFiles, NoRecentFiles, OpenRecentFile,
+        SelectLanguage, SelectTheme, ShowAbout,
     };
     use crate::i18n::I18nManager;
     use crate::theme::{THEME_ID_DARK, THEME_ID_LIGHT};
@@ -1386,7 +1407,7 @@ mod tests {
         #[cfg(not(target_os = "macos"))]
         let recent_menu = submenu(&menus[0].items[3]);
 
-        assert_eq!(recent_menu.items.len(), 2);
+        assert_eq!(recent_menu.items.len(), 4);
         assert_eq!(action_name(&recent_menu.items[0]), r"C:\docs\one.md");
         match &recent_menu.items[0] {
             MenuItem::Action { action, .. } => {
@@ -1397,6 +1418,15 @@ mod tests {
                 assert_eq!(action.path, r"C:\docs\one.md");
             }
             _ => panic!("expected recent-file action item"),
+        }
+        assert_eq!(action_name(&recent_menu.items[1]), r"D:\notes\two.markdown");
+        assert!(matches!(recent_menu.items[2], MenuItem::Separator));
+        assert_eq!(action_name(&recent_menu.items[3]), "Clear Recent Files");
+        match &recent_menu.items[3] {
+            MenuItem::Action { action, .. } => {
+                assert!(action.as_any().is::<ClearRecentFiles>());
+            }
+            _ => panic!("expected clear-recent-files action item"),
         }
     }
 

@@ -117,6 +117,11 @@ pub(crate) fn remove_recent_file(path: &Path) -> anyhow::Result<Vec<PathBuf>> {
     remove_recent_file_with_dirs(path, &RumarkConfigDirs::from_system()?)
 }
 
+/// 清空最近文件历史。
+pub(crate) fn clear_recent_files() -> anyhow::Result<()> {
+    clear_recent_files_with_dirs(&RumarkConfigDirs::from_system()?)
+}
+
 /// 用指定目录集读取最近文件历史。
 pub(crate) fn read_recent_files_with_dirs(dirs: &RumarkConfigDirs) -> anyhow::Result<Vec<PathBuf>> {
     let path = dirs.history_file();
@@ -161,6 +166,11 @@ pub(crate) fn remove_recent_file_with_dirs(
     paths.retain(|existing| !same_recent_path(existing, path));
     write_recent_files_with_dirs(&paths, dirs)?;
     Ok(paths)
+}
+
+/// 用指定目录集清空最近文件历史。
+pub(crate) fn clear_recent_files_with_dirs(dirs: &RumarkConfigDirs) -> anyhow::Result<()> {
+    write_recent_files_with_dirs(&[], dirs)
 }
 
 /// 将最近文件列表写回历史文件。
@@ -259,13 +269,24 @@ fn has_rumark_temp_fixture_name(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// 比较两条最近文件路径是否相同。
+/// 比较两条最近文件路径是否指向同一文件。
 fn same_recent_path(left: &Path, right: &Path) -> bool {
+    recent_path_key(left) == recent_path_key(right)
+}
+
+/// 计算用于去重的路径比较键。
+///
+/// 同一文件可能以不同写法被记录（相对/绝对、`.`/`..` 段、Windows 的 `/` 与 `\`、
+/// 长路径前缀 `\\?\`、大小写等），逐字比较字符串会留下重复项。已存在的路径先做
+/// 规范化解析，失败时退回原路径；仅在比较时使用，不改写历史文件里保存的原始写法。
+fn recent_path_key(path: &Path) -> String {
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if cfg!(windows) {
-        left.to_string_lossy()
-            .eq_ignore_ascii_case(&right.to_string_lossy())
+        let text = resolved.to_string_lossy().replace('\\', "/");
+        let text = text.strip_prefix("//?/").unwrap_or(&text);
+        text.to_ascii_lowercase()
     } else {
-        left == right
+        resolved.to_string_lossy().into_owned()
     }
 }
 
@@ -423,9 +444,9 @@ pub(crate) fn object_without_empty_values(mut object: Map<String, Value>) -> Map
 #[cfg(test)]
 mod tests {
     use super::{
-        RECENT_LIMIT, RumarkConfigDirs, drop_empty_json_values, parse_jsonc,
-        read_recent_files_with_dirs, record_recent_file_with_dirs, remove_jsonc_comments,
-        remove_recent_file_with_dirs, sanitize_config_stem,
+        RECENT_LIMIT, RumarkConfigDirs, clear_recent_files_with_dirs, drop_empty_json_values,
+        parse_jsonc, read_recent_files_with_dirs, record_recent_file_with_dirs,
+        remove_jsonc_comments, remove_recent_file_with_dirs, sanitize_config_stem,
     };
     use serde_json::json;
     use std::path::{Path, PathBuf};
@@ -635,6 +656,55 @@ mod tests {
         assert!(paths.is_empty());
         assert!(!dirs.history_file().exists());
         assert!(read_recent_files_with_dirs(&dirs).unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn clearing_recent_history_removes_the_history_file() {
+        let root = std::env::temp_dir().join(format!("rumark-config-{}", uuid::Uuid::new_v4()));
+        let dirs = RumarkConfigDirs::from_root(&root);
+        record_recent_file_with_dirs(&PathBuf::from("one.md"), &dirs).unwrap();
+        assert!(dirs.history_file().exists());
+
+        clear_recent_files_with_dirs(&dirs).unwrap();
+
+        assert!(!dirs.history_file().exists());
+        assert!(read_recent_files_with_dirs(&dirs).unwrap().is_empty());
+        // 再次清空应保持幂等（历史文件已不存在）。
+        clear_recent_files_with_dirs(&dirs).unwrap();
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn recent_history_deduplicates_equivalent_path_spellings() {
+        let root = std::env::temp_dir().join(format!("rumark-config-{}", uuid::Uuid::new_v4()));
+        let dirs = RumarkConfigDirs::from_root(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("notes.md");
+        std::fs::write(&file, "note").unwrap();
+        let canonical = file.canonicalize().unwrap();
+        let canonical_text = canonical.display().to_string();
+
+        // 同一文件的另一种写法：Windows 换用正斜杠；其他平台插入 `.` 段。
+        #[cfg(windows)]
+        let alternate_text = canonical_text.replace('\\', "/");
+        #[cfg(not(windows))]
+        let alternate_text = format!("{}/./notes.md", canonical.parent().unwrap().display());
+        assert_ne!(
+            canonical_text, alternate_text,
+            "两种写法文本应不同，否则测试失去意义"
+        );
+
+        std::fs::write(
+            dirs.history_file(),
+            format!("{canonical_text}\n{alternate_text}\n"),
+        )
+        .unwrap();
+
+        let paths = read_recent_files_with_dirs(&dirs).unwrap();
+        assert_eq!(paths.len(), 1, "同一文件的两种写法应去重：{paths:?}");
 
         let _ = std::fs::remove_dir_all(root);
     }

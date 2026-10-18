@@ -30,6 +30,7 @@
   "menu_file_recent": "Open Recent File",
   "menu_file_preferences": "Preferences",
   "menu_file_recent_empty": "No Recent Files",
+  "menu_file_recent_clear": "Clear Recent Files",
   "menu_file_save": "Save",
   "menu_file_save_as": "Save As",
   "menu_file_quit": "Quit",

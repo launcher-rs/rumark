@@ -3917,6 +3917,292 @@ async fn toggle_view_mode_preserves_table_cell_position(cx: &mut TestAppContext)
 }
 
 #[rgpui::test]
+async fn clicking_html_block_focuses_source_for_editing(cx: &mut TestAppContext) {
+    init_editor_test_app(cx);
+    let markdown = "<div class=\"note\">\n  <p>HTML 块。</p>\n</div>\n".to_string();
+    let (editor, cx) = cx.add_window_view(|_window, cx| Editor::from_markdown(cx, markdown, None));
+    for _ in 0..4 {
+        redraw(cx);
+    }
+    let (entity, bounds) = editor.read_with(cx, |editor, cx| {
+        let block = editor.document.visible_blocks()[0].entity.clone();
+        let bounds = block.read(cx).last_bounds.expect("html block bounds");
+        (block, bounds)
+    });
+    let point = rgpui::point(
+        bounds.left() + rgpui::px(20.0),
+        bounds.top() + rgpui::px(8.0),
+    );
+    cx.simulate_click(point, rgpui::Modifiers::none());
+    redraw(cx);
+    cx.update(|window, cx| {
+        let block = entity.read(cx);
+        assert!(
+            block.focus_handle.is_focused(window),
+            "点击 HTML 块后源码行应获得焦点"
+        );
+        let sel = block.selected_range.clone();
+        assert_eq!(sel.start, sel.end, "点击后光标应落在源码行内");
+    });
+}
+
+#[rgpui::test]
+async fn clicking_html_block_source_line_keeps_focus(cx: &mut TestAppContext) {
+    init_editor_test_app(cx);
+    let markdown = "<div class=\"note\">\n  <p>HTML 块。</p>\n</div>\n".to_string();
+    let (editor, cx) = cx.add_window_view(|_window, cx| Editor::from_markdown(cx, markdown, None));
+    for _ in 0..4 {
+        redraw(cx);
+    }
+    let entity = editor.read_with(cx, |editor, _cx| {
+        editor.document.visible_blocks()[0].entity.clone()
+    });
+    let bounds = entity.read_with(cx, |block, _cx| block.last_bounds.expect("bounds"));
+    // 首次点击聚焦，源码行出现。
+    cx.simulate_click(
+        rgpui::point(
+            bounds.left() + rgpui::px(20.0),
+            bounds.top() + rgpui::px(6.0),
+        ),
+        rgpui::Modifiers::none(),
+    );
+    for _ in 0..2 {
+        redraw(cx);
+    }
+    let focused_bounds = entity.read_with(cx, |block, _cx| {
+        block.last_layout.as_ref().and(block.last_bounds)
+    });
+    let point = rgpui::point(
+        focused_bounds.unwrap_or(bounds).left() + rgpui::px(20.0),
+        bounds.top() + rgpui::px(6.0),
+    );
+    // 再次点击源码行：应保持聚焦、光标落在源码内，不隐藏源码。
+    cx.simulate_click(point, rgpui::Modifiers::none());
+    for _ in 0..2 {
+        redraw(cx);
+    }
+    cx.update(|window, cx| {
+        let block = entity.read(cx);
+        assert!(
+            block.focus_handle.is_focused(window),
+            "点击 HTML 源码行后不应失焦/隐藏源码"
+        );
+        assert!(
+            block.last_layout.is_some(),
+            "点击源码行后源码文本布局应仍在"
+        );
+    });
+
+    // 再点预览区域（源码行下方）：同样应保持聚焦，不隐藏源码。
+    let preview_bounds = entity.read_with(cx, |block, _cx| block.last_bounds.expect("bounds"));
+    cx.simulate_click(
+        rgpui::point(
+            preview_bounds.left() + rgpui::px(20.0),
+            preview_bounds.bottom() - rgpui::px(6.0),
+        ),
+        rgpui::Modifiers::none(),
+    );
+    for _ in 0..2 {
+        redraw(cx);
+    }
+    cx.update(|window, cx| {
+        let block = entity.read(cx);
+        assert!(
+            block.focus_handle.is_focused(window),
+            "点击 HTML 预览区后不应失焦/隐藏源码"
+        );
+    });
+
+    // 真实鼠标点击常带 1-2px 抖动（按下 → 小幅移动 → 抬起）：
+    // 在源码行上模拟，仍应保持聚焦、不隐藏源码。
+    let drag_bounds = entity.read_with(cx, |block, _cx| block.last_bounds.expect("bounds"));
+    let source_start = rgpui::point(
+        drag_bounds.left() + rgpui::px(30.0),
+        drag_bounds.top() + rgpui::px(6.0),
+    );
+    let source_end = rgpui::point(
+        drag_bounds.left() + rgpui::px(34.0),
+        drag_bounds.top() + rgpui::px(9.0),
+    );
+    cx.simulate_mouse_down(
+        source_start,
+        rgpui::MouseButton::Left,
+        rgpui::Modifiers::none(),
+    );
+    cx.simulate_mouse_move(
+        source_end,
+        rgpui::MouseButton::Left,
+        rgpui::Modifiers::none(),
+    );
+    cx.simulate_mouse_up(
+        source_end,
+        rgpui::MouseButton::Left,
+        rgpui::Modifiers::none(),
+    );
+    for _ in 0..2 {
+        redraw(cx);
+    }
+    cx.update(|window, cx| {
+        let block = entity.read(cx);
+        assert!(
+            block.focus_handle.is_focused(window),
+            "小幅拖拽点击源码行后不应失焦/隐藏源码"
+        );
+    });
+}
+
+/// 开一个测试窗口加载 `markdown`（前置一个段落以满足聚焦块、使 HTML 块保持非聚焦预览），
+/// 返回该 HTML 块的渲染高度与窗口上下文。
+fn html_block_height(
+    cx: &mut TestAppContext,
+    markdown: String,
+) -> (f32, &mut rgpui::VisualTestContext) {
+    let markdown = format!("前导段落\n\n{markdown}");
+    let (editor, cx) = cx.add_window_view(|_window, cx| Editor::from_markdown(cx, markdown, None));
+    for _ in 0..4 {
+        redraw(cx);
+    }
+    let height = editor.read_with(cx, |editor, cx| {
+        editor
+            .document
+            .visible_blocks()
+            .iter()
+            .find(|visible| visible.entity.read(cx).kind() == BlockKind::HtmlBlock)
+            .and_then(|visible| visible.entity.read(cx).last_shell_bounds)
+            .map(|bounds| f32::from(bounds.size.height))
+            .expect("html table block bounds")
+    });
+    (height, cx)
+}
+
+#[rgpui::test]
+async fn html_table_structural_whitespace_does_not_add_height(cx: &mut TestAppContext) {
+    init_editor_test_app(cx);
+    // 同一张表两种写法：带缩进换行 vs 紧凑单行。table/thead/tbody/tr 内的换行与缩进
+    // 属结构性空白，HTML 折叠规则应将其丢弃，两种写法渲染高度须一致
+    //（回归：曾因未折叠空白而在表内多出空行）。
+    let pretty = concat!(
+        "<table>\n",
+        "  <thead>\n",
+        "    <tr><th>列 A</th><th>列 B</th></tr>\n",
+        "  </thead>\n",
+        "  <tbody>\n",
+        "    <tr><td>1</td><td>2</td></tr>\n",
+        "  </tbody>\n",
+        "</table>\n",
+    )
+    .to_string();
+    let compact = concat!(
+        "<table><thead><tr><th>列 A</th><th>列 B</th></tr></thead>",
+        "<tbody><tr><td>1</td><td>2</td></tr></tbody></table>\n",
+    )
+    .to_string();
+
+    let (pretty_height, cx) = html_block_height(cx, pretty);
+    let (compact_height, _cx) = html_block_height(cx, compact);
+    assert!(
+        (pretty_height - compact_height).abs() < 0.5,
+        "表格结构空白不应改变渲染高度：pretty={pretty_height} compact={compact_height}"
+    );
+}
+
+#[rgpui::test]
+async fn stray_mouse_down_outside_block_shell_does_not_steal_focus(cx: &mut TestAppContext) {
+    init_editor_test_app(cx);
+    let markdown = "段落\n\n---\n\n<div class=\"note\">\n  <p>HTML 块。</p>\n</div>\n".to_string();
+    let (editor, cx) = cx.add_window_view(|_window, cx| Editor::from_markdown(cx, markdown, None));
+    for _ in 0..4 {
+        redraw(cx);
+    }
+    let (separator, far_point) = editor.read_with(cx, |editor, cx| {
+        let separator = editor
+            .document
+            .visible_blocks()
+            .iter()
+            .find(|visible| visible.entity.read(cx).kind() == BlockKind::Separator)
+            .expect("separator")
+            .entity
+            .clone();
+        let shell = separator
+            .read(cx)
+            .last_shell_bounds
+            .expect("separator shell bounds");
+        let far_point = rgpui::point(
+            shell.left() + rgpui::px(20.0),
+            shell.bottom() + rgpui::px(80.0),
+        );
+        (separator, far_point)
+    });
+    let event = rgpui::MouseDownEvent {
+        button: rgpui::MouseButton::Left,
+        position: far_point,
+        modifiers: rgpui::Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    };
+    cx.update(|window, app| {
+        separator.update(app, |block, cx| block.on_mouse_down(&event, window, cx));
+    });
+    editor.read_with(cx, |editor, _cx| {
+        assert_ne!(
+            editor.active_entity_id,
+            Some(separator.entity_id()),
+            "落在块外壳之外的误投递鼠标按下不应让它抢走焦点"
+        );
+    });
+}
+
+#[rgpui::test]
+async fn clicking_html_block_below_separator_keeps_focus(cx: &mut TestAppContext) {
+    init_editor_test_app(cx);
+    let markdown = "---\n\n<div class=\"note\">\n  <p>HTML 块。</p>\n</div>\n".to_string();
+    let (editor, cx) = cx.add_window_view(|_window, cx| Editor::from_markdown(cx, markdown, None));
+    for _ in 0..4 {
+        redraw(cx);
+    }
+    let (separator, html_block, anchor) = editor.read_with(cx, |editor, cx| {
+        let separator = editor
+            .document
+            .visible_blocks()
+            .iter()
+            .find(|visible| visible.entity.read(cx).kind() == BlockKind::Separator)
+            .expect("separator")
+            .entity
+            .clone();
+        let html_block = editor
+            .document
+            .visible_blocks()
+            .iter()
+            .find(|visible| visible.entity.read(cx).kind() == BlockKind::HtmlBlock)
+            .expect("html block")
+            .entity
+            .clone();
+        let separator_bounds = separator.read(cx).last_bounds.expect("separator bounds");
+        (separator, html_block, separator_bounds)
+    });
+    for offset in [16.0f32, 40.0, 52.0] {
+        let point = rgpui::point(
+            anchor.left() + rgpui::px(40.0),
+            anchor.bottom() + rgpui::px(offset),
+        );
+        cx.simulate_click(point, rgpui::Modifiers::none());
+        for _ in 0..2 {
+            redraw(cx);
+        }
+    }
+    cx.update(|window, cx| {
+        assert!(
+            html_block.read(cx).focus_handle.is_focused(window),
+            "点击分隔线下方的 HTML 块后应保持聚焦（源码行不应被隐藏）"
+        );
+        assert!(
+            !separator.read(cx).focus_handle.is_focused(window),
+            "分隔线不应因误投递的鼠标按下而抢走焦点"
+        );
+    });
+}
+
+#[rgpui::test]
 async fn toggle_view_mode_preserves_callout_table_cell_position(cx: &mut TestAppContext) {
     let markdown = [
         "> [!NOTE]",
