@@ -33,12 +33,17 @@ mod events;
 mod file_drop;
 mod find;
 mod history;
+mod image_menu;
 mod persistence;
 mod render;
 mod selection;
 mod source_map;
 mod status_bar;
 mod table_edit;
+/// 测试用：统计右键弹出菜单的构造次数，用于回归“单次右键只弹一层菜单”。
+#[cfg(test)]
+pub(crate) static MENU_BUILD_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 #[cfg(test)]
 mod tests;
 mod tree;

@@ -718,6 +718,9 @@ impl Render for Editor {
                             let footnote_spacing = spacing_for(footnote_end);
                             let entity = visible_blocks[footnote_end].entity.clone();
                             let row = div()
+                                .id(ElementId::Name(
+                                    format!("editor-row-{:?}", entity.entity_id()).into(),
+                                ))
                                 .w_full()
                                 .flex_shrink_0()
                                 .mt(px(footnote_row_top_gap(previous_footnote_row, d.block_gap)))
@@ -764,6 +767,9 @@ impl Render for Editor {
 
                     let entity = visible_blocks[group_end].entity.clone();
                     let row = div()
+                        .id(ElementId::Name(
+                            format!("editor-row-{:?}", entity.entity_id()).into(),
+                        ))
                         .w_full()
                         .flex_shrink_0()
                         .mt(px(callout_row_top_gap(
@@ -832,6 +838,9 @@ impl Render for Editor {
                     let row_spacing = spacing_for(group_end);
                     let entity = visible_blocks[group_end].entity.clone();
                     let row = div()
+                        .id(ElementId::Name(
+                            format!("editor-row-{:?}", entity.entity_id()).into(),
+                        ))
                         .w_full()
                         .flex_shrink_0()
                         .mt(px(footnote_row_top_gap(previous_footnote_row, d.block_gap)))
@@ -877,6 +886,9 @@ impl Render for Editor {
 
             let entity = first_visible.entity.clone();
             let row = div()
+                .id(ElementId::Name(
+                    format!("editor-row-{:?}", entity.entity_id()).into(),
+                ))
                 .w(px(centered_width))
                 .max_w(relative(1.0))
                 .flex_shrink_0()

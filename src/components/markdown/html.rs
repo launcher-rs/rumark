@@ -97,6 +97,8 @@ impl Eq for HtmlInlineStyle {}
 pub(crate) struct HtmlImageBlock {
     pub(crate) src: String,
     pub(crate) alt: String,
+    /// 可选标题（`title` 属性）。
+    pub(crate) title: Option<String>,
     pub(crate) zoom: f32,
 }
 
@@ -681,11 +683,20 @@ pub(crate) fn parse_html_image_block(raw_source: &str) -> Option<HtmlImageBlock>
     let alt = attr_value_in_attrs(&token.attrs, "alt")
         .unwrap_or_default()
         .to_string();
+    let title = attr_value_in_attrs(&token.attrs, "title")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
     let zoom = attr_value_in_attrs(&token.attrs, "style")
         .and_then(parse_html_zoom)
         .unwrap_or(1.0);
 
-    Some(HtmlImageBlock { src, alt, zoom })
+    Some(HtmlImageBlock {
+        src,
+        alt,
+        title,
+        zoom,
+    })
 }
 
 /// 在属性列表中取值。

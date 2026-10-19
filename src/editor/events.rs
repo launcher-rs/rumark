@@ -292,7 +292,7 @@ impl Editor {
     }
 
     /// 获取图片粘贴的基准目录（文档所在目录或当前目录）。
-    fn image_paste_root_dir(&self) -> anyhow::Result<PathBuf> {
+    pub(super) fn image_paste_root_dir(&self) -> anyhow::Result<PathBuf> {
         if let Some(parent) = self.file_path.as_ref().and_then(|path| path.parent()) {
             return Ok(parent.to_path_buf());
         }
@@ -300,7 +300,7 @@ impl Editor {
     }
 
     /// 按剪贴板图片格式返回文件扩展名。
-    fn clipboard_image_extension(format: ImageFormat) -> &'static str {
+    pub(super) fn clipboard_image_extension(format: ImageFormat) -> &'static str {
         match format {
             ImageFormat::Png => "png",
             ImageFormat::Jpeg => "jpg",
@@ -358,7 +358,7 @@ impl Editor {
     }
 
     /// 在目录内生成不冲突的文件名（含序号后缀）。
-    fn unique_file_path(dir: &Path, preferred_name: &str) -> PathBuf {
+    pub(super) fn unique_file_path(dir: &Path, preferred_name: &str) -> PathBuf {
         let preferred = Path::new(preferred_name);
         let stem = preferred
             .file_stem()
@@ -395,7 +395,7 @@ impl Editor {
     }
 
     /// 落盘粘贴的图片并返回路径与是否相对引用。
-    fn materialize_pasted_image(
+    pub(super) fn materialize_pasted_image(
         &self,
         source: &PastedImageSource,
     ) -> anyhow::Result<(PathBuf, bool)> {
@@ -447,12 +447,12 @@ impl Editor {
     }
 
     /// 把路径转为 Markdown 可用的斜杠形式。
-    fn markdown_path_string(path: &Path) -> String {
+    pub(super) fn markdown_path_string(path: &Path) -> String {
         path.to_string_lossy().replace('\\', "/")
     }
 
     /// 转义图片目标路径中的特殊字符。
-    fn markdown_image_target(path: &str) -> String {
+    pub(super) fn markdown_image_target(path: &str) -> String {
         path.chars()
             .flat_map(|ch| match ch {
                 '\\' | '(' | ')' | '"' => ['\\', ch].into_iter().collect::<Vec<_>>(),
@@ -477,13 +477,13 @@ impl Editor {
     }
 
     /// 计算相对基准目录的 `./` 开头图片路径。
-    fn relative_markdown_path(root_dir: &Path, path: &Path) -> Option<String> {
+    pub(super) fn relative_markdown_path(root_dir: &Path, path: &Path) -> Option<String> {
         let relative = path.strip_prefix(root_dir).ok()?;
         Some(format!("./{}", Self::markdown_path_string(relative)))
     }
 
     /// 按文件扩展名推断内嵌 `data:` URI 的 MIME 类型。
-    fn embedded_mime_for_extension(path: &Path) -> &'static str {
+    pub(super) fn embedded_mime_for_extension(path: &Path) -> &'static str {
         match path
             .extension()
             .and_then(|ext| ext.to_str())
@@ -503,7 +503,7 @@ impl Editor {
     }
 
     /// 按剪贴板图片格式推断内嵌 `data:` URI 的 MIME 类型。
-    fn embedded_mime_for_format(format: ImageFormat) -> &'static str {
+    pub(super) fn embedded_mime_for_format(format: ImageFormat) -> &'static str {
         match format {
             ImageFormat::Png => "image/png",
             ImageFormat::Jpeg => "image/jpeg",
@@ -518,7 +518,7 @@ impl Editor {
     }
 
     /// 把字节编码为内嵌 `data:` URI（base64 单文件便携）。
-    fn embedded_data_uri(mime: &str, bytes: &[u8]) -> String {
+    pub(super) fn embedded_data_uri(mime: &str, bytes: &[u8]) -> String {
         use base64::Engine as _;
         let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
         format!("data:{mime};base64,{encoded}")
@@ -528,7 +528,7 @@ impl Editor {
     const MAX_EMBED_BYTES: usize = 5 * 1024 * 1024;
 
     /// 校验内嵌字节体积，超限返回中文友好错误（经粘贴错误弹窗展示）。
-    fn check_embedded_size(bytes_len: usize) -> anyhow::Result<()> {
+    pub(super) fn check_embedded_size(bytes_len: usize) -> anyhow::Result<()> {
         if bytes_len > Self::MAX_EMBED_BYTES {
             anyhow::bail!(
                 "图片约 {:.1}MB，超过内嵌上限 5MB，内嵌会导致文档膨胀卡顿，建议改用“复制图片到附件目录”偏好",
@@ -829,7 +829,7 @@ impl Editor {
     }
 
     /// 设置块标题与类型（含快捷写法展开与光标定位）。
-    fn set_block_title_and_kind(
+    pub(super) fn set_block_title_and_kind(
         block: &Entity<super::Block>,
         kind: BlockKind,
         title: InlineTextTree,

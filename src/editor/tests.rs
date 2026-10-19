@@ -4263,3 +4263,219 @@ async fn toggle_view_mode_preserves_callout_table_cell_position(cx: &mut TestApp
         assert_eq!(editor.pending_focus, Some(restored_cell.entity_id()));
     });
 }
+
+#[rgpui::test]
+async fn right_click_over_short_blocks_builds_single_menu(cx: &mut TestAppContext) {
+    init_editor_test_app(cx);
+    let markdown = fs::read_to_string("docs/image-sample.md").expect("sample doc");
+    // 该样本文档短块密集、块间留白多，历史上会同时命中相邻块行与空白域兜底菜单，
+    // 造成多层菜单叠加。逐点断言每次右键只构建一个菜单。
+    for y in [50, 130, 400, 665, 740, 1029, 1031] {
+        let markdown = markdown.clone();
+        let (_editor, cx) =
+            cx.add_window_view(|_window, cx| Editor::from_markdown(cx, markdown, None));
+        for _ in 0..3 {
+            redraw(cx);
+        }
+        super::MENU_BUILD_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+        cx.simulate_event(rgpui::MouseDownEvent {
+            button: rgpui::MouseButton::Right,
+            position: rgpui::point(rgpui::px(631.), rgpui::px(y as f32)),
+            modifiers: Default::default(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.run_until_parked();
+        redraw(cx);
+        redraw(cx);
+        assert_eq!(
+            super::MENU_BUILD_COUNT.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "right-click at y={y} should build exactly one context menu"
+        );
+    }
+}
+
+#[rgpui::test]
+async fn right_click_opens_exactly_one_context_menu(cx: &mut TestAppContext) {
+    init_editor_test_app(cx);
+    let markdown = "![cover](./assets/red.png \"caption\")\n\nafter paragraph\n".to_string();
+    let (editor, cx) = cx.add_window_view(|_window, cx| Editor::from_markdown(cx, markdown, None));
+    for _ in 0..3 {
+        redraw(cx);
+    }
+
+    // 块行自带菜单，空白域的兜底菜单必须让位，否则两层菜单会叠加（多层阴影、
+    // 上层吞掉点击）。
+    super::MENU_BUILD_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+    cx.simulate_event(rgpui::MouseDownEvent {
+        button: rgpui::MouseButton::Right,
+        position: rgpui::point(rgpui::px(631.), rgpui::px(90.)),
+        modifiers: Default::default(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    cx.run_until_parked();
+    redraw(cx);
+    redraw(cx);
+    assert_eq!(
+        super::MENU_BUILD_COUNT.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "right-clicking a block row should build exactly one menu"
+    );
+
+    // 空白处右键仍应弹出追加语义菜单。
+    super::MENU_BUILD_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+    cx.simulate_event(rgpui::MouseDownEvent {
+        button: rgpui::MouseButton::Right,
+        position: rgpui::point(rgpui::px(20.), rgpui::px(300.)),
+        modifiers: Default::default(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    cx.run_until_parked();
+    redraw(cx);
+    redraw(cx);
+    assert_eq!(
+        super::MENU_BUILD_COUNT.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "right-clicking blank space should build exactly one menu"
+    );
+    let _ = &editor;
+}
+
+#[rgpui::test]
+async fn image_menu_detects_markdown_and_html_images(cx: &mut TestAppContext) {
+    init_editor_test_app(cx);
+    let markdown = [
+        "![cover](./assets/red.png \"caption\")",
+        "",
+        "<img src=\"./assets/blue.png\" alt=\"banner\" style=\"zoom:50%;\" />",
+        "",
+        "plain text",
+    ]
+    .join("\n");
+    let (editor, cx) = cx.add_window_view(|_window, cx| Editor::from_markdown(cx, markdown, None));
+    redraw(cx);
+
+    editor.read_with(cx, |editor, cx| {
+        let ids = editor
+            .document
+            .visible_blocks()
+            .iter()
+            .map(|visible| visible.entity.entity_id())
+            .collect::<Vec<_>>();
+        assert_eq!(ids.len(), 3);
+
+        let markdown_image = editor
+            .describe_image_menu(Some(ids[0]), cx)
+            .expect("markdown image should expose image menu");
+        assert_eq!(markdown_image.alt, "cover");
+        assert_eq!(markdown_image.src, "./assets/red.png");
+        assert_eq!(markdown_image.title.as_deref(), Some("caption"));
+        assert!(!markdown_image.from_html);
+        assert_eq!(markdown_image.zoom, 1.0);
+
+        let html_image = editor
+            .describe_image_menu(Some(ids[1]), cx)
+            .expect("html image should expose image menu");
+        assert!(html_image.from_html);
+        assert_eq!(html_image.alt, "banner");
+        assert_eq!(html_image.src, "./assets/blue.png");
+        assert!((html_image.zoom - 0.5).abs() < 1e-3);
+
+        assert!(editor.describe_image_menu(Some(ids[2]), cx).is_none());
+    });
+}
+
+#[rgpui::test]
+async fn image_menu_zoom_rewrites_between_markdown_and_html(cx: &mut TestAppContext) {
+    init_editor_test_app(cx);
+    let markdown = "![cover](./assets/red.png \"caption\")".to_string();
+    let (editor, cx) = cx.add_window_view(|_window, cx| Editor::from_markdown(cx, markdown, None));
+    redraw(cx);
+
+    let block = editor.read_with(cx, |editor, _cx| {
+        editor.document.visible_blocks()[0].entity.clone()
+    });
+
+    cx.update(|window, cx| {
+        editor.update(cx, |editor, cx| {
+            let data = editor
+                .describe_image_menu(Some(block.entity_id()), cx)
+                .expect("image menu data");
+            Editor::on_image_zoom(editor, &data, 0.5, window, cx);
+        });
+    });
+    redraw(cx);
+
+    editor.read_with(cx, |editor, cx| {
+        let block = editor.document.visible_blocks()[0].entity.clone();
+        let block = block.read(cx);
+        assert_eq!(block.kind(), BlockKind::HtmlBlock);
+        assert_eq!(
+            block.rendered_text(),
+            "<img src=\"./assets/red.png\" alt=\"cover\" title=\"caption\" style=\"zoom:50%;\" />"
+        );
+    });
+
+    cx.update(|window, cx| {
+        editor.update(cx, |editor, cx| {
+            let data = editor
+                .describe_image_menu(Some(block.entity_id()), cx)
+                .expect("image menu data");
+            Editor::on_image_zoom(editor, &data, 1.0, window, cx);
+        });
+    });
+    redraw(cx);
+
+    editor.read_with(cx, |editor, cx| {
+        let block = editor.document.visible_blocks()[0].entity.clone();
+        let block = block.read(cx);
+        assert_eq!(block.kind(), BlockKind::Paragraph);
+        assert_eq!(
+            block.rendered_text(),
+            "![cover](./assets/red.png \"caption\")"
+        );
+    });
+}
+
+#[rgpui::test]
+async fn image_menu_embeds_local_image_as_base64(cx: &mut TestAppContext) {
+    init_editor_test_app(cx);
+    let image_path = temp_export_path("image-menu-embed", "png");
+    fs::write(
+        &image_path,
+        [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a],
+    )
+    .expect("write fixture png");
+
+    let markdown = format!("![cover]({})", image_path.to_string_lossy());
+    let (editor, cx) = cx.add_window_view(|_window, cx| Editor::from_markdown(cx, markdown, None));
+    redraw(cx);
+
+    let block = editor.read_with(cx, |editor, _cx| {
+        editor.document.visible_blocks()[0].entity.clone()
+    });
+
+    cx.update(|window, cx| {
+        editor.update(cx, |editor, cx| {
+            let data = editor
+                .describe_image_menu(Some(block.entity_id()), cx)
+                .expect("image menu data");
+            Editor::on_image_embed_base64(editor, &data, window, cx);
+        });
+    });
+    redraw(cx);
+
+    editor.read_with(cx, |editor, cx| {
+        let block = editor.document.visible_blocks()[0].entity.clone();
+        let text = block.read(cx).rendered_text().to_string();
+        assert!(
+            text.starts_with("![cover](data:image/png;base64,"),
+            "unexpected embedded markdown: {text}"
+        );
+    });
+
+    let _ = fs::remove_file(image_path);
+}

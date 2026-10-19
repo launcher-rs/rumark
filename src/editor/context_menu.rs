@@ -94,6 +94,15 @@ fn can_convert_paragraph_kind(kind: &BlockKind) -> bool {
 /// 右键菜单条目统一回调形状（与既有 `on_*` 处理器一致）。
 type InsertMenuOp = fn(&mut Editor, &ClickEvent, &mut Window, &mut Context<Editor>);
 
+/// 外壳边界命判，带少量容差以吸收边框/亚像素舍入。
+fn shell_contains(bounds: Bounds<Pixels>, point: Point<Pixels>) -> bool {
+    let tolerance = px(2.0);
+    point.x >= bounds.left() - tolerance
+        && point.x <= bounds.right() + tolerance
+        && point.y >= bounds.top() - tolerance
+        && point.y <= bounds.bottom() + tolerance
+}
+
 impl Editor {
     /// 向上查找到块所属的根块标识。
     pub(super) fn root_ancestor_entity_id(&self, entity_id: EntityId) -> EntityId {
@@ -115,7 +124,7 @@ impl Editor {
     }
 
     /// 关闭当前右键菜单。
-    fn close_context_menu(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn close_context_menu(&mut self, cx: &mut Context<Self>) {
         if self.context_menu.take().is_some() {
             cx.notify();
         }
@@ -286,6 +295,31 @@ impl Editor {
         })
     }
 
+    /// 判断窗口坐标是否落在某个自带右键菜单的块外壳内（表格单元格除外，
+    /// 它们走表格轴菜单）。外壳边界由块渲染时记录，含块内边距但不含块间间距。
+    fn context_point_over_block_shell(&self, point: Point<Pixels>, cx: &App) -> bool {
+        self.document.visible_blocks().iter().any(|visible| {
+            let id = visible.entity.entity_id();
+            if self.table_cell_binding(id).is_some() {
+                return false;
+            }
+            visible
+                .entity
+                .read(cx)
+                .last_shell_bounds
+                .is_some_and(|bounds| shell_contains(bounds, point))
+        })
+    }
+
+    /// 返回指定块最近一次绘制出的外壳边界。
+    fn block_shell_bounds(&self, block_id: EntityId, cx: &App) -> Option<Bounds<Pixels>> {
+        self.document.visible_blocks().iter().find_map(|visible| {
+            (visible.entity.entity_id() == block_id)
+                .then(|| visible.entity.read(cx).last_shell_bounds)
+                .flatten()
+        })
+    }
+
     /// 为指定块（空域传 `None`）构造框架右键菜单（Typora 式三段：剪贴板、
     /// 行内格式工具条、段落/插入二级菜单）；表格单元格返回空菜单。
     pub(super) fn build_insert_context_popup(
@@ -298,7 +332,37 @@ impl Editor {
         let Some(data) = editor.read(cx).describe_insert_menu(block_id, cx) else {
             return menu;
         };
+        // 空白域菜单与块行菜单会同时响应同一次右键（框架不拦截冒泡），且行虚拟化
+        // 期间命中盒可能把右键误投到外壳之外的块（与 Block::on_mouse_down 同理），
+        // 二者都会造成多层菜单叠加。以块外壳边界为唯一判据：
+        // 落在某个块外壳内时，只有该块的行菜单生效，空白菜单与其它块的行菜单让位。
+        let point = window.mouse_position();
+        match block_id {
+            None => {
+                if editor.read(cx).context_point_over_block_shell(point, cx) {
+                    return menu;
+                }
+            }
+            Some(id) => {
+                if let Some(shell) = editor.read(cx).block_shell_bounds(id, cx)
+                    && !shell_contains(shell, point)
+                {
+                    return menu;
+                }
+            }
+        }
+        #[cfg(test)]
+        super::MENU_BUILD_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let image_data = editor.read(cx).describe_image_menu(block_id, cx);
         let strings = cx.global::<I18nManager>().snapshot();
+        // 图片专属条目（定位/复制/缩放/内嵌）置顶，其后接通用块操作。
+        let menu = match &image_data {
+            Some(image_data) => {
+                let menu = Self::build_image_menu_items(menu, editor, image_data, window, cx);
+                menu.separator()
+            }
+            None => menu,
+        };
         menu.item(Self::insert_popup_item(
             strings.t("keys_cut", &[]),
             Some(Box::new(CutAction)),

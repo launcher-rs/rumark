@@ -81,8 +81,8 @@ pub(crate) enum ImageResolvedSource {
     Embedded { format: ImageFormat, bytes: Vec<u8> },
 }
 
-/// 按 MIME 类型映射图片格式（内嵌 `data:` URI 解码用）。
-fn image_format_for_mime(mime: &str) -> Option<ImageFormat> {
+/// 按 MIME 类型映射图片格式（内嵌 `data:` URI 解码与剪贴板图片复用）。
+pub(crate) fn image_format_for_mime(mime: &str) -> Option<ImageFormat> {
     match mime.trim().to_ascii_lowercase().as_str() {
         "image/png" => Some(ImageFormat::Png),
         "image/jpeg" | "image/jpg" => Some(ImageFormat::Jpeg),
