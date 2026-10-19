@@ -383,13 +383,11 @@ impl Block {
             self.show_source_line_numbers = false;
             return;
         }
-        if self.edit_mode != EditMode::SourceRaw {
-            if self.kind().is_code_block() {
-                self.reset_inline_projection();
-            }
-            self.edit_mode = EditMode::for_kind(&self.record.kind);
-            self.show_source_line_numbers = false;
+        if self.kind().is_code_block() {
+            self.reset_inline_projection();
         }
+        self.edit_mode = EditMode::for_kind(&self.record.kind);
+        self.show_source_line_numbers = false;
     }
 
     /// 取展示文本。

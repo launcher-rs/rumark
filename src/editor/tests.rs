@@ -4437,6 +4437,9 @@ async fn image_menu_zoom_rewrites_between_markdown_and_html(cx: &mut TestAppCont
             block.rendered_text(),
             "![cover](./assets/red.png \"caption\")"
         );
+        // 缩放归位后块类型回到段落，编辑模式必须同步出 SourceRaw，
+        // 否则段落按纯源码渲染、图片不再显示（残留源码文本）。
+        assert!(!block.is_source_raw_mode());
     });
 }
 
