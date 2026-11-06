@@ -54,6 +54,8 @@
   "message_export_failed": "导出失败",
   "message_export_missing_cjk_font": "未找到可用的中文字体，无法导出中文 PDF。请安装 Noto Sans SC / 微软雅黑后重试，或将 OFL 字体文件（如 NotoSansSC-Regular.ttf）放入 assets/fonts/ 后重新构建（构建脚本会自动内嵌）。",
   "message_config_import_failed": "配置导入失败",
+  "message_config_damaged_title": "配置文件已损坏",
+  "message_config_damaged_message": "配置文件 {path} 无法解析，已备份为 {backup} 并重建为默认配置。原内容仍保留在备份文件中，可手动改回以恢复键位、主题与语言设置。",
   "pref_title": "偏好设置",
   "pref_nav_file": "文件",
   "pref_nav_theme": "主题",

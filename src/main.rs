@@ -164,10 +164,15 @@ fn main() {
     }
 
     app.run(move |cx: &mut App| {
-        let preferences = config::load_or_create_app_preferences().unwrap_or_else(|err| {
-            eprintln!("failed to initialize app preferences: {err}");
-            Default::default()
-        });
+        let (preferences, recovery) =
+            config::load_or_create_app_preferences().unwrap_or_else(|err| {
+                eprintln!("failed to initialize app preferences: {err}");
+                (Default::default(), None)
+            });
+        // 配置损坏时已备份原文件并重建默认配置：登记提示，由首个窗口弹窗告知用户。
+        if let Some(recovery) = recovery {
+            config::PendingConfigRecovery::set(cx, recovery);
+        }
         I18nManager::init_with_language_id(cx, &preferences.default_language_id);
         crate::theme::init(cx, &preferences.default_theme_id);
         config::EditorSettings::init(cx, preferences.table_headers_visible);

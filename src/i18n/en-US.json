@@ -57,6 +57,8 @@
   "message_image_action_failed": "Image Action Failed",
   "dialog_choose_image_folder": "Choose Image Folder",
   "message_config_import_failed": "Config Import Failed",
+  "message_config_damaged_title": "Configuration File Was Damaged",
+  "message_config_damaged_message": "The configuration file {path} could not be parsed. It was backed up to {backup} and replaced with default settings. Your original settings are still in the backup file; restore it manually to recover your keybindings, theme, and language.",
   "pref_title": "Preferences",
   "pref_nav_file": "File",
   "pref_nav_theme": "Theme",

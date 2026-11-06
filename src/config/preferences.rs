@@ -24,6 +24,52 @@ use crate::theme::{ThemeCatalogEntry, ThemeDimensions, ThemeTypography};
 const FALLBACK_THEME_ID: &str = "rumark-light";
 const FALLBACK_LANGUAGE_ID: &str = "en-US";
 
+/// 配置文件格式版本。
+///
+/// 缺失该字段的旧配置按版本 1 处理；高于当前版本说明配置由更新的版本写入，
+/// 此时不得回写默认值，否则新版本写入的字段会被抹掉。
+const PREFERENCES_FILE_VERSION: u32 = 1;
+
+/// 配置损坏时的恢复信息。
+#[derive(Debug)]
+pub(crate) struct PreferencesRecovery {
+    /// 损坏配置的原路径。
+    pub damaged_path: PathBuf,
+    /// 原文件的备份路径。
+    pub backup_path: PathBuf,
+}
+
+/// 待展示的配置恢复提示。
+///
+/// 启动时发现配置文件损坏、已备份并重建默认配置后登记在此，由首个窗口消费并弹窗告知。
+#[derive(Default)]
+pub struct PendingConfigRecovery {
+    recovery: Option<PreferencesRecovery>,
+}
+
+impl Global for PendingConfigRecovery {}
+
+impl PendingConfigRecovery {
+    /// 登记一次配置恢复。
+    pub fn set(cx: &mut App, recovery: PreferencesRecovery) {
+        cx.set_global(Self {
+            recovery: Some(recovery),
+        });
+    }
+
+    /// 取出并清空待展示的恢复提示。
+    ///
+    /// 未登记过恢复提示时全局不存在，直接返回 `None`。
+    pub fn take(cx: &mut App) -> Option<PreferencesRecovery> {
+        if !cx.has_global::<Self>() {
+            return None;
+        }
+        let mut recovery = None;
+        cx.update_global::<Self, _>(|global, _cx| recovery = global.recovery.take());
+        recovery
+    }
+}
+
 /// 显示在状态栏的用户可配置按钮。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct StatusBarButton {
@@ -270,6 +316,7 @@ impl EditorSettings {
 
 #[derive(Serialize)]
 struct PreferencesFile {
+    version: u32,
     startup: StartupPreferencesFile,
     language: LanguagePreferencesFile,
     theme: ThemePreferencesFile,
@@ -335,6 +382,7 @@ impl From<&AppPreferences> for PreferencesFile {
     /// 由应用偏好构造文件存储形态。
     fn from(value: &AppPreferences) -> Self {
         Self {
+            version: PREFERENCES_FILE_VERSION,
             startup: StartupPreferencesFile {
                 open: value.startup_open.as_str().into(),
             },
@@ -364,6 +412,8 @@ pub(crate) fn read_app_preferences() -> anyhow::Result<AppPreferences> {
 }
 
 /// 用指定目录集读取应用偏好。
+///
+/// 纯读取：配置文件损坏时返回错误而不改写文件，由调用方决定如何处理。
 pub(crate) fn read_app_preferences_with_dirs(
     dirs: &RumarkConfigDirs,
 ) -> anyhow::Result<AppPreferences> {
@@ -377,18 +427,58 @@ pub(crate) fn read_app_preferences_with_dirs(
             return Err(err).with_context(|| format!("failed to read '{}'", path.display()));
         }
     };
-    let Ok(value) = toml::from_str::<toml::Value>(&text) else {
-        return Ok(AppPreferences::default());
-    };
-
+    let value = toml::from_str::<toml::Value>(&text)
+        .with_context(|| format!("failed to parse '{}'", path.display()))?;
+    ensure_supported_version(&path, &value)?;
     Ok(app_preferences_from_toml_value(
         &value,
         FALLBACK_LANGUAGE_ID,
     ))
 }
 
+/// 校验配置文件版本高于当前程序时立即报错，避免回写默认值抹掉新版本字段。
+fn ensure_supported_version(path: &std::path::Path, value: &toml::Value) -> anyhow::Result<()> {
+    let version = preferences_file_version(value);
+    if version > PREFERENCES_FILE_VERSION {
+        anyhow::bail!(
+            "configuration '{}' has version {} but this build only supports up to {}",
+            path.display(),
+            version,
+            PREFERENCES_FILE_VERSION
+        );
+    }
+    Ok(())
+}
+
+/// 从配置值读取格式版本，缺失时按版本 1 处理。
+fn preferences_file_version(value: &toml::Value) -> u32 {
+    value
+        .get("version")
+        .and_then(|version| version.as_integer())
+        .and_then(|version| u32::try_from(version).ok())
+        .unwrap_or(1)
+}
+
+/// 把损坏的配置文件备份为 `.bak`，返回备份路径。
+///
+/// 直接丢弃损坏配置会让用户的键位、主题与语言设置被随后写回的默认值覆盖，
+/// 且原文件不可恢复；备份让用户能自行找回内容。
+fn backup_damaged_preferences(path: &std::path::Path) -> anyhow::Result<PathBuf> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config.toml");
+    let backup_path = path.with_file_name(format!("{file_name}.bak"));
+    crate::atomic_file::copy_file(path, &backup_path)
+        .with_context(|| format!("failed to back up '{}'", path.display()))?;
+    Ok(backup_path)
+}
+
 /// 加载偏好，不存在时按系统语言创建。
-pub(crate) fn load_or_create_app_preferences() -> anyhow::Result<AppPreferences> {
+///
+/// 返回 `(偏好, 配置恢复信息)`：配置损坏并已备份重建时恢复信息为 `Some`。
+pub(crate) fn load_or_create_app_preferences()
+-> anyhow::Result<(AppPreferences, Option<PreferencesRecovery>)> {
     let dirs = RumarkConfigDirs::from_system()?;
     load_or_create_app_preferences_with_dirs_and_locales(&dirs, sys_locale::get_locales())
 }
@@ -537,33 +627,50 @@ where
 }
 
 /// 用指定目录与语言列表加载或创建偏好。
+///
+/// 配置文件损坏时先备份原文件再重建默认配置，并返回恢复信息供上层告知用户；
+/// 版本高于当前程序时不改写文件，直接报错。
 fn load_or_create_app_preferences_with_dirs_and_locales<I, S>(
     dirs: &RumarkConfigDirs,
     locales: I,
-) -> anyhow::Result<AppPreferences>
+) -> anyhow::Result<(AppPreferences, Option<PreferencesRecovery>)>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
     let detected_language_id = detected_language_id_from_locales(locales);
     let path = dirs.app_config_file();
-    let preferences = match std::fs::read_to_string(&path) {
-        Ok(text) => toml::from_str::<toml::Value>(&text)
-            .map(|value| app_preferences_from_toml_value(&value, detected_language_id))
-            .unwrap_or_else(|_| AppPreferences {
-                default_language_id: detected_language_id.into(),
-                ..AppPreferences::default()
-            }),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => AppPreferences {
-            default_language_id: detected_language_id.into(),
-            ..AppPreferences::default()
+    let defaults = AppPreferences {
+        default_language_id: detected_language_id.into(),
+        ..AppPreferences::default()
+    };
+    let (preferences, recovery) = match std::fs::read_to_string(&path) {
+        Ok(text) => match toml::from_str::<toml::Value>(&text) {
+            Ok(value) => {
+                ensure_supported_version(&path, &value)?;
+                (
+                    app_preferences_from_toml_value(&value, detected_language_id),
+                    None,
+                )
+            }
+            Err(_) => {
+                let backup_path = backup_damaged_preferences(&path)?;
+                (
+                    defaults,
+                    Some(PreferencesRecovery {
+                        damaged_path: path.clone(),
+                        backup_path,
+                    }),
+                )
+            }
         },
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => (defaults, None),
         Err(err) => {
             return Err(err).with_context(|| format!("failed to read '{}'", path.display()));
         }
     };
     save_app_preferences_with_dirs(&preferences, dirs)?;
-    Ok(preferences)
+    Ok((preferences, recovery))
 }
 
 /// 保存应用偏好。
@@ -679,7 +786,7 @@ fn save_preferences_from_window_with_dirs(
     status_bar: &StatusBarPreferences,
     dirs: &RumarkConfigDirs,
 ) -> anyhow::Result<AppPreferences> {
-    let mut preferences =
+    let (mut preferences, _recovery) =
         load_or_create_app_preferences_with_dirs_and_locales(dirs, sys_locale::get_locales())?;
     preferences.startup_open = startup_open;
     preferences.default_theme_id = default_theme_id.into();
@@ -699,7 +806,7 @@ fn save_preferences_from_window_with_dirs(
 fn update_app_preferences(
     update: impl FnOnce(&mut AppPreferences),
 ) -> anyhow::Result<AppPreferences> {
-    let mut preferences = load_or_create_app_preferences()?;
+    let (mut preferences, _recovery) = load_or_create_app_preferences()?;
     update(&mut preferences);
     save_app_preferences(&preferences)?;
     Ok(preferences)
@@ -1974,8 +2081,9 @@ pub(crate) fn open_preferences_window(cx: &mut App) -> WindowHandle<PreferencesW
 #[cfg(test)]
 mod tests {
     use super::{
-        AppPreferences, EditorSettings, ExportThemeMode, ImagePasteBehavior, StartupOpenPreference,
-        StatusBarButton, StatusBarPreferences, hotkey_keys_from_values, hotkey_values_from_keys,
+        AppPreferences, EditorSettings, ExportThemeMode, ImagePasteBehavior, PendingConfigRecovery,
+        PreferencesRecovery, StartupOpenPreference, StatusBarButton, StatusBarPreferences,
+        hotkey_keys_from_values, hotkey_values_from_keys,
         load_or_create_app_preferences_with_dirs_and_locales, open_preferences_window_with_state,
         read_app_preferences_with_dirs, save_app_preferences_with_dirs,
         save_preferences_from_window_with_dirs,
@@ -1986,6 +2094,7 @@ mod tests {
     use crate::theme::ThemeCatalogEntry;
     use rgpui::TestAppContext;
     use std::collections::BTreeMap;
+    use std::path::PathBuf;
 
     /// 初始化偏好设置测试应用（测试辅助）。
     fn init_preferences_test_app(cx: &mut TestAppContext) {
@@ -2003,6 +2112,29 @@ mod tests {
             id: "rumark".into(),
             name: "Rumark".into(),
         }]
+    }
+
+    #[rgpui::test]
+    fn pending_config_recovery_take_is_noop_without_registration(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            // 未登记过恢复提示时全局不存在，取值不得 panic。
+            assert!(PendingConfigRecovery::take(cx).is_none());
+        });
+    }
+
+    #[rgpui::test]
+    fn pending_config_recovery_is_consumed_once(cx: &mut TestAppContext) {
+        let recovery = PreferencesRecovery {
+            damaged_path: PathBuf::from("/tmp/config.toml"),
+            backup_path: PathBuf::from("/tmp/config.toml.bak"),
+        };
+        cx.update(|cx| {
+            PendingConfigRecovery::set(cx, recovery);
+            let taken = PendingConfigRecovery::take(cx).expect("recovery should be pending");
+            assert_eq!(taken.damaged_path, PathBuf::from("/tmp/config.toml"));
+            assert_eq!(taken.backup_path, PathBuf::from("/tmp/config.toml.bak"));
+            assert!(PendingConfigRecovery::take(cx).is_none());
+        });
     }
 
     #[test]
@@ -2072,19 +2204,68 @@ mod tests {
     }
 
     #[test]
-    fn damaged_preferences_file_returns_defaults() {
+    fn damaged_preferences_file_is_reported_and_backed_up() {
         let root = std::env::temp_dir().join(format!(
             "rumark-preferences-damaged-{}",
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&root).expect("temp root should exist");
         let dirs = RumarkConfigDirs::from_root(&root);
-        std::fs::write(dirs.app_config_file(), "not = [valid")
+        let damaged_text = "not = [valid";
+        std::fs::write(dirs.app_config_file(), damaged_text)
             .expect("preferences should be written");
 
-        let preferences =
-            read_app_preferences_with_dirs(&dirs).expect("damaged preferences should load");
-        assert_eq!(preferences, AppPreferences::default());
+        // 纯读取不改写文件，但必须报错：损坏不能再被静默当成默认值。
+        let err = read_app_preferences_with_dirs(&dirs)
+            .expect_err("damaged preferences should be reported");
+        assert!(
+            err.to_string().contains("failed to parse"),
+            "unexpected error: {err}"
+        );
+
+        // 启动路径会先备份原文件再重建默认配置，原内容不得丢失。
+        let (preferences, recovery) =
+            load_or_create_app_preferences_with_dirs_and_locales(&dirs, ["zh-CN"])
+                .expect("damaged preferences should recover");
+        let recovery = recovery.expect("damaged config should report recovery");
+        assert_eq!(
+            std::fs::read_to_string(&recovery.backup_path).expect("backup should exist"),
+            damaged_text
+        );
+        assert_eq!(recovery.damaged_path, dirs.app_config_file());
+        assert_eq!(
+            preferences.default_language_id, "zh-CN",
+            "detected language should still apply"
+        );
+        assert_eq!(
+            preferences.default_theme_id,
+            AppPreferences::default().default_theme_id
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn newer_preferences_version_is_rejected_without_touching_the_file() {
+        let root = std::env::temp_dir().join(format!(
+            "rumark-preferences-future-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("temp root should exist");
+        let dirs = RumarkConfigDirs::from_root(&root);
+        let future_text = "version = 99\n";
+        std::fs::write(dirs.app_config_file(), future_text).expect("preferences should be written");
+
+        let err = load_or_create_app_preferences_with_dirs_and_locales(&dirs, ["zh-CN"])
+            .expect_err("newer version should be rejected");
+        assert!(
+            err.to_string().contains("version 99"),
+            "unexpected error: {err}"
+        );
+        // 不得回写：否则新版本写入的字段会被默认值抹掉。
+        assert_eq!(
+            std::fs::read_to_string(dirs.app_config_file()).expect("config should exist"),
+            future_text
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2129,8 +2310,10 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         let dirs = RumarkConfigDirs::from_root(&root);
-        let preferences = load_or_create_app_preferences_with_dirs_and_locales(&dirs, ["zh-HK"])
-            .expect("preferences should be created");
+        let (preferences, recovery) =
+            load_or_create_app_preferences_with_dirs_and_locales(&dirs, ["zh-HK"])
+                .expect("preferences should be created");
+        assert!(recovery.is_none(), "fresh config needs no recovery");
         assert_eq!(preferences.default_language_id, "zh-CN");
         assert!(dirs.app_config_file().exists());
         let text =
@@ -2160,8 +2343,10 @@ mod tests {
         )
         .expect("legacy preferences should be written");
 
-        let preferences = load_or_create_app_preferences_with_dirs_and_locales(&dirs, ["en-GB"])
-            .expect("legacy preferences should normalize");
+        let (preferences, recovery) =
+            load_or_create_app_preferences_with_dirs_and_locales(&dirs, ["en-GB"])
+                .expect("legacy preferences should normalize");
+        assert!(recovery.is_none(), "legacy config needs no recovery");
         assert_eq!(
             preferences.startup_open,
             StartupOpenPreference::LastOpenedFile

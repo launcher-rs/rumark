@@ -16,7 +16,7 @@ use crate::components::{
     SelectTheme, ShowAbout, ToggleWorkspace, UninstallCliTool,
 };
 use crate::config::{
-    apply_configured_language, apply_configured_theme, clear_recent_files,
+    PendingConfigRecovery, apply_configured_language, apply_configured_theme, clear_recent_files,
     import_language_config_and_select, import_theme_config_and_select, open_preferences_window,
     read_recent_files, record_recent_file, remove_recent_file,
 };
@@ -65,10 +65,36 @@ pub(crate) fn open_editor_window(
         .update(cx, |editor, window, cx| {
             window.activate_window();
             editor.force_install_close_guard(cx, window);
+            show_pending_config_recovery(cx, window);
         })
         .expect("newly opened editor window should be updateable");
 
     handle
+}
+
+/// 展示启动时的配置恢复提示。
+///
+/// 配置文件损坏时启动流程已备份原文件并重建默认配置，此处告知用户备份位置，
+/// 否则用户只会看到键位、主题与语言"没生效"，而不知原配置已被移走。
+fn show_pending_config_recovery(cx: &mut Context<Editor>, window: &mut Window) {
+    let Some(recovery) = PendingConfigRecovery::take(cx) else {
+        return;
+    };
+    let i18n = cx.global::<I18nManager>().snapshot();
+    let title = i18n.t("message_config_damaged_title", &[]);
+    let damaged_path = recovery.damaged_path.display().to_string();
+    let backup_path = recovery.backup_path.display().to_string();
+    let detail = i18n.t(
+        "message_config_damaged_message",
+        &[("path", &damaged_path), ("backup", &backup_path)],
+    );
+    let ok = i18n.t("dialog_ok", &[]);
+    let buttons = [ok.as_str()];
+    let prompt = window.prompt(PromptLevel::Critical, &title, Some(&detail), &buttons, cx);
+    cx.spawn(async move |_this, _cx| {
+        let _ = prompt.await;
+    })
+    .detach();
 }
 
 /// 在新窗口中打开指定文件。
