@@ -2145,32 +2145,46 @@ impl Block {
         cx.notify();
     }
 
-    /// 启动光标闪烁循环：每三十三毫秒的后台定时器调用 `cx.notify()` 重绘光标，
+    /// 启动光标闪烁循环：闪烁阶段每三十三毫秒的后台定时器调用 `cx.notify()` 重绘光标，
     /// 仅在光标透明度实际变化时重绘。每次重置 `cursor_blink_epoch`
-    ///（方向键/输入触发）后的前半秒透明度固定为一，重绘只会重复全量投影重建，
-    /// 无可见变化。
+    ///（方向键/输入触发）后的前半秒透明度固定为一，此时直接睡到该时刻：
+    /// 打字期间逐 33ms 醒来只会做一次无可见变化的判定，纯属空转。
     ///
     /// 块失焦时自动取消闪烁任务（句柄在 [`Block::render`] 中丢弃）。
     pub(super) fn start_cursor_blink(&mut self, cx: &mut Context<Self>) {
         self.cursor_blink_epoch = Instant::now();
         self.cursor_blink_task = Some(cx.spawn(
-            async |this: WeakEntity<Block>, cx: &mut AsyncApp| loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(33))
-                    .await;
-                let tick = update_entity_forgiving(
-                    &this,
-                    cx,
-                    |this: &mut Block, cx: &mut Context<Block>| {
-                        if this.cursor_blink_epoch.elapsed().as_secs_f32() >= 0.5 {
-                            cx.notify();
+            async |this: WeakEntity<Block>, cx: &mut AsyncApp| {
+                /// 透明度恒为一的保持时长（秒），与 [`Block::caret_opacity`] 一致。
+                const HOLD: f32 = 0.5;
+                loop {
+                    let elapsed = update_entity_forgiving(&this, cx, |this: &mut Block, _cx| {
+                        this.cursor_blink_epoch.elapsed().as_secs_f32()
+                    });
+                    match elapsed {
+                        // 实体已释放时结束闪烁循环；借用冲突（标题栏拖拽等嵌套派发）
+                        // 仅跳过本拍，下拍重试（见 `update_entity_forgiving`）。
+                        Some(Err(_)) => break,
+                        Some(Ok(elapsed)) if elapsed < HOLD => {
+                            cx.background_executor()
+                                .timer(Duration::from_secs_f32((HOLD - elapsed).max(0.005)))
+                                .await;
+                            continue;
                         }
-                    },
-                );
-                // 实体已释放时结束闪烁循环；借用冲突（标题栏拖拽等嵌套派发）
-                // 仅跳过本拍，下拍重试（见 `update_entity_forgiving`）。
-                if matches!(tick, Some(Err(_))) {
-                    break;
+                        _ => {}
+                    }
+                    cx.background_executor()
+                        .timer(Duration::from_millis(33))
+                        .await;
+                    let _ = update_entity_forgiving(
+                        &this,
+                        cx,
+                        |this: &mut Block, cx: &mut Context<Block>| {
+                            if this.cursor_blink_epoch.elapsed().as_secs_f32() >= HOLD {
+                                cx.notify();
+                            }
+                        },
+                    );
                 }
             },
         ));

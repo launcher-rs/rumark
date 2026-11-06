@@ -67,6 +67,13 @@
 
 用根目录 `docs/render-sample.md` 打开逐项目视检查（覆盖 CommonMark + GFM 扩展、嵌套、边界）。本轮尤其看：引用内空行（`> `）、脚注内空行缩进、列表组之间的空段落折叠、H1/H2 细灰下划线、H6 发灰、表格整块选中（点表格框/非单元格处）、图片与 Mermaid/公式的「渲染 + 源码同屏」。
 
+### 3.3 源码映射与表格列宽的缓存（暂缓，缺前置条件）
+
+- 现状：`build_source_target_mappings`（`src/editor/source_map.rs`）每次调用都遍历全部根块重算映射，`selection.rs` 与 `history.rs` 的一次交互里会调用多次；`ColumnLayout::measure`（`src/components/markdown/table.rs`）每帧为表格每个单元格重建 `render_cache` 并 `shape_text`。
+- 为什么暂缓：两处都没有可用的失效信号。文档树里**不存在版本号/修订号**（`grep revision|version` 在 `src/editor/*.rs` 无命中），靠「块数 + 末块标识」之类的指纹必然会出现陈旧缓存，代价是全选复制/删除/撤销的越界或错位，比省下的那点 CPU 贵得多。
+- 前置做法：先在 `DocumentTree` 的**所有**变更入口（root 增删、块文本改写、表格结构操作、撤销重做、导入替换）统一递增一个 `revision: u64`，再让缓存以 `(revision, table_width)` 为键。测试要覆盖「改一个字即失效」。
+- 已完成的同类优化：渲染改为「先分组、后建元素」两趟，元素只为视口内的行构建，且每帧不再克隆与块数等长的实体句柄（`src/editor/render.rs`）；光标闪烁在前半秒直接睡到边界，不再 33ms 空转（`src/components/block/editing/mod.rs`）。
+
 ## 4. 计划中的功能：一个窗口内多文档 tab
 
 > 需求（用户提出）：目前**一个文件一个窗口**，希望一个窗口里用 tab 打开多个文件，并且 tab 可以**拖出来成为独立窗口**、也能**拖回窗口合并**。

@@ -63,7 +63,54 @@ fn tibetan_font_fallbacks_for_target_os(target_os: &str) -> Vec<String> {
         .collect()
 }
 
+/// 一行内的分段：普通块，或共用脚注外壳的连续块。
+enum RowSegment {
+    /// 单个块独占一行。
+    Block(usize),
+    /// 连续脚注块区间（含头，不含尾）。
+    FootnoteGroup { start: usize, end: usize },
+}
+
+/// 一个渲染行的分组计划。先完成分组，元素只为视口内的行构建。
+enum RowPlan {
+    /// 单个块独占一行。
+    Single { block: usize, top_gap: f32 },
+    /// 连续脚注块共用一个脚注外壳。
+    Footnote {
+        start: usize,
+        end: usize,
+        top_gap: f32,
+    },
+    /// 提示框外壳内的若干分块（其中可再含脚注子组）。
+    Callout {
+        start: usize,
+        top_gap: f32,
+        variant: CalloutVariant,
+        segments: Vec<RowSegment>,
+    },
+}
+
+impl RowPlan {
+    /// 行首可见块下标，用作焦点行定位与行足迹的缓存键。
+    fn start(&self) -> usize {
+        match self {
+            RowPlan::Single { block, .. } => *block,
+            RowPlan::Footnote { start, .. } | RowPlan::Callout { start, .. } => *start,
+        }
+    }
+
+    /// 行前导边距，占位高度需要减去挂载行自行应用的那一份。
+    fn top_gap(&self) -> f32 {
+        match self {
+            RowPlan::Single { top_gap, .. }
+            | RowPlan::Footnote { top_gap, .. }
+            | RowPlan::Callout { top_gap, .. } => *top_gap,
+        }
+    }
+}
+
 /// 相邻行元数据，用于折叠视觉组内的间距。
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct RowSpacingInfo {
     quote_group_anchor: Option<uuid::Uuid>,
@@ -634,6 +681,176 @@ impl Editor {
     }
 }
 
+impl Editor {
+    /// 读取某可见行的间距元数据（分组外壳内的相邻间距需要逐块回看）。
+    fn row_spacing_at(
+        blocks: &[super::tree::VisibleBlock],
+        index: usize,
+        cx: &mut Context<Self>,
+    ) -> RowSpacingInfo {
+        blocks[index]
+            .entity
+            .read_with(cx, |block, _cx| RowSpacingInfo::from_block(block))
+    }
+
+    /// 挂载单个块行：稳定 ElementId，渲染/源码双模式都挂右键。
+    /// 表格单元格走表格轴菜单，不挂插入菜单；`full_width` 行由外层外壳定宽。
+    fn mounted_row_element(
+        &self,
+        entity: &Entity<Block>,
+        full_width: bool,
+        gap: f32,
+        centered_width: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let row = div()
+            .id(ElementId::Name(
+                format!("editor-row-{:?}", entity.entity_id()).into(),
+            ))
+            .flex_shrink_0()
+            .mt(px(gap))
+            .child(entity.clone());
+        let row = if full_width {
+            row.w_full()
+        } else {
+            row.w(px(centered_width)).max_w(relative(1.0))
+        };
+        let entity_id = entity.entity_id();
+        if self.table_cell_binding(entity_id).is_some() {
+            return row.into_any_element();
+        }
+        let row_entity = cx.entity().clone();
+        row.context_menu(move |menu, window, cx| {
+            Self::build_insert_context_popup(menu, &row_entity, Some(entity_id), window, cx)
+        })
+        .into_any_element()
+    }
+
+    /// 连续脚注块的行序列，共用一个脚注外壳。
+    fn footnote_rows(
+        &self,
+        start: usize,
+        end: usize,
+        blocks: &[super::tree::VisibleBlock],
+        centered_width: f32,
+        d: &ThemeDimensions,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let mut rows = Vec::with_capacity(end - start);
+        let mut previous: Option<RowSpacingInfo> = None;
+        for index in start..end {
+            let spacing = Self::row_spacing_at(blocks, index, cx);
+            rows.push(self.mounted_row_element(
+                &blocks[index].entity,
+                true,
+                footnote_row_top_gap(previous, d.block_gap),
+                centered_width,
+                cx,
+            ));
+            previous = Some(spacing);
+        }
+        rows
+    }
+
+    /// 按计划构建一行元素。窗口外的行不进入这里，因此每帧的元素分配
+    /// 只与视口高度相关，与文档长度无关；块切片按行临时借用，不跨阶段驻留。
+    fn build_row_element(
+        &self,
+        plan: &RowPlan,
+        centered_width: f32,
+        theme: &Theme,
+        d: &ThemeDimensions,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let blocks = self.document.visible_blocks();
+        let shell = |children: Vec<AnyElement>, gap: f32| {
+            div()
+                .w(px(centered_width))
+                .max_w(relative(1.0))
+                .flex_shrink_0()
+                .mt(px(gap))
+                .children(children)
+        };
+        match plan {
+            RowPlan::Single { block, top_gap } => self.mounted_row_element(
+                &blocks[*block].entity,
+                false,
+                *top_gap,
+                centered_width,
+                cx,
+            ),
+            RowPlan::Footnote {
+                start,
+                end,
+                top_gap,
+            } => {
+                let children = self.footnote_rows(*start, *end, blocks, centered_width, d, cx);
+                shell(
+                    vec![footnote_group_shell(children, theme, d).into_any_element()],
+                    *top_gap,
+                )
+                .into_any_element()
+            }
+            RowPlan::Callout {
+                top_gap,
+                variant,
+                segments,
+                ..
+            } => {
+                let (accent, background) =
+                    crate::components::callout_accent_and_background(*variant, theme);
+                let mut children: Vec<AnyElement> = Vec::with_capacity(segments.len());
+                let mut previous: Option<RowSpacingInfo> = None;
+                for segment in segments {
+                    match segment {
+                        RowSegment::Block(block) => {
+                            let spacing = Self::row_spacing_at(blocks, *block, cx);
+                            children.push(self.mounted_row_element(
+                                &blocks[*block].entity,
+                                true,
+                                callout_row_top_gap(previous, spacing, d),
+                                centered_width,
+                                cx,
+                            ));
+                            previous = Some(spacing);
+                        }
+                        RowSegment::FootnoteGroup { start, end } => {
+                            let first = Self::row_spacing_at(blocks, *start, cx);
+                            let inner =
+                                self.footnote_rows(*start, *end, blocks, centered_width, d, cx);
+                            children.push(
+                                div()
+                                    .w_full()
+                                    .flex_shrink_0()
+                                    .mt(px(callout_row_top_gap(previous, first, d)))
+                                    .child(footnote_group_shell(inner, theme, d))
+                                    .into_any_element(),
+                            );
+                            previous = Some(Self::row_spacing_at(blocks, *end - 1, cx));
+                        }
+                    }
+                }
+                div()
+                    .w(px(centered_width))
+                    .max_w(relative(1.0))
+                    .flex_shrink_0()
+                    .mt(px(*top_gap))
+                    .flex()
+                    .flex_col()
+                    .gap(px(0.0))
+                    .px(px(d.callout_padding_x))
+                    .py(px(d.callout_padding_y))
+                    .rounded(px(d.callout_radius))
+                    .border_l(px(d.callout_border_width))
+                    .border_color(accent)
+                    .bg(background)
+                    .children(children)
+                    .into_any_element()
+            }
+        }
+    }
+}
+
 impl Render for Editor {
     /// 渲染编辑器窗口（含菜单栏、文档列、对话框与延迟同步）。
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -655,7 +872,6 @@ impl Render for Editor {
         self.sync_window_title(window, &i18n);
 
         let d = &ThemeDimensions::DEFAULT;
-        let visible_blocks = self.document.visible_blocks().to_vec();
         let editor = cx.entity().downgrade();
         let scroll_trigger_padding = (d.block_min_height * 0.75).max(16.0);
         let max_scroll_y = f32::from(self.scroll_handle.max_offset().y.max(px(0.0)));
@@ -678,240 +894,91 @@ impl Render for Editor {
                 || self.scrollbar_hovered
                 || Instant::now() <= self.scrollbar_visible_until);
 
+        // 分组与结构快照分阶段短暂借用文档：长文档每帧不再克隆与块数等长的实体句柄。
+        let block_count = self.document.visible_block_count();
         // 间距元数据按需读取，而非预收集为与可见块等长的向量，
         // 长文档下每帧可省数十 KB 分配，单块读取仅为廉价不可变锁加七字段拷贝。
         let spacing_for = |index: usize| -> RowSpacingInfo {
-            visible_blocks[index]
+            self.document.visible_blocks()[index]
                 .entity
                 .read_with(cx, |block, _cx| RowSpacingInfo::from_block(block))
         };
-        let mut previous_row_spacing = None;
-        // 每渲染行一项，开窗后丢弃屏外行。
-        let mut row_elements: Vec<AnyElement> = Vec::new();
-        let mut row_starts: Vec<usize> = Vec::new();
-        // 每行前导边距由顶占位减去首个挂载行的部分，因该行会自行应用。
-        let mut row_top_gaps: Vec<f32> = Vec::new();
+        // 每行先只登记分组计划：分组只需逐块间距元数据，元素留到窗口确定后再构建。
+        let mut row_plans: Vec<RowPlan> = Vec::new();
+        let mut previous_row_spacing: Option<RowSpacingInfo> = None;
         let mut index = 0usize;
-        while index < visible_blocks.len() {
-            let first_visible = visible_blocks[index].clone();
+        while index < block_count {
             let first_spacing = spacing_for(index);
             let top_gap = rendered_row_top_gap(previous_row_spacing, first_spacing, d.block_gap);
 
             if let (Some(callout_anchor), Some(callout_variant)) =
                 (first_spacing.callout_anchor, first_spacing.callout_variant)
             {
-                let mut group_children = Vec::new();
+                let mut segments: Vec<RowSegment> = Vec::new();
                 let mut group_end = index;
-                let mut previous_callout_row = None;
-                while group_end < visible_blocks.len()
+                while group_end < block_count
                     && spacing_for(group_end).callout_anchor == Some(callout_anchor)
                 {
                     let row_spacing = spacing_for(group_end);
                     if let Some(footnote_anchor) = row_spacing.footnote_anchor {
-                        let mut footnote_children = Vec::new();
+                        let footnote_start = group_end;
                         let mut footnote_end = group_end;
-                        let mut previous_footnote_row = None;
-                        while footnote_end < visible_blocks.len()
+                        while footnote_end < block_count
                             && spacing_for(footnote_end).callout_anchor == Some(callout_anchor)
                             && spacing_for(footnote_end).footnote_anchor == Some(footnote_anchor)
                         {
-                            let footnote_spacing = spacing_for(footnote_end);
-                            let entity = visible_blocks[footnote_end].entity.clone();
-                            let row = div()
-                                .id(ElementId::Name(
-                                    format!("editor-row-{:?}", entity.entity_id()).into(),
-                                ))
-                                .w_full()
-                                .flex_shrink_0()
-                                .mt(px(footnote_row_top_gap(previous_footnote_row, d.block_gap)))
-                                .child(entity.clone());
-                            // 渲染/源码双模式都挂右键：菜单内容按模式自适应。
-                            // 表格单元格走表格轴菜单，不挂插入菜单。
-                            let row_entity = cx.entity().clone();
-                            let entity_id = entity.entity_id();
-                            let row: AnyElement = if self.table_cell_binding(entity_id).is_some() {
-                                row.into_any_element()
-                            } else {
-                                row.context_menu(move |menu, window, cx| {
-                                    Self::build_insert_context_popup(
-                                        menu,
-                                        &row_entity,
-                                        Some(entity_id),
-                                        window,
-                                        cx,
-                                    )
-                                })
-                                .into_any_element()
-                            };
-                            footnote_children.push(row);
-                            previous_footnote_row = Some(footnote_spacing);
                             footnote_end += 1;
                         }
-
-                        group_children.push(
-                            div()
-                                .w_full()
-                                .flex_shrink_0()
-                                .mt(px(callout_row_top_gap(
-                                    previous_callout_row,
-                                    row_spacing,
-                                    d,
-                                )))
-                                .child(footnote_group_shell(footnote_children, &theme, d))
-                                .into_any_element(),
-                        );
-                        previous_callout_row = Some(spacing_for(footnote_end - 1));
+                        segments.push(RowSegment::FootnoteGroup {
+                            start: footnote_start,
+                            end: footnote_end,
+                        });
                         group_end = footnote_end;
                         continue;
                     }
-
-                    let entity = visible_blocks[group_end].entity.clone();
-                    let row = div()
-                        .id(ElementId::Name(
-                            format!("editor-row-{:?}", entity.entity_id()).into(),
-                        ))
-                        .w_full()
-                        .flex_shrink_0()
-                        .mt(px(callout_row_top_gap(
-                            previous_callout_row,
-                            row_spacing,
-                            d,
-                        )))
-                        .child(entity.clone());
-                    // 渲染/源码双模式都挂右键：菜单内容按模式自适应。
-                    // 表格单元格走表格轴菜单，不挂插入菜单。
-                    let row_entity = cx.entity().clone();
-                    let entity_id = entity.entity_id();
-                    let row: AnyElement = if self.table_cell_binding(entity_id).is_some() {
-                        row.into_any_element()
-                    } else {
-                        row.context_menu(move |menu, window, cx| {
-                            Self::build_insert_context_popup(
-                                menu,
-                                &row_entity,
-                                Some(entity_id),
-                                window,
-                                cx,
-                            )
-                        })
-                        .into_any_element()
-                    };
-                    group_children.push(row);
-                    previous_callout_row = Some(row_spacing);
+                    segments.push(RowSegment::Block(group_end));
                     group_end += 1;
                 }
 
-                let (accent, background) =
-                    crate::components::callout_accent_and_background(callout_variant, &theme);
-                row_starts.push(index);
-                row_top_gaps.push(top_gap);
-                row_elements.push(
-                    div()
-                        .w(px(centered_width))
-                        .max_w(relative(1.0))
-                        .flex_shrink_0()
-                        .mt(px(top_gap))
-                        .flex()
-                        .flex_col()
-                        .gap(px(0.0))
-                        .px(px(d.callout_padding_x))
-                        .py(px(d.callout_padding_y))
-                        .rounded(px(d.callout_radius))
-                        .border_l(px(d.callout_border_width))
-                        .border_color(accent)
-                        .bg(background)
-                        .children(group_children)
-                        .into_any_element(),
-                );
+                row_plans.push(RowPlan::Callout {
+                    start: index,
+                    top_gap,
+                    variant: callout_variant,
+                    segments,
+                });
                 previous_row_spacing = Some(spacing_for(group_end - 1));
                 index = group_end;
                 continue;
             }
 
             if let Some(footnote_anchor) = first_spacing.footnote_anchor {
-                let mut group_children = Vec::new();
                 let mut group_end = index;
-                let mut previous_footnote_row = None;
-                while group_end < visible_blocks.len()
+                while group_end < block_count
                     && spacing_for(group_end).footnote_anchor == Some(footnote_anchor)
                 {
-                    let row_spacing = spacing_for(group_end);
-                    let entity = visible_blocks[group_end].entity.clone();
-                    let row = div()
-                        .id(ElementId::Name(
-                            format!("editor-row-{:?}", entity.entity_id()).into(),
-                        ))
-                        .w_full()
-                        .flex_shrink_0()
-                        .mt(px(footnote_row_top_gap(previous_footnote_row, d.block_gap)))
-                        .child(entity.clone());
-                    // 渲染/源码双模式都挂右键：菜单内容按模式自适应。
-                    // 表格单元格走表格轴菜单，不挂插入菜单。
-                    let row_entity = cx.entity().clone();
-                    let entity_id = entity.entity_id();
-                    let row: AnyElement = if self.table_cell_binding(entity_id).is_some() {
-                        row.into_any_element()
-                    } else {
-                        row.context_menu(move |menu, window, cx| {
-                            Self::build_insert_context_popup(
-                                menu,
-                                &row_entity,
-                                Some(entity_id),
-                                window,
-                                cx,
-                            )
-                        })
-                        .into_any_element()
-                    };
-                    group_children.push(row);
-                    previous_footnote_row = Some(row_spacing);
                     group_end += 1;
                 }
 
-                row_starts.push(index);
-                row_top_gaps.push(top_gap);
-                row_elements.push(
-                    div()
-                        .w(px(centered_width))
-                        .max_w(relative(1.0))
-                        .flex_shrink_0()
-                        .mt(px(top_gap))
-                        .child(footnote_group_shell(group_children, &theme, d))
-                        .into_any_element(),
-                );
+                row_plans.push(RowPlan::Footnote {
+                    start: index,
+                    end: group_end,
+                    top_gap,
+                });
                 previous_row_spacing = Some(spacing_for(group_end - 1));
                 index = group_end;
                 continue;
             }
 
-            let entity = first_visible.entity.clone();
-            let row = div()
-                .id(ElementId::Name(
-                    format!("editor-row-{:?}", entity.entity_id()).into(),
-                ))
-                .w(px(centered_width))
-                .max_w(relative(1.0))
-                .flex_shrink_0()
-                .mt(px(top_gap))
-                .child(entity.clone());
-            // 渲染/源码双模式都挂右键：菜单内容按模式自适应。
-            // 表格单元格走表格轴菜单，不挂插入菜单。
-            let row_entity = cx.entity().clone();
-            let entity_id = entity.entity_id();
-            let row: AnyElement = if self.table_cell_binding(entity_id).is_some() {
-                row.into_any_element()
-            } else {
-                row.context_menu(move |menu, window, cx| {
-                    Self::build_insert_context_popup(menu, &row_entity, Some(entity_id), window, cx)
-                })
-                .into_any_element()
-            };
-            row_starts.push(index);
-            row_top_gaps.push(top_gap);
-            row_elements.push(row);
+            row_plans.push(RowPlan::Single {
+                block: index,
+                top_gap,
+            });
             previous_row_spacing = Some(first_spacing);
             index += 1;
         }
+        // 行首块下标与前导边距由计划派生，供焦点行定位与占位高度使用。
+        let row_starts: Vec<usize> = row_plans.iter().map(RowPlan::start).collect();
+        let row_top_gaps: Vec<f32> = row_plans.iter().map(RowPlan::top_gap).collect();
 
         // 聚焦行恒挂载以防光标失焦，表格单元格映射到其所属表格块的行。
         let focus_row = self
@@ -933,19 +1000,17 @@ impl Render for Editor {
         // 以行首块为键缓存行足迹。
         let row_first_ids: Vec<EntityId> = row_starts
             .iter()
-            .map(|&start| visible_blocks[start].entity.entity_id())
+            .map(|&start| self.document.visible_block_entity_id(start))
             .collect();
 
         // 结构编辑后行号与上帧对不上，跳过下方缓存刷新，块键条目仍有效。
-        let structural_change = visible_blocks.len() != self.prev_visible_block_ids.len()
-            || visible_blocks
-                .iter()
-                .zip(&self.prev_visible_block_ids)
-                .any(|(visible, prev)| visible.entity.entity_id() != *prev);
+        let structural_change = block_count != self.prev_visible_block_ids.len()
+            || (0..block_count.min(self.prev_visible_block_ids.len())).any(|index| {
+                self.document.visible_block_entity_id(index) != self.prev_visible_block_ids[index]
+            });
         if structural_change {
-            self.prev_visible_block_ids = visible_blocks
-                .iter()
-                .map(|v| v.entity.entity_id())
+            self.prev_visible_block_ids = (0..block_count)
+                .map(|index| self.document.visible_block_entity_id(index))
                 .collect();
         }
 
@@ -1030,17 +1095,16 @@ impl Render for Editor {
             }
         };
 
-        let mut row_elements: Vec<Option<AnyElement>> =
-            row_elements.into_iter().map(Some).collect();
-        let mut take_row = |rows: &mut Vec<AnyElement>, row: usize| {
-            if let Some(element) = row_elements.get_mut(row).and_then(Option::take) {
-                rows.push(element);
+        // 元素只为窗口内的行构建，屏外行不再分配 ElementId 字符串与菜单闭包。
+        let mut build_row = |rows: &mut Vec<AnyElement>, row: usize| {
+            if let Some(plan) = row_plans.get(row) {
+                rows.push(self.build_row_element(plan, centered_width, &theme, d, cx));
             }
         };
 
         if let Some(island) = island.filter(|_| island_before_run) {
             push_spacer(&mut block_rows, spacer_before(island.row, island.lead_h));
-            take_row(&mut block_rows, island.row);
+            build_row(&mut block_rows, island.row);
         }
         push_spacer(
             &mut block_rows,
@@ -1048,11 +1112,11 @@ impl Render for Editor {
         );
         let run_child_base = block_rows.len();
         for row in render_window.run_start..render_window.run_end {
-            take_row(&mut block_rows, row);
+            build_row(&mut block_rows, row);
         }
         if let Some(island) = island.filter(|_| !island_before_run) {
             push_spacer(&mut block_rows, spacer_before(island.row, island.lead_h));
-            take_row(&mut block_rows, island.row);
+            build_row(&mut block_rows, island.row);
         }
         push_spacer(&mut block_rows, render_window.bottom_h);
         // 下帧按子项下标读回足迹，并先校验子项数再采信。

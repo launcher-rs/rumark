@@ -113,6 +113,16 @@ impl DocumentTree {
         &self.snapshot.visible
     }
 
+    /// 可见块总数。仅需长度时用它，避免让整片借用跨越后续可变借用。
+    pub(super) fn visible_block_count(&self) -> usize {
+        self.snapshot.visible.len()
+    }
+
+    /// 按下标取可见块实体标识，同上：逐块取值不留长借用。
+    pub(super) fn visible_block_entity_id(&self, index: usize) -> EntityId {
+        self.snapshot.visible[index].entity.entity_id()
+    }
+
     /// 获取当前窗口中聚焦块的标识。
     pub(super) fn focused_block_entity_id(&self, window: &Window, cx: &App) -> Option<EntityId> {
         self.snapshot
