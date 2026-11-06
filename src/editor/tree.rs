@@ -113,11 +113,6 @@ impl DocumentTree {
         &self.snapshot.visible
     }
 
-    /// 克隆一份可见块列表。
-    pub(super) fn flatten_visible_blocks(&self) -> Vec<VisibleBlock> {
-        self.snapshot.visible.clone()
-    }
-
     /// 获取当前窗口中聚焦块的标识。
     pub(super) fn focused_block_entity_id(&self, window: &Window, cx: &App) -> Option<EntityId> {
         self.snapshot
@@ -133,6 +128,14 @@ impl DocumentTree {
             .visible_index_by_entity
             .get(&entity_id)
             .copied()
+    }
+
+    /// 按可见序号取块实体；序号越界返回 `None`。
+    pub(super) fn visible_block_at(&self, index: usize) -> Option<Entity<Block>> {
+        self.snapshot
+            .visible
+            .get(index)
+            .map(|visible| visible.entity.clone())
     }
 
     /// 按标识查找块实体。

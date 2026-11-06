@@ -1347,10 +1347,9 @@ impl Editor {
         to_block_start: bool,
         cx: &mut Context<Self>,
     ) {
-        let visible = self.document.flatten_visible_blocks();
-        let Some(index) = visible
-            .iter()
-            .position(|visible| visible.entity.entity_id() == table_block.entity_id())
+        let Some(index) = self
+            .document
+            .visible_index_for_entity_id(table_block.entity_id())
         else {
             return;
         };
@@ -1359,9 +1358,8 @@ impl Editor {
         } else {
             Some(index + 1)
         };
-        let Some(target) = target_index
-            .and_then(|target_index| visible.get(target_index))
-            .map(|visible| visible.entity.clone())
+        let Some(target) =
+            target_index.and_then(|target_index| self.document.visible_block_at(target_index))
         else {
             return;
         };
@@ -1787,10 +1785,9 @@ impl Editor {
             self.clear_cross_block_selection(cx);
         }
 
-        let visible_before = self.document.flatten_visible_blocks();
-        let current_visible_index = visible_before
-            .iter()
-            .position(|visible| visible.entity.entity_id() == block.entity_id())
+        let current_visible_index = self
+            .document
+            .visible_index_for_entity_id(block.entity_id())
             .unwrap_or(0);
 
         match event {
@@ -1938,7 +1935,9 @@ impl Editor {
                 if current_visible_index == 0 {
                     return;
                 }
-                let prev = visible_before[current_visible_index - 1].entity.clone();
+                let Some(prev) = self.document.visible_block_at(current_visible_index - 1) else {
+                    return;
+                };
                 let quote_related = self.block_is_quote_structure_related(&block, cx)
                     || self.block_is_quote_structure_related(&prev, cx);
                 self.prepare_undo_capture(crate::components::UndoKind::NonCoalescible, cx);
@@ -2130,7 +2129,10 @@ impl Editor {
                     return;
                 };
                 let current_kind = block.read(cx).kind();
-                let target_parent = visible_before[current_visible_index - 1].entity.clone();
+                let Some(target_parent) = self.document.visible_block_at(current_visible_index - 1)
+                else {
+                    return;
+                };
                 if !current_kind.nests_under(&target_parent.read(cx).kind()) {
                     return;
                 }
@@ -2321,7 +2323,9 @@ impl Editor {
                     return;
                 }
 
-                let target = visible_before[current_visible_index - 1].entity.clone();
+                let Some(target) = self.document.visible_block_at(current_visible_index - 1) else {
+                    return;
+                };
                 // 从下方进入表格时落在正文单元格，而非不可编辑的表格容器。
                 if target.read(cx).kind() == BlockKind::Table
                     && self.focus_table_entry_cell(&target, false, cx)
@@ -2337,18 +2341,16 @@ impl Editor {
                 cx.notify();
             }
             BlockEvent::RequestFocusNext { preferred_x } => {
-                if current_visible_index + 1 >= visible_before.len() {
+                if current_visible_index + 1 >= self.document.visible_blocks().len() {
                     // 末尾多行块（代码、公式等）下方无处可去，因此补一个
                     // 段落承接并聚焦，与末尾表格的行为一致。
                     if block.read(cx).kind().is_multiline_text_block() {
                         self.ensure_trailing_paragraph_after_structural(&block, cx);
-                        let visible = self.document.flatten_visible_blocks();
-                        if let Some(landing) = visible
-                            .iter()
-                            .position(|v| v.entity.entity_id() == block.entity_id())
-                            .and_then(|index| visible.get(index + 1))
-                            .map(|v| v.entity.clone())
-                        {
+                        let landing = self
+                            .document
+                            .visible_index_for_entity_id(block.entity_id())
+                            .and_then(|index| self.document.visible_block_at(index + 1));
+                        if let Some(landing) = landing {
                             self.focus_block(landing.entity_id());
                             landing.update(cx, |landing, cx| landing.move_to(0, cx));
                             cx.notify();
@@ -2357,7 +2359,9 @@ impl Editor {
                     return;
                 }
 
-                let target = visible_before[current_visible_index + 1].entity.clone();
+                let Some(target) = self.document.visible_block_at(current_visible_index + 1) else {
+                    return;
+                };
                 // 从上方进入表格时落在表头单元格，而非不可编辑的表格容器。
                 if target.read(cx).kind() == BlockKind::Table
                     && self.focus_table_entry_cell(&target, true, cx)
@@ -2377,7 +2381,9 @@ impl Editor {
                     return;
                 }
 
-                let target = visible_before[current_visible_index - 1].entity.clone();
+                let Some(target) = self.document.visible_block_at(current_visible_index - 1) else {
+                    return;
+                };
                 if target.read(cx).kind() == BlockKind::Table
                     && self.focus_table_entry_cell(&target, false, cx)
                 {
@@ -2388,11 +2394,13 @@ impl Editor {
                 cx.notify();
             }
             BlockEvent::RequestBlockDown => {
-                if current_visible_index + 1 >= visible_before.len() {
+                if current_visible_index + 1 >= self.document.visible_blocks().len() {
                     return;
                 }
 
-                let target = visible_before[current_visible_index + 1].entity.clone();
+                let Some(target) = self.document.visible_block_at(current_visible_index + 1) else {
+                    return;
+                };
                 if target.read(cx).kind() == BlockKind::Table
                     && self.focus_table_entry_cell(&target, true, cx)
                 {
@@ -2408,7 +2416,7 @@ impl Editor {
                 }
                 let quote_related = self.block_is_quote_structure_related(&block, cx);
                 let is_last_visible_leaf =
-                    visible_before.len() == 1 && block.read(cx).children.is_empty();
+                    self.document.visible_blocks().len() == 1 && block.read(cx).children.is_empty();
                 if is_last_visible_leaf {
                     if block.read(cx).kind() == BlockKind::Paragraph {
                         Self::reset_block_cursor(&block, 0, cx);
@@ -2421,7 +2429,9 @@ impl Editor {
                 }
                 self.prepare_undo_capture(crate::components::UndoKind::NonCoalescible, cx);
 
-                let visible_before_ids = visible_before
+                let visible_before_ids = self
+                    .document
+                    .visible_blocks()
                     .iter()
                     .map(|visible| visible.entity.entity_id())
                     .collect::<Vec<_>>();
@@ -2466,7 +2476,7 @@ impl Editor {
                 self.clear_table_axis_preview(cx);
                 self.clear_table_axis_selection(cx);
                 self.focus_block(block.entity_id());
-                for visible in self.document.flatten_visible_blocks() {
+                for visible in self.document.visible_blocks() {
                     visible.entity.update(cx, |_, cx| cx.notify());
                 }
                 cx.notify();
