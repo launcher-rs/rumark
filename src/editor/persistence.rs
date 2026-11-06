@@ -322,9 +322,10 @@ impl Editor {
         cx.write_to_clipboard(ClipboardItem::new_string(markdown));
     }
 
-    /// 按格式导出文档（PDF/DOCX）：纯 Rust 同步渲染后经另存弹框落盘。
+    /// 按格式导出文档（PDF/DOCX）：另存弹框选定路径后，排版渲染在后台线程完成再落盘。
     ///
-    /// 渲染失败（如中文 PDF 缺中文字体）直接弹窗说明，不再弹另存框。
+    /// 渲染失败（如中文 PDF 缺中文字体）弹窗说明；渲染不再占用 UI 线程，
+    /// 长文档导出期间窗口仍可交互。
     #[cfg(any(feature = "export-pdf", feature = "export-docx"))]
     pub(crate) fn export_document_with_format(
         &mut self,
@@ -346,47 +347,17 @@ impl Editor {
             title: title.clone(),
             include_toc,
         };
-        let bytes = match format {
-            #[cfg(feature = "export-pdf")]
-            ExportFormat::Pdf => {
-                crate::export::pdf::render_pdf_bytes(&markdown, &options).map_err(|err| {
-                    if crate::export::pdf::is_missing_cjk_font(&err) {
-                        let detail = cx
-                            .global::<I18nManager>()
-                            .snapshot()
-                            .t("message_export_missing_cjk_font", &[]);
-                        anyhow::anyhow!(detail)
-                    } else {
-                        err
-                    }
-                })
-            }
-            #[cfg(feature = "export-docx")]
-            ExportFormat::Docx => crate::export::docx::render_docx_bytes(&markdown, &options),
-        };
-        let bytes = match bytes {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                let detail = err.to_string();
-                let i18n = cx.global::<I18nManager>().snapshot();
-                let ok = i18n.t("dialog_ok", &[]);
-                let title = i18n.t("message_export_failed", &[]);
-                let buttons = [ok.as_str()];
-                // 对话框 future 必须轮询才会弹出：转交后台任务等待用户响应。
-                let prompt =
-                    window.prompt(PromptLevel::Critical, &title, Some(&detail), &buttons, cx);
-                cx.spawn(async move |_, _| {
-                    let _ = prompt.await;
-                })
-                .detach();
-                return;
-            }
-        };
+        // 缺字体的提示文案要在主线程取好：后台任务只产出字节或错误，不碰 i18n 全局。
+        let cjk_font_hint = cx
+            .global::<I18nManager>()
+            .snapshot()
+            .t("message_export_missing_cjk_font", &[]);
         let (default_dir, _) = self.save_dialog_defaults();
         let suggested_name = format!("{title}.{}", format.extension());
         let prompt = cx.prompt_for_new_path(&default_dir, Some(&suggested_name));
         let window_handle = window.window_handle();
         let extension = format.extension();
+        let executor = cx.background_executor().clone();
         cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let mut path = match prompt.await {
                 Ok(Ok(Some(path))) => path,
@@ -399,11 +370,54 @@ impl Editor {
             if path.extension().is_none() {
                 path.set_extension(extension);
             }
+            // 渲染丢给后台执行器：这段排版在 UI 线程上会让窗口卡住。
+            let rendered = executor
+                .spawn(async move { render_export_bytes(format, &markdown, &options) })
+                .await;
+            let bytes = match rendered {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    let detail = export_error_detail(format, &err, &cjk_font_hint);
+                    show_export_error(window_handle, detail, cx).await;
+                    return;
+                }
+            };
             if let Err(err) = crate::atomic_file::write_bytes(&path, &bytes) {
                 show_export_error(window_handle, err.to_string(), cx).await;
             }
         })
         .detach();
+    }
+}
+
+/// 后台渲染错误的用户可读文案：仅 PDF 会因缺中文字体失败，
+/// 提示文案由主线程预先取好后传入（后台线程不碰 i18n 全局）。
+#[cfg(feature = "export-pdf")]
+fn export_error_detail(format: ExportFormat, err: &anyhow::Error, cjk_font_hint: &str) -> String {
+    if matches!(format, ExportFormat::Pdf) && crate::export::pdf::is_missing_cjk_font(err) {
+        return cjk_font_hint.to_string();
+    }
+    err.to_string()
+}
+
+/// 无 PDF 功能时只有普通错误文案。
+#[cfg(all(not(feature = "export-pdf"), feature = "export-docx"))]
+fn export_error_detail(_format: ExportFormat, err: &anyhow::Error, _cjk_font_hint: &str) -> String {
+    err.to_string()
+}
+
+/// 在后台线程渲染导出字节（纯函数，不触碰任何 UI 上下文）。
+#[cfg(any(feature = "export-pdf", feature = "export-docx"))]
+fn render_export_bytes(
+    format: ExportFormat,
+    markdown: &str,
+    options: &crate::export::ExportOptions,
+) -> anyhow::Result<Vec<u8>> {
+    match format {
+        #[cfg(feature = "export-pdf")]
+        ExportFormat::Pdf => crate::export::pdf::render_pdf_bytes(markdown, options),
+        #[cfg(feature = "export-docx")]
+        ExportFormat::Docx => crate::export::docx::render_docx_bytes(markdown, options),
     }
 }
 
