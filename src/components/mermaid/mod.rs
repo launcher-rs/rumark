@@ -730,9 +730,12 @@ mod tests {
                 height: 100.0
             }
         );
-        assert!(scaled.contains(r#"width="200.000""#));
-        assert!(scaled.contains(r#"height="100.000""#));
-        assert!(scaled.contains(r#"viewBox="0 0 100 50""#));
+        assert!(scaled.contains(r#"width="200.000""#), "scaled: {scaled}");
+        assert!(scaled.contains(r#"height="100.000""#), "scaled: {scaled}");
+        assert!(
+            scaled.contains(r#"viewBox="0 0 100 50""#),
+            "scaled: {scaled}"
+        );
     }
 
     #[test]
@@ -748,18 +751,18 @@ mod tests {
             }
         );
         let root = &scaled[..scaled.find('>').unwrap()];
-        assert!(root.contains(r#"width="180.000""#));
-        assert!(root.contains(r#"height="90.000""#));
-        assert!(!root.contains("100%"));
-        assert!(!root.contains("max-width"));
-        assert!(!root.contains("style="));
+        assert!(root.contains(r#"width="180.000""#), "root: {root}");
+        assert!(root.contains(r#"height="90.000""#), "root: {root}");
+        assert!(!root.contains("100%"), "root: {root}");
+        assert!(!root.contains("max-width"), "root: {root}");
+        assert!(!root.contains("style="), "root: {root}");
     }
 
     #[test]
     fn renders_basic_flowchart_svg() {
         let svg = render_mermaid_raw("flowchart LR\nA --> B").expect("svg");
-        assert!(svg.contains("<svg"));
-        assert!(svg.contains("</svg>"));
+        assert!(svg.contains("<svg"), "svg: {svg}");
+        assert!(svg.contains("</svg>"), "svg: {svg}");
     }
 
     #[test]

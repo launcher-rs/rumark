@@ -224,8 +224,8 @@ mod tests {
     fn renders_basic_formula_svg() {
         let svg =
             render_latex_to_svg("\\frac{1}{2}", Hsla::from(rgba(0xffffffff)), 18.0).expect("svg");
-        assert!(svg.contains("<svg"));
-        assert!(svg.contains("</svg>"));
+        assert!(svg.contains("<svg"), "svg: {svg}");
+        assert!(svg.contains("</svg>"), "svg: {svg}");
     }
 
     #[test]

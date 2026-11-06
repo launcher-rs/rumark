@@ -1615,10 +1615,18 @@ mod tests {
             TextAlign::Left,
         );
 
-        assert!(segments.len() > 1);
+        assert!(segments.len() > 1, "segments: {}", segments.len());
         for segment in segments {
-            assert!(segment.left() >= bounds.left());
-            assert!(segment.right() <= bounds.right() + px(0.5));
+            assert!(
+                segment.left() >= bounds.left(),
+                "segment extends past the left edge: {:?}",
+                (segment.left(), bounds.left())
+            );
+            assert!(
+                segment.right() <= bounds.right() + px(0.5),
+                "segment extends past the right edge: {:?}",
+                (segment.right(), bounds.right())
+            );
         }
     }
 
@@ -1658,7 +1666,7 @@ mod tests {
                 span.range.clone(),
                 block.text_align(),
             );
-            assert!(segments.len() > 1);
+            assert!(segments.len() > 1, "segments: {}", segments.len());
             let second_segment = segments[1];
             let hit = point(
                 (second_segment.left() + second_segment.right()) / 2.0,

@@ -387,11 +387,27 @@ async fn document_present_on_the_first_frame_is_measured_at_the_real_width(
 async fn draw_test_md_fixture_does_not_overflow(cx: &mut TestAppContext) {
     init_editor_test_app(cx);
     let markdown = include_str!("../../docs/render-sample.md").to_string();
-    let (_editor, cx) = cx.add_window_view(|_window, cx| Editor::from_markdown(cx, markdown, None));
+    let (editor, cx) = cx.add_window_view(|_window, cx| Editor::from_markdown(cx, markdown, None));
     cx.update(|window, cx| {
         window.draw(cx).clear(cx);
     });
     cx.run_until_parked();
+
+    // 夹具确实被解析并挂载，否则本用例只是空文档绘制，守不住回归。
+    editor.read_with(cx, |editor, _cx| {
+        let visible = editor.document.visible_blocks();
+        assert!(
+            visible.len() > 40,
+            "fixture should parse into many blocks, got {}",
+            visible.len()
+        );
+        let run = editor.prev_mounted_run.expect("a run should be mounted");
+        assert!(
+            run.row_end > 0,
+            "mounted run should cover rows, got {:?}",
+            (run.row_start, run.row_end)
+        );
+    });
 }
 
 /// 全夹具滚动回归：逐段滚到底并绘制每一窗，保证长文档滚动全程无崩溃。
@@ -446,6 +462,27 @@ async fn deep_nesting_renders_within_main_thread_stack(cx: &mut TestAppContext) 
     markdown.push_str(&"</div>\n".repeat(40));
     let (editor, cx) = cx.add_window_view(|_window, cx| Editor::from_markdown(cx, markdown, None));
     redraw(cx);
+
+    // 深树确实建立起来，否则后面的滚动绘制只是在测空文档。
+    editor.read_with(cx, |editor, cx| {
+        let visible = editor.document.visible_blocks();
+        assert!(
+            visible.len() > 12,
+            "nested quotes should produce a deep block tree, got {}",
+            visible.len()
+        );
+        // 深树没有被层数上限截断：最里层的引用与 HTML 正文都还在文档里。
+        let text = editor.document.markdown_text(cx);
+        assert!(
+            text.contains("引用层 12"),
+            "deepest quote level missing from: {text}"
+        );
+        assert!(
+            text.contains("深层正文"),
+            "deep html body missing from: {text}"
+        );
+    });
+
     for step in 0..=10 {
         cx.update(|window, cx| {
             editor.update(cx, |editor, _cx| {
@@ -458,6 +495,18 @@ async fn deep_nesting_renders_within_main_thread_stack(cx: &mut TestAppContext) 
         });
         cx.run_until_parked();
     }
+
+    // 全程绘制后可观测状态：滚动偏移被推到最大且仍有挂载区间。
+    editor.read_with(cx, |editor, _cx| {
+        assert!(
+            editor.scroll_handle.max_offset().y.as_f32() > 0.0,
+            "deep document should scroll"
+        );
+        let run = editor
+            .prev_mounted_run
+            .expect("rows should stay mounted through the deep scroll");
+        assert!(run.row_end > run.row_start, "run: {:?}", run);
+    });
 }
 #[rgpui::test]
 async fn about_menu_action_opens_dialog_on_active_editor(cx: &mut TestAppContext) {
@@ -661,7 +710,7 @@ async fn dropped_markdown_replaces_clean_editor_in_current_window(cx: &mut TestA
 
     editor.update(cx, |editor, cx| {
         editor.toggle_view_mode(cx);
-        assert!(editor.view_mode == ViewMode::Source);
+        assert_eq!(editor.view_mode, ViewMode::Source);
     });
 
     cx.update(|window, cx| {
@@ -673,7 +722,7 @@ async fn dropped_markdown_replaces_clean_editor_in_current_window(cx: &mut TestA
 
     editor.read_with(cx, |editor, cx| {
         assert_eq!(editor.file_path.as_ref(), Some(&dropped_path));
-        assert!(editor.view_mode == ViewMode::Rendered);
+        assert_eq!(editor.view_mode, ViewMode::Rendered);
         assert!(!editor.document_dirty);
         assert!(!editor.show_drop_replace_dialog);
         assert_eq!(editor.document.root_count(), 2);
@@ -687,7 +736,11 @@ async fn dropped_markdown_replaces_clean_editor_in_current_window(cx: &mut TestA
                 .kind(),
             BlockKind::Table
         );
-        assert!(editor.document.markdown_text(cx).contains("# Dropped"));
+        assert!(
+            editor.document.markdown_text(cx).contains("# Dropped"),
+            "text: {:?}",
+            editor.document.markdown_text(cx)
+        );
     });
     assert_eq!(cx.cx.windows().len(), 1);
 }

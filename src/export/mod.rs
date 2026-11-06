@@ -687,7 +687,7 @@ mod tests {
             panic!("expected code: {blocks:?}");
         };
         assert_eq!(lang.as_deref(), Some("rust"));
-        assert!(code.contains("let x = 1;"));
+        assert!(code.contains("let x = 1;"), "code: {code}");
     }
 
     #[test]
@@ -705,8 +705,14 @@ mod tests {
             _ => None,
         });
         assert_eq!(link, Some(("文".to_string(), "https://x.com".to_string())));
-        assert!(inline.iter().any(|node| matches!(node, Inline::Math(_))));
-        assert!(inline.iter().any(|node| matches!(node, Inline::Strike(_))));
+        assert!(
+            inline.iter().any(|node| matches!(node, Inline::Math(_))),
+            "missing a math node; inline: {inline:?}"
+        );
+        assert!(
+            inline.iter().any(|node| matches!(node, Inline::Strike(_))),
+            "missing a strike node; inline: {inline:?}"
+        );
         assert_eq!(inline_text(inline), "粗与斜与码与文与公式与删");
     }
 

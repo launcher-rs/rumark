@@ -3202,63 +3202,90 @@ mod tests {
 
         editor.update(cx, |editor, cx| {
             let visible = editor.document.visible_blocks();
+            // 失败时打印「类型 + 引用深度」画像，any(...) 本身的表达式看不出漏了哪一层。
+            let profile = visible
+                .iter()
+                .map(|visible| {
+                    let block = visible.entity.read(cx);
+                    (block.kind(), block.quote_depth)
+                })
+                .collect::<Vec<_>>();
             assert_eq!(
                 visible[0].entity.read(cx).kind(),
                 BlockKind::Callout(CalloutVariant::Important)
             );
-            assert!(visible.iter().any(|visible| {
-                let block = visible.entity.read(cx);
-                block.kind() == BlockKind::BulletedListItem && block.quote_depth == 1
-            }));
-            assert!(visible.iter().any(|visible| {
-                let block = visible.entity.read(cx);
-                block.kind()
-                    == BlockKind::CodeBlock {
-                        language: Some("ts".into()),
-                    }
-                    && block.rendered_text().contains("export const answer = 42;")
-            }));
-            assert!(visible.iter().any(|visible| {
-                let block = visible.entity.read(cx);
-                block.kind() == BlockKind::Table
-                    && block.quote_depth == 1
-                    && block.record.table.as_ref().is_some_and(|table| {
-                        table.header.len() == 2
-                            && table.rows.len() == 2
-                            && table.header[0].serialize_markdown() == "k"
-                            && table.rows[1][1].serialize_markdown() == "2"
-                    })
-            }));
-            assert!(visible.iter().any(|visible| {
-                let block = visible.entity.read(cx);
-                block.kind() == BlockKind::Paragraph
-                    && block.rendered_text().contains("And a table:")
-                    && block.quote_depth == 1
-            }));
-            assert!(visible.iter().any(|visible| {
-                let block = visible.entity.read(cx);
-                block.kind() == BlockKind::FootnoteDefinition
-                    && block.rendered_text() == "final"
-                    && block.quote_depth == 1
-            }));
-            assert!(visible.iter().any(|visible| {
-                let block = visible.entity.read(cx);
-                block.kind() == BlockKind::Paragraph
-                    && block.rendered_text() == "Final footnote text with nested list:"
-                    && block.footnote_anchor.is_some()
-                    && block.quote_depth == 1
-            }));
             assert!(
-                visible
-                    .iter()
-                    .filter(|visible| {
-                        let block = visible.entity.read(cx);
-                        block.kind() == BlockKind::BulletedListItem
-                            && block.footnote_anchor.is_some()
-                            && block.quote_depth == 1
-                    })
-                    .count()
-                    >= 2
+                visible.iter().any(|visible| {
+                    let block = visible.entity.read(cx);
+                    block.kind() == BlockKind::BulletedListItem && block.quote_depth == 1
+                }),
+                "missing a depth-1 list item; profile: {profile:?}"
+            );
+            assert!(
+                visible.iter().any(|visible| {
+                    let block = visible.entity.read(cx);
+                    block.kind()
+                        == BlockKind::CodeBlock {
+                            language: Some("ts".into()),
+                        }
+                        && block.rendered_text().contains("export const answer = 42;")
+                }),
+                "missing the ts code block; profile: {profile:?}"
+            );
+            assert!(
+                visible.iter().any(|visible| {
+                    let block = visible.entity.read(cx);
+                    block.kind() == BlockKind::Table
+                        && block.quote_depth == 1
+                        && block.record.table.as_ref().is_some_and(|table| {
+                            table.header.len() == 2
+                                && table.rows.len() == 2
+                                && table.header[0].serialize_markdown() == "k"
+                                && table.rows[1][1].serialize_markdown() == "2"
+                        })
+                }),
+                "missing the depth-1 2x2 table; profile: {profile:?}"
+            );
+            assert!(
+                visible.iter().any(|visible| {
+                    let block = visible.entity.read(cx);
+                    block.kind() == BlockKind::Paragraph
+                        && block.rendered_text().contains("And a table:")
+                        && block.quote_depth == 1
+                }),
+                "missing the depth-1 intro paragraph; profile: {profile:?}"
+            );
+            assert!(
+                visible.iter().any(|visible| {
+                    let block = visible.entity.read(cx);
+                    block.kind() == BlockKind::FootnoteDefinition
+                        && block.rendered_text() == "final"
+                        && block.quote_depth == 1
+                }),
+                "missing the depth-1 footnote definition; profile: {profile:?}"
+            );
+            assert!(
+                visible.iter().any(|visible| {
+                    let block = visible.entity.read(cx);
+                    block.kind() == BlockKind::Paragraph
+                        && block.rendered_text() == "Final footnote text with nested list:"
+                        && block.footnote_anchor.is_some()
+                        && block.quote_depth == 1
+                }),
+                "missing the footnote body paragraph; profile: {profile:?}"
+            );
+            let nested_footnote_items = visible
+                .iter()
+                .filter(|visible| {
+                    let block = visible.entity.read(cx);
+                    block.kind() == BlockKind::BulletedListItem
+                        && block.footnote_anchor.is_some()
+                        && block.quote_depth == 1
+                })
+                .count();
+            assert!(
+                nested_footnote_items >= 2,
+                "expected 2 nested footnote list items, got {nested_footnote_items}; profile: {profile:?}"
             );
             assert_eq!(editor.document.markdown_text(cx), canonical_markdown);
         });
@@ -3291,7 +3318,11 @@ mod tests {
             );
             assert_eq!(visible[1].entity.read(cx).rendered_text(), "raw item");
             assert_eq!(visible[2].entity.read(cx).kind(), BlockKind::HtmlBlock);
-            assert!(visible[2].entity.read(cx).rendered_text().contains("<div>"));
+            assert!(
+                visible[2].entity.read(cx).rendered_text().contains("<div>"),
+                "html block text: {:?}",
+                visible[2].entity.read(cx).rendered_text()
+            );
             assert_eq!(
                 visible[3].entity.read(cx).kind(),
                 BlockKind::BulletedListItem
@@ -3827,40 +3858,65 @@ mod tests {
 
         editor.update(cx, |editor, cx| {
             let visible = editor.document.visible_blocks();
-            assert!(visible.len() > 40);
+            assert!(visible.len() > 40, "visible blocks: {}", visible.len());
+            // 失败时打印实际解析出的块类型序列，否则 any(...) 的表达式本身看不出漏了哪一块。
+            let kinds = visible
+                .iter()
+                .map(|block| block.entity.read(cx).kind())
+                .collect::<Vec<_>>();
 
-            assert!(visible.iter().any(|block| {
-                let block = block.entity.read(cx);
-                block.kind() == BlockKind::Heading { level: 1 }
-                    && block.rendered_text() == "Markdown 渲染测试文档"
-            }));
+            assert!(
+                visible.iter().any(|block| {
+                    let block = block.entity.read(cx);
+                    block.kind() == BlockKind::Heading { level: 1 }
+                        && block.rendered_text() == "Markdown 渲染测试文档"
+                }),
+                "missing the level 1 title; kinds: {kinds:?}"
+            );
 
-            assert!(visible.iter().any(|block| {
-                let block = block.entity.read(cx);
-                block.kind() == BlockKind::Quote && block.rendered_text().contains("引用段落一。")
-            }));
+            assert!(
+                visible.iter().any(|block| {
+                    let block = block.entity.read(cx);
+                    block.kind() == BlockKind::Quote
+                        && block.rendered_text().contains("引用段落一。")
+                }),
+                "missing the quote block; kinds: {kinds:?}"
+            );
 
-            assert!(visible.iter().any(|block| {
-                let block = block.entity.read(cx);
-                block.kind().is_code_block()
-                    && block.rendered_text().contains("println!(\"围栏代码块\");")
-            }));
+            assert!(
+                visible.iter().any(|block| {
+                    let block = block.entity.read(cx);
+                    block.kind().is_code_block()
+                        && block.rendered_text().contains("println!(\"围栏代码块\");")
+                }),
+                "missing the fenced code block; kinds: {kinds:?}"
+            );
 
-            assert!(visible.iter().any(|block| {
-                let block = block.entity.read(cx);
-                block.kind() == BlockKind::TaskListItem { checked: false }
-                    && block.rendered_text().contains("未勾选任务")
-            }));
+            assert!(
+                visible.iter().any(|block| {
+                    let block = block.entity.read(cx);
+                    block.kind() == BlockKind::TaskListItem { checked: false }
+                        && block.rendered_text().contains("未勾选任务")
+                }),
+                "missing the unchecked task; kinds: {kinds:?}"
+            );
 
-            assert!(visible.iter().any(|block| {
-                let block = block.entity.read(cx);
-                block.kind() == BlockKind::BulletedListItem && block.rendered_text() == "混合列表项"
-            }));
+            assert!(
+                visible.iter().any(|block| {
+                    let block = block.entity.read(cx);
+                    block.kind() == BlockKind::BulletedListItem
+                        && block.rendered_text() == "混合列表项"
+                }),
+                "missing the mixed list item; kinds: {kinds:?}"
+            );
 
-            assert!(visible.iter().any(|block| {
-                let block = block.entity.read(cx);
-                block.kind().is_code_block() && block.rendered_text().contains("let x = 1;")
-            }));
+            assert!(
+                visible.iter().any(|block| {
+                    let block = block.entity.read(cx);
+                    block.kind().is_code_block() && block.rendered_text().contains("let x = 1;")
+                }),
+                "missing the indented code block; kinds: {kinds:?}"
+            );
 
             let multiline_code = visible
                 .iter()
@@ -3874,12 +3930,25 @@ mod tests {
                 .expect("multiline inline code sample")
                 .entity
                 .read(cx);
-            assert!(multiline_code.rendered_text().contains("第一行 第二行"));
+            assert!(
+                multiline_code.rendered_text().contains("第一行 第二行"),
+                "code text: {:?}",
+                multiline_code.rendered_text()
+            );
             let multiline_prefix = "跨行的行内代码：\n".len();
-            assert!(multiline_code.inline_spans().iter().any(|span| {
-                span.style.code
-                    && span.range == (multiline_prefix..multiline_prefix + "第一行 第二行".len())
-            }));
+            assert!(
+                multiline_code.inline_spans().iter().any(|span| {
+                    span.style.code
+                        && span.range
+                            == (multiline_prefix..multiline_prefix + "第一行 第二行".len())
+                }),
+                "spans: {:?}",
+                multiline_code
+                    .inline_spans()
+                    .iter()
+                    .map(|span| (span.range.clone(), span.style.code))
+                    .collect::<Vec<_>>()
+            );
 
             let backtick_sample = visible
                 .iter()
@@ -3916,31 +3985,44 @@ mod tests {
             assert!(!backtick_sample.inline_style_at(backtick_prefix + 1).code);
             assert!(!backtick_sample.inline_style_at(second_start + 2).code);
 
-            assert!(visible.iter().any(|block| {
-                let block = block.entity.read(cx);
-                block.kind() == BlockKind::Quote && block.rendered_text().contains("引用段落二")
-            }));
+            assert!(
+                visible.iter().any(|block| {
+                    let block = block.entity.read(cx);
+                    block.kind() == BlockKind::Quote && block.rendered_text().contains("引用段落二")
+                }),
+                "missing the second quote; kinds: {kinds:?}"
+            );
 
-            assert!(visible.iter().any(|block| {
-                let block = block.entity.read(cx);
-                block.kind() == BlockKind::Table
-                    && block
-                        .record
-                        .table
-                        .as_ref()
-                        .is_some_and(|table| table.header.len() == 3 && table.rows.len() >= 2)
-            }));
+            assert!(
+                visible.iter().any(|block| {
+                    let block = block.entity.read(cx);
+                    block.kind() == BlockKind::Table
+                        && block
+                            .record
+                            .table
+                            .as_ref()
+                            .is_some_and(|table| table.header.len() == 3 && table.rows.len() >= 2)
+                }),
+                "missing the 3-column table; kinds: {kinds:?}"
+            );
 
-            assert!(visible.iter().any(|block| {
-                let block = block.entity.read(cx);
-                block.kind() == BlockKind::HtmlBlock && block.rendered_text().contains("<details>")
-            }));
+            assert!(
+                visible.iter().any(|block| {
+                    let block = block.entity.read(cx);
+                    block.kind() == BlockKind::HtmlBlock
+                        && block.rendered_text().contains("<details>")
+                }),
+                "missing the details html block; kinds: {kinds:?}"
+            );
 
-            assert!(!visible.iter().any(|block| {
-                let block = block.entity.read(cx);
-                block.kind() == BlockKind::RawMarkdown
-                    && block.rendered_text().contains("- 混合列表项")
-            }));
+            assert!(
+                !visible.iter().any(|block| {
+                    let block = block.entity.read(cx);
+                    block.kind() == BlockKind::RawMarkdown
+                        && block.rendered_text().contains("- 混合列表项")
+                }),
+                "list item should not degrade to raw markdown; kinds: {kinds:?}"
+            );
         });
     }
 

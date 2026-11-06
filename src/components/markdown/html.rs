@@ -1484,8 +1484,8 @@ mod tests {
         );
         let style = style_for_node(&doc.nodes[0]);
         let css = style.to_css().expect("safe declarations produce css");
-        assert!(css.contains("color: rgba(0,0,255,1.000)"));
-        assert!(css.contains("font-size: 120%"));
+        assert!(css.contains("color: rgba(0,0,255,1.000)"), "css: {css}");
+        assert!(css.contains("font-size: 120%"), "css: {css}");
     }
 
     #[test]

@@ -420,8 +420,8 @@ mod tests {
             "message_recent_missing_message",
             &[("path", "/tmp/example.md")],
         );
-        assert!(text.contains("/tmp/example.md"));
-        assert!(!text.contains("{path}"));
+        assert!(text.contains("/tmp/example.md"), "text: {text}");
+        assert!(!text.contains("{path}"), "text: {text}");
     }
 
     #[test]

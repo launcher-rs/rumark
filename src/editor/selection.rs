@@ -1420,8 +1420,8 @@ mod tests {
 
             let text = editor.document.markdown_text(cx);
             assert!(!text.contains('|'), "table should be gone: {text:?}");
-            assert!(!text.contains("alpha"));
-            assert!(!text.contains("gamma"));
+            assert!(!text.contains("alpha"), "text: {text}");
+            assert!(!text.contains("gamma"), "text: {text}");
         });
         cx.quit();
     }
@@ -1492,7 +1492,10 @@ mod tests {
             let markdown = editor.cross_block_selected_markdown(cx).unwrap();
             assert!(markdown.contains("| a | b |"), "clipboard: {markdown:?}");
             assert!(markdown.contains("| 1 | 2 |"), "clipboard: {markdown:?}");
-            assert!(markdown.contains("alpha") && markdown.contains("gamma"));
+            assert!(
+                markdown.contains("alpha") && markdown.contains("gamma"),
+                "markdown: {markdown}"
+            );
 
             assert!(editor.delete_cross_block_selection(cx));
             assert!(

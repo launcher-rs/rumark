@@ -1100,9 +1100,21 @@ mod tests {
 
         prune_outline_state(&mut existing, &outline);
 
-        assert!(existing.expanded.contains("outline:0"));
-        assert!(existing.expanded.contains("workspace-dir:C:/docs"));
-        assert!(!existing.expanded.contains("outline:999"));
+        assert!(
+            existing.expanded.contains("outline:0"),
+            "expanded: {:?}",
+            existing.expanded
+        );
+        assert!(
+            existing.expanded.contains("workspace-dir:C:/docs"),
+            "expanded: {:?}",
+            existing.expanded
+        );
+        assert!(
+            !existing.expanded.contains("outline:999"),
+            "expanded: {:?}",
+            existing.expanded
+        );
         assert_eq!(existing.selected, None);
     }
 

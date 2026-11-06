@@ -4288,7 +4288,11 @@ mod tests {
         let serialized = tree.serialize_markdown();
 
         assert_eq!(tree.plain_text(), markdown);
-        assert!(tree.plain_text().contains("།། བདག"));
+        assert!(
+            tree.plain_text().contains("།། བདག"),
+            "plain: {:?}",
+            tree.plain_text()
+        );
         assert!(tree.plain_text().ends_with(' '));
         assert_eq!(serialized, markdown);
         assert_eq!(
@@ -4485,7 +4489,7 @@ mod tests {
         let reparsed = InlineTextTree::from_markdown(&serialized);
 
         assert_eq!(serialized, "1**<u>*2*</u>*34***");
-        assert!(!serialized.contains("*****34"));
+        assert!(!serialized.contains("*****34"), "serialized: {serialized}");
         assert_eq!(reparsed.plain_text(), "1234");
         assert_eq!(reparsed.render_cache().spans(), tree.render_cache().spans());
     }

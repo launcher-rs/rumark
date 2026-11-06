@@ -259,7 +259,7 @@ pub(super) struct SourceMapEntry {
 }
 
 /// 编辑器可呈现的两种编辑视图。
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ViewMode {
     /// 富文本渲染视图：按语义类型为每个块设置样式。
     Rendered,

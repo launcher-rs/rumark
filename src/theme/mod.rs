@@ -566,8 +566,18 @@ mod tests {
     fn builtin_catalog_lists_both_themes() {
         let catalog = bundled_theme_catalog();
         assert_eq!(catalog.len(), 2);
-        assert!(catalog.iter().any(|entry| entry.id == THEME_ID_DARK));
-        assert!(catalog.iter().any(|entry| entry.id == THEME_ID_LIGHT));
+        let ids = catalog
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect::<Vec<_>>();
+        assert!(
+            catalog.iter().any(|entry| entry.id == THEME_ID_DARK),
+            "dark theme missing; ids: {ids:?}"
+        );
+        assert!(
+            catalog.iter().any(|entry| entry.id == THEME_ID_LIGHT),
+            "light theme missing; ids: {ids:?}"
+        );
     }
 
     /// 内置标识切换明暗并回写标识；未知标识返回 false。

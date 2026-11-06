@@ -2293,13 +2293,25 @@ mod tests {
 
         let text =
             std::fs::read_to_string(dirs.app_config_file()).expect("config.toml should exist");
-        assert!(text.contains("open = \"last_opened_file\""));
-        assert!(text.contains("default_language_id = \"zh-CN\""));
-        assert!(text.contains("default_theme_id = \"rumark-light\""));
-        assert!(text.contains("table_headers_visible = false"));
-        assert!(text.contains("image_paste_behavior = \"copy_to_assets_folder\""));
-        assert!(text.contains("include_toc = false"));
-        assert!(text.contains("theme = \"dark\""));
+        assert!(text.contains("open = \"last_opened_file\""), "text: {text}");
+        assert!(
+            text.contains("default_language_id = \"zh-CN\""),
+            "text: {text}"
+        );
+        assert!(
+            text.contains("default_theme_id = \"rumark-light\""),
+            "text: {text}"
+        );
+        assert!(
+            text.contains("table_headers_visible = false"),
+            "text: {text}"
+        );
+        assert!(
+            text.contains("image_paste_behavior = \"copy_to_assets_folder\""),
+            "text: {text}"
+        );
+        assert!(text.contains("include_toc = false"), "text: {text}");
+        assert!(text.contains("theme = \"dark\""), "text: {text}");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2318,8 +2330,11 @@ mod tests {
         assert!(dirs.app_config_file().exists());
         let text =
             std::fs::read_to_string(dirs.app_config_file()).expect("config.toml should exist");
-        assert!(text.contains("[language]"));
-        assert!(text.contains("default_language_id = \"zh-CN\""));
+        assert!(text.contains("[language]"), "text: {text}");
+        assert!(
+            text.contains("default_language_id = \"zh-CN\""),
+            "text: {text}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2355,7 +2370,7 @@ mod tests {
         assert_eq!(preferences.default_theme_id, "rumark-light");
         let text =
             std::fs::read_to_string(dirs.app_config_file()).expect("config.toml should exist");
-        assert!(text.contains("[language]"));
+        assert!(text.contains("[language]"), "text: {text}");
         let _ = std::fs::remove_dir_all(root);
     }
 
