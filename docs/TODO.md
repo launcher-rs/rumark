@@ -142,7 +142,8 @@ git diff --check -- 'src/*.rs' 'AGENTS.md'    # 期望无输出
 3. **`cargo fmt` 会把被改写的文件落成 LF**（`cargo fmt --check` 不会）——跑完 `cargo fmt` 要按第 6.1 条转回 CRLF。
 4. 跨块复制/删除的源码映射：任何字符串切片/替换都要经 `normalize_utf8_range` + `get()` 兜底（多字节 UTF-8 文本），不要按 usize 裸切。
 5. 表格是**唯一**没有自身 `SourceTargetMapping` 的块（只推单元格映射），整表复制走 `src/editor/selection.rs` 的回退分支，改动表格相关映射时两边都要看。
-6. `rgpui`/`rgpui-platform` 是 crates.io 的 `1.4`，版本号在 `Cargo.toml` 有**三处**（两个依赖 + `dev-dependencies` 的 `test-support`），升级要一起改。
+6. `rgpui`/`rgpui-platform` 是 crates.io 的 `1.7`，版本号在 `Cargo.toml` 有**三处**（两个依赖 + `dev-dependencies` 的 `test-support`），升级要一起改。
+7. 行内强调：`has_closing_delimiter` 预扫描与 `parse_until` 的闭合判定**必须共用 `emphasis_close_at`**，且递归解析前要 `builder.checkpoint`、闭不上时 `builder.rollback`。两者任一失配都会让未闭合区间的正文被外层重放，产出重复文本并且**保存即把重复写进文件**（`__foo__bar` 曾写出三段）。口径对齐只挡住扁平场景，区间内还有更短的嵌套分隔符时预扫描必然偏乐观，回滚才是兜底。已知与规范的偏差逐条写在 `commonmark_emphasis_documented_deviations`（`*` 的简化侧翼判定、多字符起始符整体字面量、同标记相邻游程的贪心配对），新增偏差要写明原因。
 
 ## 7. 参考
 

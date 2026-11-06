@@ -1463,6 +1463,18 @@ struct InlineNormalizer {
     normalized_len: usize,
 }
 
+/// 解析一段区间前的构造器快照，区间最终未闭合时用它丢弃已写出的内容。
+struct NormalizerCheckpoint {
+    /// 快照时的片段数量。
+    fragment_count: usize,
+    /// 快照时末尾游程的文本长度；同游程的合并写入会延长它，回退时需要一并截断。
+    tail_text_len: usize,
+    /// 快照时的归一化长度。
+    normalized_len: usize,
+    /// 回退时映射退回「未输出」的源码起点（起始符自身的位置）。
+    source_start: usize,
+}
+
 impl InlineNormalizer {
     /// 新建归一化构造器。
     fn new(input_len: usize) -> Self {
@@ -1470,6 +1482,33 @@ impl InlineNormalizer {
             fragments: Vec::new(),
             visible_to_normalized: vec![0; input_len + 1],
             normalized_len: 0,
+        }
+    }
+
+    /// 记录当前输出状态，供 `rollback` 使用。
+    fn checkpoint(&self, source_start: usize) -> NormalizerCheckpoint {
+        NormalizerCheckpoint {
+            fragment_count: self.fragments.len(),
+            tail_text_len: self
+                .fragments
+                .last()
+                .map(|fragment| fragment.text.len())
+                .unwrap_or(0),
+            normalized_len: self.normalized_len,
+            source_start,
+        }
+    }
+
+    /// 回退到快照：删掉其间写出的片段与文本，起点之后的源码映射先退回未输出，
+    /// 再由外层按字面量重新写出。
+    fn rollback(&mut self, checkpoint: NormalizerCheckpoint) {
+        self.fragments.truncate(checkpoint.fragment_count);
+        if let Some(last) = self.fragments.last_mut() {
+            last.text.truncate(checkpoint.tail_text_len);
+        }
+        self.normalized_len = checkpoint.normalized_len;
+        for boundary in checkpoint.source_start..self.visible_to_normalized.len() {
+            self.visible_to_normalized[boundary] = checkpoint.normalized_len;
         }
     }
 
@@ -1651,44 +1690,17 @@ fn parse_until(
         .unwrap_or(0);
     while index < tokens.len() {
         // 检查结束分隔符。
-        if let Some(ref end_delim) = end_delimiter {
-            let mut closed = match end_delim {
-                EmphasisDelimiter::CodeMarkdown { run_len } => {
-                    tokens[index].ch == '`' && backtick_run_len(tokens, index) == *run_len
-                }
-                EmphasisDelimiter::SuperscriptMarkdown => {
-                    tokens[index].ch == '^' && can_close_emphasis(tokens, index, *end_delim)
-                }
-                EmphasisDelimiter::SubscriptMarkdown => {
-                    is_single_tilde_delimiter(tokens, index)
-                        && can_close_emphasis(tokens, index, *end_delim)
-                }
-                EmphasisDelimiter::StrikethroughMarkdown => {
-                    is_exactly_two_tildes(tokens, index)
-                        && can_close_emphasis(tokens, index, *end_delim)
-                }
-                _ => {
-                    matches_sequence(tokens, index, &end_delim.close())
-                        && can_close_emphasis(tokens, index, *end_delim)
-                        && !emphasis_pair_blocked(tokens, opener_index, *end_delim, index)
-                }
+        if let Some(end_delim) = end_delimiter
+            && emphasis_close_at(tokens, body_start, opener_index, end_delim, index)
+        {
+            let close_len = end_delim.close().chars().count();
+            for token in &tokens[index..index + close_len] {
+                builder.drop_token(token);
+            }
+            return InlineParseResult {
+                next_index: index + close_len,
+                closed: true,
             };
-
-            // 强调区间必须包含至少一个字符，紧贴正文起始的结束符视为字面文本。
-            if closed && index == body_start && emphasis_requires_body(*end_delim) {
-                closed = false;
-            }
-
-            if closed {
-                let close_len = end_delim.close().chars().count();
-                for token in &tokens[index..index + close_len] {
-                    builder.drop_token(token);
-                }
-                return InlineParseResult {
-                    next_index: index + close_len,
-                    closed: true,
-                };
-            }
         }
 
         if !inside_code
@@ -1799,15 +1811,16 @@ fn parse_until(
             }
 
             if let Some(delimiter) = match_open_delimiter(tokens, index) {
+                let literal_run = delimiter.token_len();
                 if has_closing_delimiter(tokens, index, delimiter) {
-                    for token in &tokens[index..index + delimiter.token_len()] {
+                    let checkpoint = builder.checkpoint(tokens[index].source_range.start);
+                    for token in &tokens[index..index + literal_run] {
                         builder.drop_token(token);
                     }
-                    let inner_start = index + delimiter.token_len();
                     let is_code_delim = matches!(delimiter, EmphasisDelimiter::CodeMarkdown { .. });
                     let parsed = parse_until(
                         tokens,
-                        inner_start,
+                        index + literal_run,
                         Some(delimiter),
                         extra_style.apply(delimiter),
                         extra_html_style,
@@ -1819,14 +1832,20 @@ fn parse_until(
                         index = parsed.next_index;
                         continue;
                     }
-                } else if delimiter.token_len() > 1 {
-                    // 未闭合的多字符起始符（`**`、`__`、`~~`、反引号串）整体按字面保留，
-                    // 若只输出首字符，剩余部分会开启更短的区间并在每次按键提交，
-                    // 从而丢失原本的加粗意图。
-                    for token in &tokens[index..index + delimiter.token_len()] {
+
+                    // 递归最终没闭上：预扫描是扁平的，遇到区间内更短的嵌套分隔符会判得偏乐观。
+                    // 回退递归已经写出的正文，否则会和外层重放的 token 叠加成重复文本。
+                    builder.rollback(checkpoint);
+                }
+
+                // 未闭合的多字符起始符（`**`、`__`、`~~`、反引号串）整体按字面保留，
+                // 若只输出首字符，剩余部分会开启更短的区间并在每次按键提交，
+                // 从而丢失原本的加粗意图。
+                if literal_run > 1 {
+                    for token in &tokens[index..index + literal_run] {
                         builder.emit_token(token, extra_style, extra_html_style);
                     }
-                    index += delimiter.token_len();
+                    index += literal_run;
                     continue;
                 }
             }
@@ -1840,6 +1859,42 @@ fn parse_until(
         next_index: tokens.len(),
         closed: false,
     }
+}
+
+/// 判断 `index` 处能否作为 `end_delim` 的结束符。
+///
+/// `parse_until` 的闭合判定与 `has_closing_delimiter` 的预扫描共用本函数，
+/// 两处口径一致，预扫描才不会在有嵌套分隔符的区间上误报「一定能闭合」。
+/// 即便误报，`parse_until` 也会在递归前打快照、闭不上时回滚，正文不会被写两遍。
+fn emphasis_close_at(
+    tokens: &[InlineCharToken],
+    body_start: usize,
+    opener_index: usize,
+    end_delim: EmphasisDelimiter,
+    index: usize,
+) -> bool {
+    let closed = match end_delim {
+        EmphasisDelimiter::CodeMarkdown { run_len } => {
+            tokens[index].ch == '`' && backtick_run_len(tokens, index) == run_len
+        }
+        EmphasisDelimiter::SuperscriptMarkdown => {
+            tokens[index].ch == '^' && can_close_emphasis(tokens, index, end_delim)
+        }
+        EmphasisDelimiter::SubscriptMarkdown => {
+            is_single_tilde_delimiter(tokens, index) && can_close_emphasis(tokens, index, end_delim)
+        }
+        EmphasisDelimiter::StrikethroughMarkdown => {
+            is_exactly_two_tildes(tokens, index) && can_close_emphasis(tokens, index, end_delim)
+        }
+        _ => {
+            matches_sequence(tokens, index, &end_delim.close())
+                && can_close_emphasis(tokens, index, end_delim)
+                && !emphasis_pair_blocked(tokens, opener_index, end_delim, index)
+        }
+    };
+
+    // 强调区间必须包含至少一个字符，紧贴正文起始的结束符视为字面文本。
+    closed && !(index == body_start && emphasis_requires_body(end_delim))
 }
 
 /// 解析行内公式。
@@ -2669,7 +2724,6 @@ fn has_closing_delimiter(
     delimiter: EmphasisDelimiter,
 ) -> bool {
     let skip = delimiter.token_len();
-    let close_str = delimiter.close();
 
     // 代码段查找等长反引号串，强调只需扫描结束串。
     if let EmphasisDelimiter::CodeMarkdown { .. } = delimiter {
@@ -2704,7 +2758,6 @@ fn has_closing_delimiter(
     }
 
     let body_start = index + skip;
-    let requires_body = emphasis_requires_body(delimiter);
     let mut cursor = body_start;
     while cursor < tokens.len() {
         if tokens[cursor].ch == '\\'
@@ -2714,17 +2767,8 @@ fn has_closing_delimiter(
             continue;
         }
 
-        if matches_sequence(tokens, cursor, &close_str) {
-            // 强调区间必须非空，紧贴起始符的结束符视为空区间，按字面处理。
-            if requires_body && cursor == body_start {
-                cursor += 1;
-                continue;
-            }
-            // 规则 3：跳过因长度组合无法与开启符配对的结束符。
-            if emphasis_pair_blocked(tokens, index, delimiter, cursor) {
-                cursor += 1;
-                continue;
-            }
+        // 与递归解析同一套闭合判定；本扫描是扁平的，区间内若有更短的嵌套分隔符仍可能偏乐观。
+        if emphasis_close_at(tokens, body_start, index, delimiter, cursor) {
             return true;
         }
 
@@ -3771,8 +3815,10 @@ fn set_style_flag(mut style: InlineStyle, flag: InlineStyleFlag, enabled: bool) 
 
 /// 判断能否开启强调。
 ///
-/// `_` 采用 CommonMark 侧翼（flanking）规则，单词内部的下划线不作为强调起始；
-/// `*` 保持原有的简化判定以避免影响既有行为。
+/// `_` 按 CommonMark 的左右侧翼规则判定（词内下划线不作起始）；
+/// `*` 沿用简化的「后一字符非空白」判定：Toggle 加粗/斜体与局部取消样式的
+/// 序列化行为都建立在它之上，改成完整侧翼规则会让 `***ab***`、`1*2*34` 一类
+/// 既有用例回退成字面量，属于独立的改造，不在本轮处理。
 fn can_open_emphasis(tokens: &[InlineCharToken], index: usize, len: usize, marker: char) -> bool {
     if marker == '_' {
         let (left, right) = delimiter_flanking(tokens, index, len);
@@ -3788,7 +3834,9 @@ fn can_open_emphasis(tokens: &[InlineCharToken], index: usize, len: usize, marke
 
 /// 判断能否结束强调。
 ///
-/// `_` 采用 CommonMark 侧翼规则，单词内部的下划线不作为强调结束。
+/// `_` 按 CommonMark 侧翼规则判定，词内下划线不作结束；`*` 与其他标记
+/// （删除线、上下标、超文本）沿用「结束符前非空白」的简化判定，理由同
+/// [`can_open_emphasis`]。
 fn can_close_emphasis(
     tokens: &[InlineCharToken],
     index: usize,
@@ -3937,6 +3985,261 @@ mod tests {
                 .all(|span| !span.style.italic && !span.style.bold),
             "intraword underscores must stay literal"
         );
+    }
+
+    /// 概括一段 Markdown 解析后的加粗/斜体分布，样式标记紧跟其作用的文本：
+    /// `foo[I] bar` 表示 `foo` 斜体、` bar` 纯文本，`ab[BI]` 表示既粗又斜。
+    ///
+    /// 按逐字节样式重新聚合，而不是直接罗列片段：`***x***` 这类两层嵌套会
+    /// 产出相邻的同样式片段，逐片段输出会把同一个游程拆成两段。
+    fn emphasis_outline(source: &str) -> String {
+        let tree = InlineTextTree::from_markdown(source);
+        let text = tree.plain_text();
+        let mut bold = vec![false; text.len()];
+        let mut italic = vec![false; text.len()];
+        for span in tree.render_cache().spans() {
+            assert!(
+                !span.style.code
+                    && !span.style.underline
+                    && !span.style.strikethrough
+                    && span.style.script == InlineScript::Normal,
+                "强调用例只应涉及加粗/斜体：{source:?}"
+            );
+            for offset in span.range.clone() {
+                bold[offset] = span.style.bold;
+                italic[offset] = span.style.italic;
+            }
+        }
+
+        let mut runs = Vec::new();
+        let mut index = 0usize;
+        while index < text.len() {
+            let flags = (bold[index], italic[index]);
+            let mut end = index;
+            while end < text.len() && (bold[end], italic[end]) == flags {
+                end += 1;
+            }
+            // 样式区间始终按字符边界对齐，同一样式游程不会在 UTF-8 字符中间断开。
+            runs.push((text[index..end].to_string(), flags.0, flags.1));
+            index = end;
+        }
+        render_runs(&runs)
+    }
+
+    /// 把「文本 + 加粗/斜体」游程渲染成轮廓字符串，相邻同样式游程合并，
+    /// 样式标记紧跟其作用的文本。
+    fn render_runs(runs: &[(String, bool, bool)]) -> String {
+        let mut outline = String::new();
+        let mut current: Option<(bool, bool)> = None;
+        for (text, bold, italic) in runs {
+            let flags = (*bold, *italic);
+            if current != Some(flags) {
+                if let Some(previous) = current {
+                    outline.push_str(style_marker(previous));
+                }
+                current = Some(flags);
+            }
+            outline.push_str(text);
+        }
+        if let Some(flags) = current {
+            outline.push_str(style_marker(flags));
+        }
+        outline
+    }
+
+    /// 样式游程的轮廓标记。
+    fn style_marker(flags: (bool, bool)) -> &'static str {
+        match flags {
+            (true, true) => "[BI]",
+            (true, false) => "[B]",
+            (false, true) => "[I]",
+            (false, false) => "",
+        }
+    }
+
+    /// 规范基线：交给 CommonMark 的成熟实现（本仓已依赖的 `pulldown-cmark`）解析，
+    /// 压成与 `emphasis_outline` 同格式的强调轮廓，这样表驱动测试不必写死期望字符串。
+    ///
+    /// 用例只放纯文本与强调标记，出现代码、链接、HTML 等其他事件立即失败，
+    /// 免得基线悄悄变成在比对别的语法。
+    fn spec_outline(source: &str) -> String {
+        use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+
+        let mut bold = false;
+        let mut italic = false;
+        let mut runs = Vec::new();
+        for event in Parser::new_ext(source, Options::empty()) {
+            match event {
+                Event::Start(Tag::Strong) => bold = true,
+                Event::End(TagEnd::Strong) => bold = false,
+                Event::Start(Tag::Emphasis) => italic = true,
+                Event::End(TagEnd::Emphasis) => italic = false,
+                // 单行用例只会被包成一段，段落本身不带样式。
+                Event::Start(Tag::Paragraph) | Event::End(TagEnd::Paragraph) => {}
+                Event::Text(text) => {
+                    if !text.is_empty() {
+                        runs.push((text.to_string(), bold, italic));
+                    }
+                }
+                other => panic!("规范基线用例只应涉及强调与纯文本：{source:?} -> {other:?}"),
+            }
+        }
+        render_runs(&runs)
+    }
+
+    #[test]
+    fn commonmark_emphasis_matches_spec() {
+        // CommonMark §6.2「强调与加粗强调」：成对分隔符、侧翼规则、规则 3、词内下划线。
+        // 期望值直接取规范实现的解析结果，实现偏差由本表当场暴露。
+        for source in [
+            // 基本成对形式与长度分档
+            "*foo bar*",
+            "_foo bar_",
+            "**foo bar**",
+            "__foo bar__",
+            "***foo bar***",
+            "___foo bar___",
+            // 起始符后紧跟空白、结束符前紧跟空白 → 不是左侧/右侧翼，保持字面量
+            // （行首 `* ` 会被规范判成列表，用例一律加前缀避开块级语法）
+            "a * foo bar*",
+            "*foo bar *",
+            "**foo bar **",
+            // 词内强调：`*` 允许，`_` 只在整个游程都不贴词内时成立
+            "*foo*bar",
+            "foo*bar*",
+            "foo*bar*baz",
+            "_foo_bar_",
+            "foo_bar_baz",
+            "aa_bb_cc",
+            "aa__bb__cc",
+            "__foo__bar",
+            "foo__bar__baz",
+            "___foo__bar",
+            // 分隔符长度不一致的成对与未配对
+            "*foo**",
+            "*foo***",
+            "**",
+            "*foo",
+            "**foo",
+            // 嵌套
+            "**a *b* c**",
+            "*a **b** c*",
+            "**(*foo*)**",
+            "*_foo_*",
+            "_*foo*_",
+            // 标点相邻
+            "*(foo)*",
+            "**(foo)**",
+            "\"*foo*\"",
+            // 规则 3：开闭长度之和为 3 的倍数且并非全为 3 的倍数 → 不能配对
+            "*foo**bar**baz*",
+            "***foo****",
+            // 空内容
+            "**_**",
+            "__*__",
+            // 连续同标记游程
+            "***foo***bar***baz***",
+        ] {
+            assert_eq!(
+                emphasis_outline(source),
+                spec_outline(source),
+                "source: {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn commonmark_emphasis_documented_deviations() {
+        // 与规范实现的已知差异，逐条写明原因，改动解析器时不得静默扩大这张表。
+        // 期望值是实测输出（`emphasis_outline` 的格式），不是规范结果。
+        for (source, expected, reason) in [
+            (
+                "a ** foo bar**",
+                "a * foo bar[I]*",
+                "`*` 的起始判定是简化的「后一字符非空白」，双游程会被当成单游程 + 字面量",
+            ),
+            (
+                "a*\"foo\"*",
+                "a\"foo\"[I]",
+                "`*` 的结束判定是简化的「前一字符非空白」，少了规范的右侧翼限制",
+            ),
+            (
+                "**foo*",
+                "**foo*",
+                "未闭合的多字符起始符整体按字面保留，保证加粗意图不因漏写一半标记而丢失",
+            ),
+            (
+                "***foo**",
+                "**foo[I]*",
+                "同上：外层 `**` 闭不上时退回字面量，内层按 `*` 成对",
+            ),
+            (
+                "***a *b* c***",
+                "a b c[BI]",
+                "同标记相邻游程用递归贪心配对，规范的分隔符栈会把尾游程拆成斜体 + 加粗",
+            ),
+            (
+                "*(**foo**)*",
+                "(foo)[I]",
+                "同上：外层斜体区间内的加粗游程被外层一并吞掉",
+            ),
+            (
+                "__a__b__",
+                "__a_b[I]_",
+                "下划线游程按 2 + 1 拆分尝试，规范把整个游程当作可拆分的分隔符栈结点",
+            ),
+            (
+                "*(*foo*)*",
+                "([I]foo)[I]",
+                "同标记嵌套的配对顺序差异，视觉样式相同但样式边界不同",
+            ),
+        ] {
+            assert_eq!(
+                emphasis_outline(source),
+                expected,
+                "source: {source:?} 偏差原因：{reason}"
+            );
+            assert_ne!(
+                emphasis_outline(source),
+                spec_outline(source),
+                "source: {source:?} 已与规范一致，应从偏差表移入基线表"
+            );
+        }
+    }
+
+    #[test]
+    fn unmatched_emphasis_runs_do_not_duplicate_text() {
+        // 回归：预扫描曾比递归闭包判定少查侧翼规则，且递归闭不上时外层还会重放
+        // 整段 token，两者叠加让未配对的下划线游程写出重复文本，保存即损坏文档。
+        for source in [
+            "__foo__bar",
+            "foo__bar__baz",
+            "x__y__z__w",
+            "a__b__c",
+            "_a__b_c",
+            "__a__b__",
+            "***foo**",
+            "***foo***bar***baz***",
+            "*a**b*c",
+            "a*b**c*d",
+        ] {
+            let tree = InlineTextTree::from_markdown(source);
+            let plain = tree.plain_text();
+
+            // 纯强调输入的正文只可能去掉成对标记，绝不会凭空变长。
+            assert!(
+                plain.len() <= source.len(),
+                "source: {source:?} plain: {plain:?}"
+            );
+
+            // 写出再读回必须得到同一文本：重复内容会在往返里继续膨胀或漂移。
+            let escaped = tree.serialize_markdown();
+            let round_trip = InlineTextTree::from_markdown(&escaped).plain_text();
+            assert_eq!(
+                round_trip, plain,
+                "source: {source:?} serialize: {escaped:?}"
+            );
+        }
     }
 
     #[test]
