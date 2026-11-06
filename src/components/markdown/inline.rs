@@ -125,6 +125,25 @@ pub struct InlineFragment {
     pub math: Option<InlineMath>,
 }
 
+/// 追加片段：与末尾片段的渲染属性完全一致时并入其中，否则另起一段。
+///
+/// 公式片段各自带源码与定界符，永不参与合并。
+fn push_merged_fragment(fragments: &mut Vec<InlineFragment>, fragment: InlineFragment) {
+    if let Some(last) = fragments.last_mut()
+        && last.style == fragment.style
+        && last.html_style == fragment.html_style
+        && last.link == fragment.link
+        && last.footnote == fragment.footnote
+        && last.math.is_none()
+        && fragment.math.is_none()
+    {
+        last.text.push_str(&fragment.text);
+        return;
+    }
+
+    fragments.push(fragment);
+}
+
 /// 源码保留的行内 LaTeX 公式元数据。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InlineMath {
@@ -1260,19 +1279,7 @@ impl InlineTextTree {
                 continue;
             }
 
-            if let Some(last) = normalized.last_mut()
-                && last.style == fragment.style
-                && last.html_style == fragment.html_style
-                && last.link == fragment.link
-                && last.footnote == fragment.footnote
-                && last.math.is_none()
-                && fragment.math.is_none()
-            {
-                last.text.push_str(&fragment.text);
-                continue;
-            }
-
-            normalized.push(fragment);
+            push_merged_fragment(&mut normalized, fragment);
         }
         self.fragments = normalized;
     }
@@ -2012,18 +2019,7 @@ fn parse_footnote_reference(
 
     for fragment in fragments {
         builder.normalized_len += fragment.text.len();
-        if let Some(last) = builder.fragments.last_mut()
-            && last.style == fragment.style
-            && last.html_style == fragment.html_style
-            && last.link == fragment.link
-            && last.footnote == fragment.footnote
-            && last.math.is_none()
-            && fragment.math.is_none()
-        {
-            last.text.push_str(&fragment.text);
-        } else {
-            builder.fragments.push(fragment);
-        }
+        push_merged_fragment(&mut builder.fragments, fragment);
     }
 
     for boundary in tokens[end_index].source_range.end..=tokens[end_index].source_range.end {
@@ -2084,18 +2080,7 @@ fn parse_inline_link(
         fragment.footnote = None;
         fragment.math = None;
         builder.normalized_len += fragment.text.len();
-        if let Some(last) = builder.fragments.last_mut()
-            && last.style == fragment.style
-            && last.html_style == fragment.html_style
-            && last.link == fragment.link
-            && last.footnote == fragment.footnote
-            && last.math.is_none()
-            && fragment.math.is_none()
-        {
-            last.text.push_str(&fragment.text);
-        } else {
-            builder.fragments.push(fragment);
-        }
+        push_merged_fragment(&mut builder.fragments, fragment);
     }
 
     Some(located.end_index + 1)
@@ -2148,18 +2133,7 @@ fn parse_autolink(
 
     for fragment in fragments {
         builder.normalized_len += fragment.text.len();
-        if let Some(last) = builder.fragments.last_mut()
-            && last.style == fragment.style
-            && last.html_style == fragment.html_style
-            && last.link == fragment.link
-            && last.footnote == fragment.footnote
-            && last.math.is_none()
-            && fragment.math.is_none()
-        {
-            last.text.push_str(&fragment.text);
-        } else {
-            builder.fragments.push(fragment);
-        }
+        push_merged_fragment(&mut builder.fragments, fragment);
     }
 
     Some(end_index + 1)
