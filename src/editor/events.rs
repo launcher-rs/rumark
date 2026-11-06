@@ -2489,6 +2489,8 @@ impl Editor {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
     use super::Editor;
     use crate::components::{
         Block, BlockEvent, BlockKind, BlockRecord, CalloutVariant, Delete, DeleteBack,
@@ -4831,5 +4833,86 @@ mod tests {
             assert_eq!(visible[1].entity.read(cx).rendered_text(), "item");
             assert_eq!(editor.document.markdown_text(cx), "> first\n> - item");
         });
+    }
+
+    #[test]
+    fn markdown_image_target_escapes_path_structural_characters() {
+        // 目标里的括号、引号与反斜杠都必须转义，否则图片语法被截断。
+        assert_eq!(
+            Editor::markdown_image_target(r"pics/a (1).png"),
+            r"pics/a \(1\).png"
+        );
+        assert_eq!(Editor::markdown_image_target(r#"a"b.png"#), r#"a\"b.png"#);
+        assert_eq!(
+            Editor::markdown_image_target(r"C:\pics\a.png"),
+            r"C:\\pics\\a.png"
+        );
+        assert_eq!(
+            Editor::markdown_image_target("普通/路径.png"),
+            "普通/路径.png"
+        );
+    }
+
+    #[test]
+    fn markdown_path_string_uses_forward_slashes() {
+        let path = PathBuf::from("docs").join("assets").join("a.png");
+        let text = Editor::markdown_path_string(&path);
+
+        assert!(!text.contains('\\'), "text: {text:?}");
+        assert!(text.ends_with("assets/a.png"), "text: {text:?}");
+    }
+
+    #[test]
+    fn relative_markdown_path_prefixes_with_dot_slash_and_rejects_outside_paths() {
+        let root = PathBuf::from("docs");
+        let inside = root.join("assets").join("a.png");
+
+        let relative = Editor::relative_markdown_path(&root, &inside)
+            .expect("path under the root should be made relative");
+        assert!(relative.starts_with("./"), "relative: {relative:?}");
+        assert!(relative.ends_with("assets/a.png"), "relative: {relative:?}");
+
+        // 不在文档目录下的路径无法相对化。
+        assert_eq!(
+            Editor::relative_markdown_path(&root, &PathBuf::from("other/a.png")),
+            None
+        );
+    }
+
+    #[test]
+    fn embedded_mime_covers_common_extensions_and_falls_back_to_png() {
+        let mime_of = |name: &str| Editor::embedded_mime_for_extension(Path::new(name));
+
+        assert_eq!(mime_of("a.png"), "image/png");
+        assert_eq!(mime_of("a.JPG"), "image/jpeg");
+        assert_eq!(mime_of("a.jpeg"), "image/jpeg");
+        assert_eq!(mime_of("a.svg"), "image/svg+xml");
+        assert_eq!(mime_of("a.webp"), "image/webp");
+        assert_eq!(mime_of("a.tiff"), "image/tiff");
+        assert_eq!(mime_of("a.bin"), "image/png");
+        assert_eq!(mime_of("no-extension"), "image/png");
+    }
+
+    #[test]
+    fn embedded_data_uri_round_trips_back_to_the_original_bytes() {
+        let bytes = b"\x89PNG\r\n\x1a\n fake payload ".to_vec();
+        let uri = Editor::embedded_data_uri("image/png", &bytes);
+
+        assert!(uri.starts_with("data:image/png;base64,"), "uri: {uri}");
+        let (format, decoded) = crate::components::markdown::image::parse_embedded_data_uri(&uri)
+            .expect("data uri should parse");
+        assert_eq!(format, rgpui::ImageFormat::Png);
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn embed_size_limit_rejects_only_oversized_payloads() {
+        assert!(Editor::check_embedded_size(1024).is_ok());
+        assert!(Editor::check_embedded_size(Editor::MAX_EMBED_BYTES).is_ok());
+
+        let err = Editor::check_embedded_size(Editor::MAX_EMBED_BYTES + 1)
+            .expect_err("oversized payload should be rejected");
+        // 提示里带上实际体积，方便用户判断该改用附件目录偏好。
+        assert!(err.to_string().contains("5MB"), "err: {err}");
     }
 }

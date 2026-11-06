@@ -633,3 +633,148 @@ async fn show_image_action_error_in_window(
         },
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use rgpui::{Entity, TestAppContext};
+
+    use super::{
+        CopyAsFormat, Editor, ImageMenuData, escape_html_attr, escape_markdown_alt,
+        escape_markdown_title, is_html_img,
+    };
+    use crate::components::ImageResolvedSource;
+    use crate::i18n::I18nManager;
+
+    /// 初始化测试应用并用给定 Markdown 建立编辑器（测试辅助）。
+    fn editor_with(cx: &mut TestAppContext, markdown: &str) -> Entity<Editor> {
+        cx.update(|cx| {
+            I18nManager::init_with_language_id(cx, "en-US");
+            rgpui::theme::init(cx);
+            crate::components::init(cx);
+        });
+        let (editor, _cx) =
+            cx.add_window_view(|_window, cx| Editor::from_markdown(cx, markdown.to_string(), None));
+        editor
+    }
+
+    /// 取首个可见块并描述其图片菜单快照（测试辅助）。
+    fn describe(editor: &Entity<Editor>, cx: &mut TestAppContext) -> Option<ImageMenuData> {
+        editor.update(cx, |editor, cx| {
+            let block = editor
+                .document
+                .visible_blocks()
+                .first()
+                .expect("document should hold a block")
+                .entity
+                .clone();
+            editor.describe_image_menu(Some(block.entity_id()), cx)
+        })
+    }
+
+    #[test]
+    fn markdown_alt_and_title_escape_their_own_delimiters() {
+        assert_eq!(escape_markdown_alt(r"a]b\c"), r"a\]b\\c");
+        assert_eq!(escape_markdown_alt("普通替代文本"), "普通替代文本");
+        assert_eq!(escape_markdown_title(r#"a"b\c"#), r#"a\"b\\c"#);
+    }
+
+    #[test]
+    fn html_attribute_escape_blocks_structural_characters() {
+        assert_eq!(escape_html_attr("a&b\"c<d>e"), "a&amp;b&quot;c&lt;d&gt;e");
+        assert!(is_html_img("  <img src=\"a.png\" />"));
+        assert!(!is_html_img("![alt](a.png)"));
+        assert!(!is_html_img("<div><img /></div>"));
+    }
+
+    #[rgpui::test]
+    async fn markdown_image_block_describes_source_targets_and_formats(cx: &mut TestAppContext) {
+        let editor = editor_with(cx, "![图 *a*](pics/a.png)");
+        let data = describe(&editor, cx).expect("markdown image block should describe");
+
+        assert_eq!(data.alt, "图 *a*");
+        assert_eq!(data.src, "pics/a.png");
+        assert!(!data.from_html);
+        assert!(data.is_local());
+        assert!(!data.is_remote());
+        assert!(data.local_path().is_some());
+
+        // Markdown 原样复制，HTML 由当前缩放生成。
+        assert_eq!(
+            data.copy_text(CopyAsFormat::Markdown),
+            "![图 *a*](pics/a.png)"
+        );
+        assert_eq!(
+            data.copy_text(CopyAsFormat::Html),
+            "<img src=\"pics/a.png\" alt=\"图 *a*\" style=\"zoom:100%;\" />"
+        );
+        assert_eq!(data.copy_text(CopyAsFormat::Url), "pics/a.png");
+    }
+
+    #[rgpui::test]
+    async fn html_image_block_describes_zoom_and_converts_back_to_markdown(
+        cx: &mut TestAppContext,
+    ) {
+        let editor = editor_with(
+            cx,
+            "<img src=\"pics/b.png\" alt=\"b\" title=\"标题\" style=\"zoom:50%;\" />",
+        );
+        let data = describe(&editor, cx).expect("html img block should describe");
+
+        assert!(data.from_html);
+        assert_eq!(data.title.as_deref(), Some("标题"));
+        assert_eq!(data.zoom, 0.5);
+
+        // HTML 块复制为 Markdown 时还原为规范图片语法，复制为 HTML 时保留原文。
+        assert_eq!(data.markdown_form(), "![b](pics/b.png \"标题\")");
+        assert_eq!(
+            data.copy_text(CopyAsFormat::Markdown),
+            "![b](pics/b.png \"标题\")"
+        );
+        assert_eq!(
+            data.copy_text(CopyAsFormat::Html),
+            "<img src=\"pics/b.png\" alt=\"b\" title=\"标题\" style=\"zoom:50%;\" />"
+        );
+
+        // 按新的缩放重新生成 HTML 文本。
+        assert_eq!(
+            data.html_form(1.0 / 3.0),
+            "<img src=\"pics/b.png\" alt=\"b\" title=\"标题\" style=\"zoom:33%;\" />"
+        );
+    }
+
+    #[rgpui::test]
+    async fn non_image_block_is_not_described(cx: &mut TestAppContext) {
+        let editor = editor_with(cx, "这是一段普通文字");
+
+        assert!(describe(&editor, cx).is_none());
+    }
+
+    #[rgpui::test]
+    async fn load_bytes_reads_embedded_data_and_rejects_remote_images(cx: &mut TestAppContext) {
+        let editor = editor_with(cx, "![a](pics/a.png)");
+        let base = describe(&editor, cx).expect("snapshot should exist");
+
+        let embedded = ImageMenuData {
+            resolved: ImageResolvedSource::Embedded {
+                format: rgpui::ImageFormat::Png,
+                bytes: vec![1, 2, 3, 4],
+            },
+            ..base.clone()
+        };
+        let (format, bytes) = embedded.load_bytes().expect("embedded bytes should load");
+        assert_eq!(format, rgpui::ImageFormat::Png);
+        assert_eq!(bytes, vec![1, 2, 3, 4]);
+        assert!(embedded.is_embedded());
+        assert!(!embedded.is_local());
+
+        let remote = ImageMenuData {
+            resolved: ImageResolvedSource::Remote(rgpui::SharedUri::from(
+                "https://example.com/a.png".to_string(),
+            )),
+            ..base
+        };
+        assert!(remote.is_remote());
+        assert_eq!(remote.local_path(), None);
+        assert!(remote.load_bytes().is_err());
+    }
+}

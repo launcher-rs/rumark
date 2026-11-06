@@ -64,6 +64,65 @@ fn open_startup_window(cx: &mut App, startup_open: config::StartupOpenPreference
     open_editor_window(cx, String::new(), None);
 }
 
+/// 命令行解析结果。
+#[derive(Debug)]
+enum CliInvocation {
+    /// 打印该文本后直接退出（`--version` / `--help`）。
+    Print(String),
+    /// 未知选项：提示后以失败码退出。
+    UnknownOption(String),
+    /// 正常启动：待打开的文件与是否后台运行。
+    Launch { paths: Vec<PathBuf>, detach: bool },
+}
+
+/// 解析命令行参数（纯函数，便于单测）。
+fn parse_cli_args(args: &[String]) -> CliInvocation {
+    let mut detach = false;
+    let mut input_paths = Vec::new();
+
+    for arg in args.iter().skip(1) {
+        match arg.as_str() {
+            "--version" | "-v" => {
+                return CliInvocation::Print(format!("rumark {}\n", env!("CARGO_PKG_VERSION")));
+            }
+            "--help" | "-h" => {
+                return CliInvocation::Print(format!(
+                    "\
+rumark {version} - A block-based Markdown editor
+
+USAGE:
+    rumark [OPTIONS] [FILES...]
+
+OPTIONS:
+    -v, --version    Print version information
+    -h, --help       Print this help message
+    -d, --detach     Launch in background (non-blocking)
+
+FILES:
+    One or more markdown files to open. If no files are specified,
+    opens an empty document.
+",
+                    version = env!("CARGO_PKG_VERSION")
+                ));
+            }
+            "--detach" | "-d" => {
+                detach = true;
+            }
+            option if option.starts_with('-') => {
+                return CliInvocation::UnknownOption(option.to_string());
+            }
+            path => {
+                input_paths.push(PathBuf::from(path));
+            }
+        }
+    }
+
+    CliInvocation::Launch {
+        paths: input_paths,
+        detach,
+    }
+}
+
 /// 解析命令行参数并启动应用主循环。
 fn main() {
     // 框架及其平台后端的诊断日志：不调用则 `log` 输出全部静默丢弃。
@@ -74,48 +133,17 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     // 解析命令行参数
-    let mut detach = false;
-    let mut input_paths = Vec::new();
-
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--version" | "-v" => {
-                println!("rumark {}", env!("CARGO_PKG_VERSION"));
-                return;
-            }
-            "--help" | "-h" => {
-                println!(
-                    "rumark {} - A block-based Markdown editor",
-                    env!("CARGO_PKG_VERSION")
-                );
-                println!();
-                println!("USAGE:");
-                println!("    rumark [OPTIONS] [FILES...]");
-                println!();
-                println!("OPTIONS:");
-                println!("    -v, --version    Print version information");
-                println!("    -h, --help       Print this help message");
-                println!("    -d, --detach     Launch in background (non-blocking)");
-                println!();
-                println!("FILES:");
-                println!("    One or more markdown files to open. If no files are specified,");
-                println!("    opens an empty document.");
-                return;
-            }
-            "--detach" | "-d" => {
-                detach = true;
-            }
-            option if option.starts_with('-') => {
-                eprintln!("Unknown option: {}", option);
-                std::process::exit(1);
-            }
-            path => {
-                input_paths.push(PathBuf::from(path));
-            }
+    let (input_paths, detach) = match parse_cli_args(&args) {
+        CliInvocation::Print(text) => {
+            print!("{text}");
+            return;
         }
-        i += 1;
-    }
+        CliInvocation::UnknownOption(option) => {
+            eprintln!("Unknown option: {option}");
+            std::process::exit(1);
+        }
+        CliInvocation::Launch { paths, detach } => (paths, detach),
+    };
 
     #[cfg(not(target_os = "macos"))]
     let _ = detach;
@@ -257,4 +285,97 @@ fn main() {
         app_menu::install_menus(cx);
         cx.refresh_windows();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CliInvocation, parse_cli_args};
+    use std::path::PathBuf;
+
+    /// 按命令行字面量构造参数（测试辅助）。
+    fn args(items: &[&str]) -> Vec<String> {
+        items.iter().map(|item| item.to_string()).collect()
+    }
+
+    /// 取启动分支的文件与后台标记（测试辅助）。
+    fn launch(items: &[&str]) -> (Vec<PathBuf>, bool) {
+        match parse_cli_args(&args(items)) {
+            CliInvocation::Launch { paths, detach } => (paths, detach),
+            other => panic!("expected a launch invocation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bare_invocation_launches_an_empty_document() {
+        let (paths, detach) = launch(&["rumark"]);
+
+        assert!(paths.is_empty());
+        assert!(!detach);
+    }
+
+    #[test]
+    fn file_arguments_keep_their_order() {
+        let (paths, _detach) = launch(&["rumark", "a.md", "docs/b.markdown", "/tmp/c.md"]);
+
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("a.md"),
+                PathBuf::from("docs/b.markdown"),
+                PathBuf::from("/tmp/c.md"),
+            ]
+        );
+    }
+
+    #[test]
+    fn detach_flags_are_recognized_in_long_and_short_form() {
+        assert!(launch(&["rumark", "--detach", "a.md"]).1);
+        assert!(launch(&["rumark", "-d", "a.md"]).1);
+        // 后置同样生效，且不吞掉文件参数。
+        let (paths, detach) = launch(&["rumark", "a.md", "-d", "b.md"]);
+        assert!(detach);
+        assert_eq!(paths, vec![PathBuf::from("a.md"), PathBuf::from("b.md")]);
+    }
+
+    #[test]
+    fn version_and_help_short_circuit_with_text() {
+        for flag in ["--version", "-v"] {
+            match parse_cli_args(&args(&["rumark", flag])) {
+                CliInvocation::Print(text) => {
+                    assert!(text.contains("rumark "), "text: {text:?}");
+                    assert!(!text.contains("USAGE"), "text: {text:?}");
+                }
+                other => panic!("{flag} should print, got {other:?}"),
+            }
+        }
+
+        for flag in ["--help", "-h"] {
+            match parse_cli_args(&args(&["rumark", flag])) {
+                CliInvocation::Print(text) => {
+                    assert!(text.contains("USAGE:"), "text: {text:?}");
+                    assert!(text.contains("-d, --detach"), "text: {text:?}");
+                }
+                other => panic!("{flag} should print, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn printing_flags_win_over_later_file_arguments() {
+        // 版本/帮助在扫描到即返回，后续文件参数不再解析。
+        assert!(matches!(
+            parse_cli_args(&args(&["rumark", "a.md", "--version"])),
+            CliInvocation::Print(_)
+        ));
+    }
+
+    #[test]
+    fn unknown_options_are_reported_without_launching() {
+        for flag in ["--wat", "-x"] {
+            match parse_cli_args(&args(&["rumark", flag])) {
+                CliInvocation::UnknownOption(option) => assert_eq!(option, flag),
+                other => panic!("{flag} should be unknown, got {other:?}"),
+            }
+        }
+    }
 }
