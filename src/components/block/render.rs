@@ -658,7 +658,12 @@ impl Block {
     }
 
     /// 渲染 Mermaid 内容。
-    fn render_mermaid_content(&self, theme: &Theme, window: &Window) -> AnyElement {
+    fn render_mermaid_content(
+        &self,
+        theme: &Theme,
+        i18n: &I18nSnapshot,
+        window: &Window,
+    ) -> AnyElement {
         let d = &ThemeDimensions::DEFAULT;
         let t = &ThemeTypography::DEFAULT;
         let raw = self
@@ -732,7 +737,10 @@ impl Block {
                     div()
                         .text_size(px(t.code_size))
                         .text_color(theme.muted_foreground)
-                        .child(SharedString::from(format!("Mermaid render error: {err}"))),
+                        .child(SharedString::from(i18n.t(
+                            "code_mermaid_render_error",
+                            &[("error", &err.to_string())],
+                        ))),
                 )
                 .into_any_element(),
         }
@@ -3343,7 +3351,7 @@ impl Render for Block {
                 } else if self.cursor_blink_task.is_none() {
                     self.start_cursor_blink(cx);
                 }
-                let rendered = self.render_mermaid_content(&theme, window);
+                let rendered = self.render_mermaid_content(&theme, &i18n, window);
                 // 聚焦时源码行叠加在渲染图上方，图保持可见（对齐 Typora）。
                 let child = if focused {
                     div()

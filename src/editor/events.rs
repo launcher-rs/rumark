@@ -19,6 +19,36 @@ use crate::components::{
     parse_table_body_row, update_entity_forgiving,
 };
 use crate::config::{ImagePasteBehavior, read_app_preferences};
+use crate::i18n::I18nSnapshot;
+
+/// 图片字节数超过内嵌上限。
+///
+/// 只携带体积，文案交给展示方按当前语言生成，避免中文串硬编码进错误链。
+#[derive(Debug)]
+pub(super) struct ImageEmbedTooLarge {
+    pub(super) size_bytes: usize,
+}
+
+impl std::fmt::Display for ImageEmbedTooLarge {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "image is too large to embed inline")
+    }
+}
+
+impl std::error::Error for ImageEmbedTooLarge {}
+
+/// 图片链路错误的用户可读文案：体积超限展开为 i18n 提示，其余沿用原始信息。
+pub(super) fn image_error_detail(err: &anyhow::Error, i18n: &I18nSnapshot) -> String {
+    let Some(too_large) = err.downcast_ref::<ImageEmbedTooLarge>() else {
+        return err.to_string();
+    };
+    let size = format!("{:.1}", too_large.size_bytes as f64 / (1024.0 * 1024.0));
+    let limit = format!("{}", Editor::MAX_EMBED_BYTES / (1024 * 1024));
+    i18n.t(
+        "message_image_embed_too_large",
+        &[("size", &size), ("limit", &limit)],
+    )
+}
 
 impl Editor {
     /// 找到当前实际聚焦且可处理 Tab 键的块。
@@ -525,15 +555,14 @@ impl Editor {
     }
 
     /// 内嵌体积上限：base64 膨胀约 1/3，5MB 原图即约 6.8MB 文本，文档会明显卡顿。
-    const MAX_EMBED_BYTES: usize = 5 * 1024 * 1024;
+    pub(super) const MAX_EMBED_BYTES: usize = 5 * 1024 * 1024;
 
-    /// 校验内嵌字节体积，超限返回中文友好错误（经粘贴错误弹窗展示）。
+    /// 校验内嵌字节体积，超限返回携带体积的类型化错误（文案由展示方按语言生成）。
     pub(super) fn check_embedded_size(bytes_len: usize) -> anyhow::Result<()> {
         if bytes_len > Self::MAX_EMBED_BYTES {
-            anyhow::bail!(
-                "图片约 {:.1}MB，超过内嵌上限 5MB，内嵌会导致文档膨胀卡顿，建议改用“复制图片到附件目录”偏好",
-                bytes_len as f64 / (1024.0 * 1024.0)
-            );
+            anyhow::bail!(ImageEmbedTooLarge {
+                size_bytes: bytes_len,
+            });
         }
         Ok(())
     }
@@ -622,8 +651,8 @@ impl Editor {
         let i18n = cx.global::<crate::i18n::I18nManager>().snapshot();
         let ok = i18n.t("dialog_ok", &[]);
         let title = i18n.t("message_image_paste_failed", &[]);
+        let detail = image_error_detail(&err, &i18n);
         if let Some(window) = cx.active_window() {
-            let detail = err.to_string();
             let _ = window.update(cx, |_view, window, cx| {
                 // 对话框 future 必须轮询才会弹出：转交后台任务等待用户响应。
                 let title = title.clone();
@@ -638,7 +667,7 @@ impl Editor {
                 .detach();
             });
         } else {
-            eprintln!("{}: {err}", i18n.t("message_image_paste_failed", &[]));
+            eprintln!("{title}: {detail}");
         }
     }
 
@@ -2491,7 +2520,7 @@ impl Editor {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::Editor;
+    use super::{Editor, ImageEmbedTooLarge, image_error_detail};
     use crate::components::{
         Block, BlockEvent, BlockKind, BlockRecord, CalloutVariant, Delete, DeleteBack,
         ExitCodeBlock, InlineTextTree, Newline,
@@ -4912,7 +4941,34 @@ mod tests {
 
         let err = Editor::check_embedded_size(Editor::MAX_EMBED_BYTES + 1)
             .expect_err("oversized payload should be rejected");
-        // 提示里带上实际体积，方便用户判断该改用附件目录偏好。
-        assert!(err.to_string().contains("5MB"), "err: {err}");
+        // 体积随类型化错误携带，具体文案由展示方按当前语言生成。
+        let too_large = err
+            .downcast_ref::<ImageEmbedTooLarge>()
+            .expect("oversized payload should carry the typed size error");
+        assert_eq!(
+            too_large.size_bytes,
+            Editor::MAX_EMBED_BYTES + 1,
+            "err: {err}"
+        );
+    }
+
+    #[test]
+    fn embed_size_error_detail_follows_active_language() {
+        let err = anyhow::Error::new(ImageEmbedTooLarge {
+            size_bytes: 6 * 1024 * 1024,
+        });
+
+        let zh = crate::i18n::I18nManager::new_with_language_id("zh-CN").snapshot();
+        let detail = image_error_detail(&err, &zh);
+        assert!(detail.contains("6.0MB"), "zh detail: {detail}");
+        assert!(detail.contains("5MB"), "zh detail: {detail}");
+
+        let en = crate::i18n::I18nManager::new_with_language_id("en-US").snapshot();
+        let detail = image_error_detail(&err, &en);
+        assert!(detail.contains("6.0 MB"), "en detail: {detail}");
+
+        // 非体积类错误保持原始信息，不做二次包装。
+        let other = anyhow::Error::msg("failed to read");
+        assert_eq!(image_error_detail(&other, &en), "failed to read");
     }
 }

@@ -372,8 +372,53 @@ fn required_string(object: &Map<String, Value>, key: &str) -> anyhow::Result<Str
 
 #[cfg(test)]
 mod tests {
-    use super::{I18nManager, language_id_from_preferences};
+    use super::{
+        I18nManager, LANG_EN_US_ID, LANG_ZH_CN_ID, builtin_map, language_id_from_preferences,
+    };
     use std::collections::HashMap;
+
+    /// 收集文案里的 `{name}` 占位符名。
+    fn placeholders(value: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut rest = value;
+        while let Some(start) = rest.find('{') {
+            let tail = &rest[start + 1..];
+            match tail.find('}') {
+                Some(end) => {
+                    names.push(tail[..end].to_string());
+                    rest = &tail[end + 1..];
+                }
+                None => break,
+            }
+        }
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn builtin_packs_share_keys_and_placeholders() {
+        let en = builtin_map(LANG_EN_US_ID);
+        let zh = builtin_map(LANG_ZH_CN_ID);
+
+        let only_en: Vec<_> = en.keys().filter(|key| !zh.contains_key(*key)).collect();
+        let only_zh: Vec<_> = zh.keys().filter(|key| !en.contains_key(*key)).collect();
+        assert!(
+            only_en.is_empty() && only_zh.is_empty(),
+            "只在 en-US 的键: {only_en:?}；只在 zh-CN 的键: {only_zh:?}"
+        );
+
+        // 同名的键必须用同一组占位符，否则切换语言会漏插值。
+        let mismatched: Vec<_> = en
+            .iter()
+            .filter(|(key, en_value)| placeholders(en_value) != placeholders(&zh[*key]))
+            .map(|(key, _)| key.clone())
+            .collect();
+        assert!(
+            mismatched.is_empty(),
+            "占位符不一致的键: {:?}",
+            &mismatched[..mismatched.len().min(10)]
+        );
+    }
 
     #[test]
     fn builtin_chinese_values_are_utf8() {

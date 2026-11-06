@@ -594,7 +594,7 @@ impl Editor {
     fn show_image_action_error(err: anyhow::Error, cx: &mut Context<Self>) {
         let i18n = cx.global::<I18nManager>().snapshot();
         let title = i18n.t("message_image_action_failed", &[]);
-        let detail = err.to_string();
+        let detail = super::events::image_error_detail(&err, &i18n);
         if let Some(window) = cx.active_window() {
             let ok = i18n.t("dialog_ok", &[]);
             let _ = window.update(cx, |_view, window, cx| {

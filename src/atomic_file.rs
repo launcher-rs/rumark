@@ -42,9 +42,9 @@ fn write_with(
 ) -> std::io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "路径缺少文件名"))?;
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no file name")
+    })?;
     let mut temp_name = file_name.to_os_string();
     temp_name.push(format!(".tmp-{}", std::process::id()));
     let temp_path = parent.join(temp_name);

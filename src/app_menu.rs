@@ -22,6 +22,8 @@ use crate::config::{
 };
 use crate::editor::Editor;
 use crate::i18n::I18nManager;
+#[cfg(any(target_os = "macos", test))]
+use crate::i18n::I18nSnapshot;
 use rgpui::title_bar::TitleBar;
 use rgpui::{WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions};
 
@@ -230,17 +232,48 @@ fn applescript_string_literal(value: &str) -> String {
     escaped
 }
 
+#[cfg(any(target_os = "macos", test))]
+/// 安装成功提示正文：带上链接位置与终端用法示例。
+fn cli_installed_detail(i18n: &I18nSnapshot, bin_link: &str) -> String {
+    i18n.t("message_cli_installed_detail", &[("location", bin_link)])
+}
+
+#[cfg(any(target_os = "macos", test))]
+/// 安装失败提示正文：用户在管理员密码框点了取消，与真实失败分开表述。
+fn cli_install_failure_detail(i18n: &I18nSnapshot, stderr: &str) -> String {
+    if stderr.contains("User canceled") || stderr.contains("(-128)") {
+        i18n.t("message_cli_install_cancelled", &[])
+    } else {
+        i18n.t("message_cli_install_failed", &[("error", stderr)])
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+/// 卸载失败提示正文：同样区分取消与失败。
+fn cli_uninstall_failure_detail(i18n: &I18nSnapshot, stderr: &str) -> String {
+    if stderr.contains("User canceled") || stderr.contains("(-128)") {
+        i18n.t("message_cli_uninstall_cancelled", &[])
+    } else {
+        i18n.t("message_cli_uninstall_failed", &[("error", stderr)])
+    }
+}
+
 #[cfg(target_os = "macos")]
 /// 安装命令行工具符号链接。
 pub(crate) fn install_cli_tool(cx: &mut App) {
     use std::process::Command;
 
     let bin_link = "/usr/local/bin/rumark";
+    let i18n = cx.global::<I18nManager>().snapshot();
 
     let current_exe = match std::env::current_exe() {
         Ok(path) => path,
         Err(err) => {
-            show_install_cli_error(cx, &format!("Failed to get executable path: {err}"));
+            let detail = i18n.t(
+                "message_cli_exe_path_failed",
+                &[("error", &err.to_string())],
+            );
+            show_install_cli_error(cx, "message_cli_install_failed_title", &detail);
             return;
         }
     };
@@ -250,12 +283,8 @@ pub(crate) fn install_cli_tool(cx: &mut App) {
         .to_string_lossy()
         .contains(".app/Contents/MacOS/")
     {
-        show_install_cli_error(
-            cx,
-            "Command-line tool installation requires running from an .app bundle.\n\n\
-             If the app was installed via the `.pkg` installer,\n\
-             the CLI command is configured automatically.",
-        );
+        let detail = i18n.t("message_cli_requires_bundle", &[]);
+        show_install_cli_error(cx, "message_cli_install_failed_title", &detail);
         return;
     }
 
@@ -270,36 +299,28 @@ do shell script "rm -f " & quoted form of linkPath & linefeed & "ln -s " & quote
     match Command::new("osascript").arg("-e").arg(&script).output() {
         Ok(output) => {
             if output.status.success() {
-                let title = "CLI Command Installed";
-                let detail = format!(
-                    "Successfully installed! You can now use 'rumark' from the terminal:\n\n\
-                     \x1b[1mrumark README.md\x1b[0m\n\
-                     \x1b[1mrumark file1.md file2.md\x1b[0m\n\n\
-                     Location: {bin_link}\n\n\
-                     Note: If you move or delete Rumark.app,\n\
-                     the 'rumark' command will stop working\n\
-                     automatically (no cleanup needed)."
-                );
+                let title = i18n.t("message_cli_installed_title", &[]);
+                let detail = cli_installed_detail(&i18n, bin_link);
                 show_window_prompt_with_level(
                     cx.active_window(),
                     PromptLevel::Info,
-                    title,
+                    &title,
                     &detail,
                     cx,
                 );
             } else {
                 // 用户在管理员密码框点了取消，或链接创建因其他原因失败。
                 let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                let detail = if stderr.contains("User canceled") || stderr.contains("(-128)") {
-                    "Installation cancelled.".to_string()
-                } else {
-                    format!("Installation failed: {stderr}")
-                };
-                show_install_cli_error(cx, &detail);
+                let detail = cli_install_failure_detail(&i18n, &stderr);
+                show_install_cli_error(cx, "message_cli_install_failed_title", &detail);
             }
         }
         Err(err) => {
-            show_install_cli_error(cx, &format!("Failed to run installer: {err}"));
+            let detail = i18n.t(
+                "message_cli_installer_run_failed",
+                &[("error", &err.to_string())],
+            );
+            show_install_cli_error(cx, "message_cli_install_failed_title", &detail);
         }
     }
     // 刷新菜单，使安装/卸载标签随之切换。
@@ -312,9 +333,11 @@ pub(crate) fn uninstall_cli_tool(cx: &mut App) {
     use std::process::Command;
 
     let bin_link = "/usr/local/bin/rumark";
+    let i18n = cx.global::<I18nManager>().snapshot();
 
     if !is_cli_symlink_current_app() {
-        show_install_cli_error(cx, "CLI command is not installed for this app.");
+        let detail = i18n.t("message_cli_not_installed", &[]);
+        show_install_cli_error(cx, "message_cli_uninstall_failed_title", &detail);
         return;
     }
 
@@ -327,27 +350,27 @@ do shell script "rm -f " & quoted form of linkPath with administrator privileges
     match Command::new("osascript").arg("-e").arg(&script).output() {
         Ok(output) => {
             if output.status.success() {
-                let title = "CLI Command Uninstalled";
-                let detail = "CLI command has been removed successfully.".to_string();
+                let title = i18n.t("message_cli_uninstalled_title", &[]);
+                let detail = i18n.t("message_cli_uninstalled_detail", &[]);
                 show_window_prompt_with_level(
                     cx.active_window(),
                     PromptLevel::Info,
-                    title,
+                    &title,
                     &detail,
                     cx,
                 );
             } else {
                 let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                let detail = if stderr.contains("User canceled") || stderr.contains("(-128)") {
-                    "Uninstall cancelled.".to_string()
-                } else {
-                    format!("Uninstall failed: {stderr}")
-                };
-                show_install_cli_error(cx, &detail);
+                let detail = cli_uninstall_failure_detail(&i18n, &stderr);
+                show_install_cli_error(cx, "message_cli_uninstall_failed_title", &detail);
             }
         }
         Err(err) => {
-            show_install_cli_error(cx, &format!("Failed to run uninstaller: {err}"));
+            let detail = i18n.t(
+                "message_cli_uninstaller_run_failed",
+                &[("error", &err.to_string())],
+            );
+            show_install_cli_error(cx, "message_cli_uninstall_failed_title", &detail);
         }
     }
     // 刷新菜单，使安装/卸载标签随之切换。
@@ -357,25 +380,35 @@ do shell script "rm -f " & quoted form of linkPath with administrator privileges
 #[cfg(not(target_os = "macos"))]
 /// 安装命令行工具（非 macOS 下仅提示不支持）。
 pub(crate) fn install_cli_tool(cx: &mut App) {
-    show_install_cli_error(
-        cx,
-        "Command-line tool installation is only available on macOS.",
-    );
+    let detail = cx
+        .global::<I18nManager>()
+        .snapshot()
+        .t("message_cli_install_macos_only", &[]);
+    show_install_cli_error(cx, "message_cli_install_failed_title", &detail);
 }
 
 #[cfg(not(target_os = "macos"))]
 /// 卸载命令行工具（非 macOS 下仅提示不支持）。
 pub(crate) fn uninstall_cli_tool(cx: &mut App) {
-    show_install_cli_error(
-        cx,
-        "Command-line tool uninstallation is only available on macOS.",
-    );
+    let detail = cx
+        .global::<I18nManager>()
+        .snapshot()
+        .t("message_cli_uninstall_macos_only", &[]);
+    show_install_cli_error(cx, "message_cli_uninstall_failed_title", &detail);
 }
 
 /// 显示命令行工具安装失败提示。
-fn show_install_cli_error(cx: &mut App, detail: &str) {
-    let title = "Install Command-Line Tool Failed";
-    show_window_prompt_with_level(cx.active_window(), PromptLevel::Critical, title, detail, cx);
+///
+/// 标题按当前语言取键值，正文由调用方生成（可能是本地化的，也可能是系统错误原文）。
+fn show_install_cli_error(cx: &mut App, title_key: &str, detail: &str) {
+    let title = cx.global::<I18nManager>().snapshot().t(title_key, &[]);
+    show_window_prompt_with_level(
+        cx.active_window(),
+        PromptLevel::Critical,
+        &title,
+        detail,
+        cx,
+    );
 }
 
 /// 从编辑器侧记录最近文件。
@@ -1173,6 +1206,39 @@ mod tests {
     use rgpui::MenuItem;
     use rgpui::{Bounds, WindowBackgroundAppearance, WindowDecorations, point, px, size};
     use std::path::PathBuf;
+
+    /// 命令行工具提示文案随语言切换，且占位符都要填上。
+    #[test]
+    fn cli_tool_messages_are_localized() {
+        let zh = I18nManager::new_with_language_id("zh-CN").snapshot();
+        let en = I18nManager::new_with_language_id("en-US").snapshot();
+
+        let detail = super::cli_installed_detail(&zh, "/usr/local/bin/rumark");
+        assert!(detail.contains("/usr/local/bin/rumark"), "zh: {detail}");
+        assert!(
+            !detail.contains('{'),
+            "zh still has a placeholder: {detail}"
+        );
+
+        // 用户取消与真实失败走不同键值。
+        let cancelled = super::cli_install_failure_detail(&zh, "User canceled (-128)");
+        assert_eq!(cancelled, zh.t("message_cli_install_cancelled", &[]));
+        let failed = super::cli_install_failure_detail(&en, "permission denied");
+        assert!(failed.contains("permission denied"), "en: {failed}");
+        assert_eq!(
+            failed,
+            en.t(
+                "message_cli_install_failed",
+                &[("error", "permission denied")]
+            )
+        );
+
+        let uninstall_failed = super::cli_uninstall_failure_detail(&en, "Operation not permitted");
+        assert!(
+            uninstall_failed.contains("Operation not permitted"),
+            "en: {uninstall_failed}"
+        );
+    }
 
     #[test]
     fn window_options_use_transparent_component_titlebar() {
