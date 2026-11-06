@@ -35,6 +35,8 @@ mod find;
 mod history;
 mod image_menu;
 mod persistence;
+/// 文档读取入口：启动、菜单打开与拖放打开共用同一套 BOM / 编码处理。
+pub(crate) use persistence::{read_error_detail, read_markdown_file};
 mod render;
 mod selection;
 mod source_map;

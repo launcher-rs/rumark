@@ -48,6 +48,7 @@
   "dialog_add_language_prompt": "Choose Language Config",
   "dialog_add_theme_prompt": "Choose Theme Pack File",
   "message_open_failed": "Open Failed",
+  "message_file_not_utf8": "This file is not UTF-8 encoded; Rumark can only open UTF-8 text:\n{path}\n\nRe-save it as UTF-8 in your editor, then open it again.",
   "message_recent_missing_title": "Recent File Missing",
   "message_recent_missing_message": "This recent file no longer exists and has been removed:\n{path}",
   "message_save_failed": "Save Failed",

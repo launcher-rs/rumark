@@ -1,16 +1,18 @@
-//! 文档保存操作。
+//! 文档保存与读取操作。
 //!
 //! 渲染模式把语义块树序列化回规范 Markdown；
 //! 源码模式直接写原始缓冲区，以保留字面分隔符。
+//! 读取侧统一走 [`read_markdown_file`]，负责 BOM 与非 UTF-8 判定。
 
 use std::path::{Path, PathBuf};
 
+use anyhow::Context as _;
 use rgpui::*;
 
 use super::Editor;
 #[cfg(any(feature = "export-pdf", feature = "export-docx"))]
 use crate::export::ExportFormat;
-use crate::i18n::I18nManager;
+use crate::i18n::{I18nManager, I18nSnapshot};
 
 /// 统计文本中指定标记的最长连续长度。
 fn longest_marker_run(text: &str, marker: char) -> usize {
@@ -48,6 +50,44 @@ pub(super) fn safe_code_fence_with_info(content: &str, info: Option<&str>) -> St
     }
 
     safe_code_fence(content)
+}
+
+/// UTF-8 字节序标记：仅出现在文件开头时剥离。
+const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
+
+/// 非 UTF-8 文档错误：展示方据此换成「编码不支持」文案，而不是原始解码错误串。
+#[derive(Debug)]
+pub(crate) struct NonUtf8Document;
+
+impl std::fmt::Display for NonUtf8Document {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("file is not valid UTF-8")
+    }
+}
+
+impl std::error::Error for NonUtf8Document {}
+
+/// 读取 Markdown 文档文件：剥掉开头 BOM，非 UTF-8 内容返回 [`NonUtf8Document`]。
+///
+/// 直接 `read_to_string` 会把 BOM 留在正文首块里显示成一个不可见字符；
+/// 而非 UTF-8 文件只能拿到 `stream did not contain valid UTF-8` 这类系统串，
+/// 用户看不出是编码问题，故此处用类型化错误让展示方能换成可读文案。
+pub(crate) fn read_markdown_file(path: &Path) -> anyhow::Result<String> {
+    let bytes =
+        std::fs::read(path).with_context(|| format!("failed to read '{}'", path.display()))?;
+    let bytes = bytes.strip_prefix(UTF8_BOM).unwrap_or(&bytes);
+    String::from_utf8(bytes.to_vec()).map_err(|_| anyhow::anyhow!(NonUtf8Document))
+}
+
+/// 读取失败的用户可读文案：非 UTF-8 换成编码提示，其余沿用原始错误信息。
+pub(crate) fn read_error_detail(err: &anyhow::Error, path: &Path, i18n: &I18nSnapshot) -> String {
+    if err.downcast_ref::<NonUtf8Document>().is_some() {
+        return i18n.t(
+            "message_file_not_utf8",
+            &[("path", &path.display().to_string())],
+        );
+    }
+    err.to_string()
 }
 
 impl Editor {
@@ -762,8 +802,9 @@ async fn show_export_error(window_handle: AnyWindowHandle, detail: String, cx: &
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_export_headings, html_escape, markdown_to_standalone_html, safe_code_fence,
-        safe_code_fence_with_info, slugify_heading, strip_inline_markdown,
+        NonUtf8Document, collect_export_headings, html_escape, markdown_to_standalone_html,
+        read_error_detail, read_markdown_file, safe_code_fence, safe_code_fence_with_info,
+        slugify_heading, strip_inline_markdown,
     };
 
     #[test]
@@ -900,5 +941,56 @@ mod tests {
         assert!(html.contains("<details open=\"\">"), "html: {html:?}");
         assert!(html.contains("<summary>标题</summary>"), "html: {html:?}");
         assert!(html.contains("</details>"), "html: {html:?}");
+    }
+
+    #[test]
+    fn read_markdown_file_strips_leading_bom_and_keeps_inner_one() {
+        let root = std::env::temp_dir().join(format!("rumark-read-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("temp dir");
+
+        let bom_path = root.join("bom.md");
+        std::fs::write(
+            &bom_path,
+            [&[0xEF, 0xBB, 0xBF][..], "# 标题".as_bytes()].concat(),
+        )
+        .expect("write bom file");
+        assert_eq!(read_markdown_file(&bom_path).unwrap(), "# 标题");
+
+        // 正文中间的 BOM 不是文件开头标记，原样保留。
+        let inner_path = root.join("inner.md");
+        std::fs::write(&inner_path, "a\u{FEFF}b").expect("write inner file");
+        assert_eq!(read_markdown_file(&inner_path).unwrap(), "a\u{FEFF}b");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn read_error_detail_separates_encoding_from_io_failures() {
+        let root = std::env::temp_dir().join(format!("rumark-read-err-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("temp dir");
+
+        let gbk_path = root.join("gbk.md");
+        std::fs::write(&gbk_path, [0xC4, 0xE3, 0xBA, 0xC3]).expect("write gbk file");
+        let encoding_err = read_markdown_file(&gbk_path).expect_err("non UTF-8 should fail");
+        assert!(encoding_err.downcast_ref::<NonUtf8Document>().is_some());
+
+        let missing_path = root.join("missing.md");
+        let io_err = read_markdown_file(&missing_path).expect_err("missing file should fail");
+        assert!(io_err.downcast_ref::<NonUtf8Document>().is_none());
+
+        let zh = crate::i18n::I18nManager::new_with_language_id("zh-CN").snapshot();
+        let detail = read_error_detail(&encoding_err, &gbk_path, &zh);
+        assert!(detail.contains("UTF-8"), "zh encoding detail: {detail}");
+        assert!(detail.contains(&gbk_path.display().to_string()));
+        // 非编码类错误沿用原始信息，不套编码文案。
+        let detail = read_error_detail(&io_err, &missing_path, &zh);
+        assert!(detail.contains("failed to read"), "zh io detail: {detail}");
+        assert!(!detail.contains("UTF-8"), "zh io detail: {detail}");
+
+        let en = crate::i18n::I18nManager::new_with_language_id("en-US").snapshot();
+        let detail = read_error_detail(&encoding_err, &gbk_path, &en);
+        assert!(detail.contains("UTF-8"), "en encoding detail: {detail}");
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

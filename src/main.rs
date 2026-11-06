@@ -47,16 +47,17 @@ fn open_startup_window(cx: &mut App, startup_open: config::StartupOpenPreference
     if startup_open == config::StartupOpenPreference::LastOpenedFile
         && let Some(path) = config::first_existing_recent_markdown_file()
     {
-        match std::fs::read_to_string(&path) {
+        match editor::read_markdown_file(&path) {
             Ok(markdown) => {
                 open_editor_window(cx, markdown, Some(path));
                 return;
             }
             Err(err) => {
-                eprintln!(
-                    "failed to read last opened file '{}': {err}",
-                    path.display()
-                );
+                // 读取失败仍打开空文档，但把原因显示到窗口；不关联原路径，
+                // 否则用户按保存会把空文档覆盖回原文件。
+                let window = open_editor_window(cx, String::new(), None);
+                app_menu::show_read_failure_prompt(Some(window.into()), &path, &err, cx);
+                return;
             }
         }
     }
@@ -226,7 +227,8 @@ fn main() {
             while let Some(path) = open_file_rx.next().await {
                 let _ = cx.update(move |cx| {
                     if let Err(err) = app_menu::open_file_in_new_window(cx, &path) {
-                        eprintln!("failed to open '{}': {err}", path.display());
+                        let window = cx.active_window();
+                        app_menu::show_read_failure_prompt(window, &path, &err, cx);
                     }
                 });
             }
@@ -265,7 +267,7 @@ fn main() {
                 }
             };
 
-            match std::fs::read_to_string(&absolute_path) {
+            match editor::read_markdown_file(&absolute_path) {
                 Ok(markdown) => {
                     if let Err(err) = config::record_recent_file(&absolute_path) {
                         eprintln!("failed to update recent file history: {err}");
@@ -273,12 +275,14 @@ fn main() {
                     open_editor_window(cx, markdown, Some(absolute_path));
                 }
                 Err(err) => {
-                    eprintln!(
-                        "failed to read '{}': {err}. opened as an untitled empty document.",
-                        absolute_path.display()
-                    );
                     // 读取失败即不关联原路径：否则用户按保存会把空文档覆盖回原文件。
-                    open_editor_window(cx, String::new(), None);
+                    let window = open_editor_window(cx, String::new(), None);
+                    app_menu::show_read_failure_prompt(
+                        Some(window.into()),
+                        &absolute_path,
+                        &err,
+                        cx,
+                    );
                 }
             }
         }

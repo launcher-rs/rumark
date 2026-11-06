@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as AnyhowContext, Result};
+use anyhow::Result;
 use rgpui::*;
 
 use super::{Editor, ViewMode};
@@ -74,7 +74,11 @@ impl Editor {
 
         match self.replace_document_from_path(&path, cx) {
             Ok(()) => window.set_window_edited(false),
-            Err(err) => self.show_drop_open_failed_prompt(err.to_string(), window, cx),
+            Err(err) => self.show_drop_open_failed_prompt(
+                Self::open_error_detail(&err, &path, cx),
+                window,
+                cx,
+            ),
         }
     }
 
@@ -99,8 +103,7 @@ impl Editor {
         path: &Path,
         cx: &mut Context<Self>,
     ) -> Result<()> {
-        let markdown = std::fs::read_to_string(path)
-            .with_context(|| format!("failed to read '{}'", path.display()))?;
+        let markdown = super::read_markdown_file(path)?;
         self.replace_document_from_markdown(markdown, Some(path.to_path_buf()), cx);
         crate::app_menu::record_recent_file_from_editor(path, cx);
         Ok(())
@@ -185,7 +188,11 @@ impl Editor {
         self.clear_pending_drop_replace_state(cx);
         match self.replace_document_from_path(&path, cx) {
             Ok(()) => window.set_window_edited(false),
-            Err(err) => self.show_drop_open_failed_prompt(err.to_string(), window, cx),
+            Err(err) => self.show_drop_open_failed_prompt(
+                Self::open_error_detail(&err, &path, cx),
+                window,
+                cx,
+            ),
         }
     }
 
@@ -259,7 +266,11 @@ impl Editor {
         self.clear_pending_drop_replace_state(cx);
         match self.replace_document_from_path(&drop_path, cx) {
             Ok(()) => window.set_window_edited(false),
-            Err(err) => self.show_drop_open_failed_prompt(err.to_string(), window, cx),
+            Err(err) => self.show_drop_open_failed_prompt(
+                Self::open_error_detail(&err, &drop_path, cx),
+                window,
+                cx,
+            ),
         }
     }
 
@@ -351,6 +362,7 @@ impl Editor {
             }
 
             let saved_path = save_path.clone();
+            let prompted_path = drop_path.clone();
             let replace_result = weak_editor.update(cx, move |this, cx| {
                 this.apply_successful_save(saved_path, cx);
                 this.pending_drop_replace_path = Some(drop_path);
@@ -364,7 +376,7 @@ impl Editor {
                         let i18n = cx.global::<I18nManager>().snapshot();
                         let ok = i18n.t("dialog_ok", &[]);
                         let title = i18n.t("message_open_failed", &[]);
-                        let detail = err.to_string();
+                        let detail = super::read_error_detail(&err, &prompted_path, &i18n);
                         let buttons = [ok.as_str()];
                         // 对话框 future 必须轮询才会弹出：转交后台任务等待用户响应。
                         let prompt = window.prompt(
@@ -441,6 +453,12 @@ impl Editor {
             let _ = prompt.await;
         })
         .detach();
+    }
+
+    /// 拖放读取失败的展示文案：非 UTF-8 换成编码提示，其余沿用原始错误信息。
+    fn open_error_detail(err: &anyhow::Error, path: &Path, cx: &App) -> String {
+        let i18n = cx.global::<I18nManager>().snapshot();
+        super::read_error_detail(err, path, &i18n)
     }
 }
 

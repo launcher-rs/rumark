@@ -1,6 +1,6 @@
 //! 远端图片加载使用的 HTTP 客户端集成。
 
-use std::io;
+use std::io::{self, Read as _};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -22,6 +22,8 @@ const IMAGE_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 const IMAGE_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// 图片请求工作线程数上限（避免每个请求都新建裸线程）。
 const IMAGE_WORKER_THREADS: usize = 4;
+/// 远端图片响应体上限：错配或恶意的 URL 不应把任意大的正文读进内存。
+const MAX_IMAGE_RESPONSE_BYTES: u64 = 32 * 1024 * 1024;
 
 /// 安装全局 HTTP 客户端供图片加载使用。
 pub(crate) fn install_http_client(cx: &mut App) {
@@ -140,7 +142,7 @@ impl HttpTransportClient {
         let status = response.status();
         let version = response.version();
         let headers = response.headers().clone();
-        let bytes = response.bytes()?;
+        let bytes = read_capped_response(response)?;
 
         let mut response_builder = http_client::Response::builder()
             .status(status)
@@ -148,8 +150,37 @@ impl HttpTransportClient {
         for (name, value) in &headers {
             response_builder = response_builder.header(name, value);
         }
-        Ok(response_builder.body(AsyncBody::from(bytes.to_vec()))?)
+        Ok(response_builder.body(AsyncBody::from(bytes))?)
     }
+}
+
+/// 带上限读取响应体：`Content-Length` 超标直接拒绝，分块传输边读边判。
+fn read_capped_response(response: reqwest::blocking::Response) -> anyhow::Result<Vec<u8>> {
+    let declared_len = response.content_length();
+    read_capped(response, declared_len)
+}
+
+/// 实际的上限读取：单独抽出以便用内存缓冲测试，不必起 HTTP 服务。
+fn read_capped<R: io::Read>(reader: R, declared_len: Option<u64>) -> anyhow::Result<Vec<u8>> {
+    if let Some(declared_len) = declared_len
+        && declared_len > MAX_IMAGE_RESPONSE_BYTES
+    {
+        anyhow::bail!(
+            "remote image response is too large: declared {declared_len} bytes, limit {MAX_IMAGE_RESPONSE_BYTES} bytes"
+        );
+    }
+
+    // 多读 1 字节即可判定「超过上限」，无需先缓冲整份正文。
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_IMAGE_RESPONSE_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_IMAGE_RESPONSE_BYTES {
+        anyhow::bail!(
+            "remote image response is too large: exceeded {MAX_IMAGE_RESPONSE_BYTES} bytes"
+        );
+    }
+    Ok(bytes)
 }
 
 /// 构造图片请求默认头（含 UA 与缓存控制）。
@@ -219,12 +250,14 @@ impl HttpClient for HttpTransportClient {
 mod tests {
     use super::{
         ACCEPT_LANGUAGE_VALUE, DEFAULT_CACHE_CONTROL, IMAGE_ACCEPT_HEADER, ImageWorkerPool,
-        apply_missing_default_headers, default_image_request_headers, is_remote_image_source,
+        MAX_IMAGE_RESPONSE_BYTES, apply_missing_default_headers, default_image_request_headers,
+        is_remote_image_source, read_capped,
     };
     use reqwest::header::{
         ACCEPT, ACCEPT_ENCODING, ACCEPT_LANGUAGE, CACHE_CONTROL, CONNECTION, CONTENT_LENGTH, HOST,
         HeaderMap, HeaderValue, PRAGMA, USER_AGENT,
     };
+    use std::io::Cursor;
     use std::sync::Arc;
 
     const RUMARK_USER_AGENT: &str = "RumarkTest/1.0";
@@ -326,5 +359,26 @@ mod tests {
             max_active.load(Ordering::SeqCst) <= 2,
             "pool ran more than its worker count concurrently"
         );
+    }
+
+    #[test]
+    fn response_body_at_the_limit_is_read_in_full() {
+        let body = vec![0u8; MAX_IMAGE_RESPONSE_BYTES as usize];
+
+        let read = read_capped(Cursor::new(body), None).expect("at-limit body should be accepted");
+        assert_eq!(read.len(), MAX_IMAGE_RESPONSE_BYTES as usize);
+    }
+
+    #[test]
+    fn oversized_response_body_is_rejected() {
+        // 声明长度超标：不必真正读取正文就能拒绝。
+        let declared = read_capped(Cursor::new(Vec::new()), Some(MAX_IMAGE_RESPONSE_BYTES + 1));
+        let err = declared.expect_err("declared oversize should fail");
+        assert!(err.to_string().contains("too large"), "{err}");
+
+        // 分块传输（无 Content-Length）超标同样拒绝。
+        let body = vec![0u8; MAX_IMAGE_RESPONSE_BYTES as usize + 1];
+        let err = read_capped(Cursor::new(body), None).expect_err("streamed oversize should fail");
+        assert!(err.to_string().contains("too large"), "{err}");
     }
 }

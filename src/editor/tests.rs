@@ -613,15 +613,15 @@ async fn ctrl_s_saves_rendered_mode_edit_to_existing_file(cx: &mut TestAppContex
 async fn saving_existing_document_replaces_file_without_leaving_temp_file(cx: &mut TestAppContext) {
     init_editor_test_app(cx);
 
-    // 单独建目录：临时文件与目标同目录，目录里只剩目标文件才说明走的是原子写。
+    // 单独建目录：临时文件与目标同目录，目录里只剩预期文件才说明没有残留。
     let root = std::env::temp_dir().join(format!("rumark-atomic-save-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&root).expect("create temp dir");
     let path = root.join("doc.md");
     fs::write(&path, "alpha").expect("write initial markdown");
-    // 预置一份陈旧临时文件：原子写会用同名临时文件覆盖并把它重命名掉，
-    // 原地覆写则会把这份垃圾留在目录里，据此区分两种实现。
-    let stale_temp = root.join(format!("doc.md.tmp-{}", std::process::id()));
-    fs::write(&stale_temp, "stale").expect("write stale temp file");
+    // 硬链接指向旧文件对象：原子写是「同目录临时文件 + 重命名」，整块替换目录项，
+    // 硬链接仍读到旧内容；原地覆写会把硬链接内容一起改掉。
+    let linked = root.join("doc.link.md");
+    fs::hard_link(&path, &linked).expect("hard link to the saved file");
     let cleanup_root = root.clone();
     cx.on_quit(move || {
         let _ = fs::remove_dir_all(&cleanup_root);
@@ -643,12 +643,21 @@ async fn saving_existing_document_replaces_file_without_leaving_temp_file(cx: &m
         fs::read_to_string(&path).expect("read saved markdown"),
         expected
     );
+    assert_eq!(
+        fs::read_to_string(&linked).expect("read linked markdown"),
+        "alpha",
+        "保存应整块替换文件对象，而不是原地覆写"
+    );
     let entries: Vec<_> = fs::read_dir(&root)
         .expect("read temp dir")
         .map(|entry| entry.expect("dir entry").file_name())
         .collect();
-    assert_eq!(entries.len(), 1, "unexpected leftovers: {entries:?}");
-    assert_eq!(entries[0], "doc.md");
+    assert_eq!(entries.len(), 2, "unexpected leftovers: {entries:?}");
+    assert!(
+        entries.iter().any(|name| name == "doc.md")
+            && entries.iter().any(|name| name == "doc.link.md"),
+        "unexpected leftovers: {entries:?}"
+    );
 }
 
 #[rgpui::test]

@@ -5,7 +5,6 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Context as _;
 use rgpui::*;
 
 use crate::app_identity::RUMARK_APP_ID;
@@ -20,7 +19,7 @@ use crate::config::{
     import_language_config_and_select, import_theme_config_and_select, open_preferences_window,
     read_recent_files, record_recent_file, remove_recent_file,
 };
-use crate::editor::Editor;
+use crate::editor::{Editor, read_error_detail, read_markdown_file};
 use crate::i18n::I18nManager;
 #[cfg(any(target_os = "macos", test))]
 use crate::i18n::I18nSnapshot;
@@ -101,11 +100,27 @@ fn show_pending_config_recovery(cx: &mut Context<Editor>, window: &mut Window) {
 
 /// 在新窗口中打开指定文件。
 pub(crate) fn open_file_in_new_window(cx: &mut App, path: &Path) -> anyhow::Result<()> {
-    let markdown = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read '{}'", path.display()))?;
+    let markdown = read_markdown_file(path)?;
     open_editor_window(cx, markdown, Some(path.to_path_buf()));
     record_recent_file_and_refresh(path, cx);
     Ok(())
+}
+
+/// 把文档读取失败提示到指定窗口。
+///
+/// release 版 Windows 没有控制台，只 `eprintln!` 的话用户只会看到「打开后是空的」，
+/// 不知道是编码不支持还是文件被占用。
+pub(crate) fn show_read_failure_prompt(
+    window: Option<AnyWindowHandle>,
+    path: &Path,
+    err: &anyhow::Error,
+    cx: &mut App,
+) {
+    let i18n = cx.global::<I18nManager>().snapshot();
+    let title = i18n.t("message_open_failed", &[]);
+    let detail = read_error_detail(err, path, &i18n);
+    eprintln!("{title}: {detail}");
+    show_window_prompt(window, &title, &detail, cx);
 }
 
 /// 若当前活动窗口是「用户尚未输入任何内容的空白编辑器」，则把文件就地载入该窗口。
@@ -156,11 +171,10 @@ pub(crate) fn open_file_preferring_blank_window(
                 return;
             }
             if let Err(err) = open_file_in_new_window(cx, &path) {
-                let title = cx
-                    .global::<I18nManager>()
-                    .snapshot()
-                    .t("message_open_failed", &[]);
-                show_window_prompt(error_window, &title, &err.to_string(), cx);
+                let i18n = cx.global::<I18nManager>().snapshot();
+                let title = i18n.t("message_open_failed", &[]);
+                let detail = read_error_detail(&err, &path, &i18n);
+                show_window_prompt(error_window, &title, &detail, cx);
             }
         });
     })

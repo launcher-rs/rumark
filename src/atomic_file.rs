@@ -45,8 +45,14 @@ fn write_with(
     let file_name = path.file_name().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no file name")
     })?;
+    // 临时名带进程号与 UUID：同一进程内并发写同一目标（自动保存与手动保存同时
+    // 触发）不会共用同一个临时文件而互相截断。
     let mut temp_name = file_name.to_os_string();
-    temp_name.push(format!(".tmp-{}", std::process::id()));
+    temp_name.push(format!(
+        ".tmp-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
     let temp_path = parent.join(temp_name);
 
     let write_result = (|| -> std::io::Result<()> {
@@ -61,13 +67,51 @@ fn write_with(
         return Err(err);
     }
 
-    match std::fs::rename(&temp_path, path) {
+    match rename_with_retry(&temp_path, path) {
         Ok(()) => Ok(()),
         Err(err) => {
+            // 改名失败时保留临时文件反而更糟（用户看不到、下次写入又撞上），
+            // 统一清理：目标文件此时仍是完整的旧内容。
             let _ = std::fs::remove_file(&temp_path);
             Err(err)
         }
     }
+}
+
+/// 短时重试的重命名次数与间隔。
+///
+/// Windows 上杀软、索引器或资源管理器预览会短暂占用目标文件，
+/// `rename` 报共享冲突（`PermissionDenied`）；这类占用百毫秒内即释放，
+/// 重试比直接把「保存失败」推给用户更贴近实际。
+const RENAME_ATTEMPTS: u32 = 3;
+const RENAME_BACKOFF: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// 重命名临时文件到目标，共享冲突时短时重试。
+fn rename_with_retry(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut err = match std::fs::rename(from, to) {
+        Ok(()) => return Ok(()),
+        Err(err) => err,
+    };
+    for _ in 1..RENAME_ATTEMPTS {
+        if !is_transient_rename_error(&err) {
+            break;
+        }
+        std::thread::sleep(RENAME_BACKOFF);
+        err = match std::fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(retry_err) => retry_err,
+        };
+    }
+    Err(err)
+}
+
+/// 判断重命名错误是否值得重试：仅共享/权限类冲突。
+fn is_transient_rename_error(err: &std::io::Error) -> bool {
+    if err.kind() == std::io::ErrorKind::PermissionDenied {
+        return true;
+    }
+    // Windows：ERROR_SHARING_VIOLATION(32) 与 ERROR_ACCESS_DENIED(5)。
+    cfg!(windows) && matches!(err.raw_os_error(), Some(5) | Some(32))
 }
 
 #[cfg(test)]
@@ -143,6 +187,36 @@ mod tests {
         std::fs::remove_file(&source).unwrap();
         assert!(copy_file(&source, &target).is_err());
         assert_only_files(&root, &["target.png"]);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn concurrent_writes_to_one_target_never_mix_contents_or_leave_temp() {
+        let root = temp_root("atomic-concurrent");
+        let target = root.join("doc.md");
+        write_text(&target, "seed").expect("seed write");
+
+        // 每份负载长度唯一：残留半截或交织内容必然不等于任何一份完整负载。
+        let payloads: Vec<String> = (0..8)
+            .map(|index| format!("payload-{index}:{}", "x".repeat(2048 * (index + 1))))
+            .collect();
+        std::thread::scope(|scope| {
+            for payload in &payloads {
+                let payload = payload.clone();
+                let target = target.clone();
+                scope.spawn(move || {
+                    let _ = write_text(&target, &payload);
+                });
+            }
+        });
+
+        let final_text = std::fs::read_to_string(&target).unwrap();
+        assert!(
+            payloads.contains(&final_text) || final_text == "seed",
+            "target holds interleaved or truncated contents"
+        );
+        assert_only_files(&root, &["doc.md"]);
 
         let _ = std::fs::remove_dir_all(root);
     }
