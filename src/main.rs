@@ -33,6 +33,8 @@ mod i18n;
 mod net;
 mod text_offsets;
 mod theme;
+#[cfg(target_os = "windows")]
+mod windows_integration;
 
 use app_menu::{init as init_app_menu, open_editor_window};
 use components::init_with_keybindings as init_editor;

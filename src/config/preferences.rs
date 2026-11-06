@@ -1014,6 +1014,43 @@ impl PreferencesWindow {
         window.remove_window();
     }
 
+    #[cfg(target_os = "windows")]
+    fn set_default_markdown_app(
+        &mut self,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let i18n = cx.global::<I18nManager>().snapshot();
+        let result = std::env::current_exe()
+            .map_err(anyhow::Error::from)
+            .and_then(|path| {
+                crate::windows_integration::register_markdown_application(
+                    &path,
+                    &i18n.t("message_markdown_document", &[]),
+                )
+            });
+        match result {
+            Ok(()) => cx.open_url(crate::windows_integration::DEFAULT_APPS_URI),
+            Err(error) => {
+                let title = i18n.t("message_file_association_failed", &[]);
+                let detail = format!("{error:#}");
+                let ok = i18n.t("dialog_ok", &[]);
+                let prompt = window.prompt(
+                    PromptLevel::Critical,
+                    &title,
+                    Some(&detail),
+                    &[ok.as_str()],
+                    cx,
+                );
+                cx.spawn(async move |_, _| {
+                    let _ = prompt.await;
+                })
+                .detach();
+            }
+        }
+    }
+
     /// 保存草稿偏好并应用到全局。
     fn save(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         if !self.has_unsaved_changes() {
@@ -1187,7 +1224,37 @@ impl PreferencesWindow {
                     });
                 }
             });
-        self.labeled_row(&i18n.t("pref_startup_label", &[]), select, theme)
+        let page = div()
+            .flex()
+            .flex_col()
+            .gap(px(24.0))
+            .child(self.labeled_row(&i18n.t("pref_startup_label", &[]), select, theme));
+        #[cfg(target_os = "windows")]
+        let page = page.child(
+            div()
+                .w(px(280.0))
+                .flex()
+                .flex_col()
+                .gap(px(10.0))
+                .child(
+                    self.labeled_row(
+                        &i18n.t("pref_file_association", &[]),
+                        Button::new("preferences-file-association")
+                            .label(i18n.t("pref_file_association_button", &[]))
+                            .w(px(280.0))
+                            .secondary()
+                            .on_click(cx.listener(Self::set_default_markdown_app)),
+                        theme,
+                    ),
+                )
+                .child(
+                    div()
+                        .text_size(px(ThemeTypography::DEFAULT.dialog_body_size))
+                        .text_color(theme.muted_foreground)
+                        .child(i18n.t("pref_file_association_hint", &[])),
+                ),
+        );
+        page
     }
 
     /// 渲染主题选择页（下拉框由框架 `Select` 组件承载）。

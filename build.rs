@@ -1,4 +1,4 @@
-//! 构建脚本：检测 `assets/fonts/` 下用户自备的中文字体。
+//! 构建脚本：嵌入 Windows 图标并检测用户自备的中文字体。
 //!
 //! 命中时设置 `rumark_bundled_cjk` cfg 并把首个字体路径经环境变量传给
 //! `export::pdf` 做 `include_bytes!` 内嵌；未命中则静默跳过，
@@ -8,6 +8,15 @@
 use std::path::Path;
 
 fn main() {
+    #[cfg(target_os = "windows")]
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        println!("cargo:rerun-if-changed=assets/rumark.rc");
+        println!("cargo:rerun-if-changed=assets/rumark.ico");
+        // rgpui 的 Windows 后端从当前 EXE 加载编号为 1 的图标资源。
+        embed_resource::compile_for("assets/rumark.rc", ["rumark"], embed_resource::NONE)
+            .manifest_required()
+            .expect("Windows icon resource compilation failed");
+    }
     println!("cargo:rerun-if-changed=assets/fonts");
     println!("cargo::rustc-check-cfg=cfg(rumark_bundled_cjk)");
 

@@ -948,14 +948,6 @@ fn build_menus(
         },
         Menu {
             disabled: false,
-            name: i18n_manager.t("menu_workspace", &[]).into(),
-            items: vec![MenuItem::action(
-                i18n_manager.t("menu_workspace_toggle", &[]),
-                ToggleWorkspace,
-            )],
-        },
-        Menu {
-            disabled: false,
             name: i18n_manager.t("menu_help", &[]).into(),
             items: help_items,
         },
@@ -1303,8 +1295,8 @@ mod tests {
         );
     }
 
-    // macOS 下菜单栏为：[拾墨应用菜单, File, Language, Theme, Workspace, Help]
-    // 其他平台为：      [File, Language, Theme, Workspace, Help]
+    // macOS 下菜单栏为：[拾墨应用菜单, 文件, 语言, 主题, 帮助]
+    // 其他平台为：      [文件, 语言, 主题, 帮助]
 
     #[cfg(target_os = "macos")]
     const LANGUAGE_MENU_INDEX: usize = 2;
@@ -1317,14 +1309,9 @@ mod tests {
     const THEME_MENU_INDEX: usize = 2;
 
     #[cfg(target_os = "macos")]
-    const WORKSPACE_MENU_INDEX: usize = 4;
-    #[cfg(not(target_os = "macos"))]
-    const WORKSPACE_MENU_INDEX: usize = 3;
-
-    #[cfg(target_os = "macos")]
-    const HELP_MENU_INDEX: usize = 5;
-    #[cfg(not(target_os = "macos"))]
     const HELP_MENU_INDEX: usize = 4;
+    #[cfg(not(target_os = "macos"))]
+    const HELP_MENU_INDEX: usize = 3;
 
     #[test]
     fn build_menus_uses_english_fallback_by_default() {
@@ -1344,13 +1331,10 @@ mod tests {
         #[cfg(target_os = "macos")]
         assert_eq!(
             menu_names,
-            vec!["Rumark", "File", "Language", "Theme", "Workspace", "Help"]
+            vec!["Rumark", "File", "Language", "Theme", "Help"]
         );
         #[cfg(not(target_os = "macos"))]
-        assert_eq!(
-            menu_names,
-            vec!["File", "Language", "Theme", "Workspace", "Help"]
-        );
+        assert_eq!(menu_names, vec!["File", "Language", "Theme", "Help"]);
 
         // 新建窗口在 macOS 下归属文件操作，在其他平台仍为文件菜单首项。
         #[cfg(target_os = "macos")]
@@ -1390,10 +1374,6 @@ mod tests {
             action_name(&menus[LANGUAGE_MENU_INDEX].items[1]),
             "\u{2713} English"
         );
-        assert_eq!(
-            action_name(&menus[WORKSPACE_MENU_INDEX].items[0]),
-            "Toggle Workspace"
-        );
     }
 
     #[test]
@@ -1423,12 +1403,9 @@ mod tests {
             .collect::<Vec<_>>();
 
         #[cfg(target_os = "macos")]
-        assert_eq!(
-            menu_names,
-            vec!["Rumark", "文件", "语言", "主题", "工作区", "帮助"]
-        );
+        assert_eq!(menu_names, vec!["Rumark", "文件", "语言", "主题", "帮助"]);
         #[cfg(not(target_os = "macos"))]
-        assert_eq!(menu_names, vec!["文件", "语言", "主题", "工作区", "帮助"]);
+        assert_eq!(menu_names, vec!["文件", "语言", "主题", "帮助"]);
 
         #[cfg(target_os = "macos")]
         assert_eq!(action_name(&menus[1].items[0]), "新建窗口");
@@ -1439,10 +1416,6 @@ mod tests {
             "✓ 简体中文"
         );
         assert_eq!(action_name(&menus[LANGUAGE_MENU_INDEX].items[1]), "English");
-        assert_eq!(
-            action_name(&menus[WORKSPACE_MENU_INDEX].items[0]),
-            "切换工作区"
-        );
     }
 
     #[test]

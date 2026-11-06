@@ -83,6 +83,12 @@ code-highlight-official = [
 ]
 code-highlight-config = ["dep:tree-sitter-toml"]
 
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56"
+
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3.0.12"
+
 [dev-dependencies]
 rgpui = { version = "1.7", features = ["test-support"] }
 # 仅测试用：解包生成的 docx 校验 document.xml 结构，不进正式构建。

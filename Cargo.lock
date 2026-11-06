@@ -5930,6 +5930,7 @@ dependencies = [
  "cssparser",
  "directories",
  "docx-rs",
+ "embed-resource",
  "futures",
  "mermaid-rs-renderer",
  "printpdf",
@@ -5967,6 +5968,7 @@ dependencies = [
  "unicode-segmentation",
  "url",
  "uuid",
+ "winreg",
  "zip 2.4.2",
 ]
 

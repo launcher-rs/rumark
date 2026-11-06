@@ -3365,6 +3365,58 @@ async fn ctrl_tab_toggles_view_mode(cx: &mut TestAppContext) {
 }
 
 #[rgpui::test]
+async fn workspace_status_bar_button_toggles_drawer(cx: &mut TestAppContext) {
+    init_editor_test_app(cx);
+    let (editor, cx) =
+        cx.add_window_view(|_window, cx| Editor::from_markdown(cx, "alpha".to_string(), None));
+    redraw(cx);
+    let button = cx.update(|window, _cx| {
+        rgpui::point(
+            rgpui::px(30.0),
+            window.viewport_size().height - rgpui::px(12.0),
+        )
+    });
+
+    for expected_open in [true, false] {
+        cx.simulate_click(button, rgpui::Modifiers::none());
+        redraw(cx);
+        editor.read_with(cx, |editor, cx| {
+            assert_eq!(editor.workspace.is_open, expected_open);
+            assert_eq!(editor.current_document_source(cx), "alpha");
+        });
+    }
+}
+
+#[rgpui::test]
+async fn workspace_shortcut_toggles_in_both_editor_modes(cx: &mut TestAppContext) {
+    init_editor_test_app(cx);
+    let (editor, cx) =
+        cx.add_window_view(|_window, cx| Editor::from_markdown(cx, "alpha".to_string(), None));
+
+    for mode in [ViewMode::Rendered, ViewMode::Source] {
+        redraw(cx);
+        editor.read_with(cx, |editor, _cx| {
+            assert_eq!(editor.view_mode, mode);
+            assert!(!editor.workspace.is_open);
+        });
+
+        cx.simulate_keystrokes("ctrl-w");
+        redraw(cx);
+        assert!(editor.read_with(cx, |editor, _cx| editor.workspace.is_open));
+
+        cx.simulate_keystrokes("ctrl-w");
+        redraw(cx);
+        editor.read_with(cx, |editor, cx| {
+            assert!(!editor.workspace.is_open);
+            assert_eq!(editor.current_document_source(cx), "alpha");
+        });
+        if mode == ViewMode::Rendered {
+            cx.simulate_keystrokes("ctrl-tab");
+        }
+    }
+}
+
+#[rgpui::test]
 async fn ctrl_a_selects_entire_source_document_in_source_mode(cx: &mut TestAppContext) {
     init_editor_test_app(cx);
     let (editor, cx) = cx.add_window_view(|_window, cx| {
