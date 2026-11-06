@@ -10,9 +10,9 @@ use rgpui::{
 use super::{Editor, MountedRow, ViewMode};
 use crate::components::{
     BlockKind, CloseWindow, FocusNext, ImageReferenceDefinitions, ImageResolvedSource,
-    InlineTextTree, Newline, QuitApplication, SaveDocument, TableAlignColumnCenter,
+    InlineTextTree, Newline, QuitApplication, Redo, SaveDocument, TableAlignColumnCenter,
     TableCellInlineImageSegment, TableColumnAlignment, TableDeleteColumn, TableDeleteRow,
-    TableInsertColumnRight, TableInsertRowBelow, TableMoveColumnRight, TableMoveRowDown,
+    TableInsertColumnRight, TableInsertRowBelow, TableMoveColumnRight, TableMoveRowDown, Undo,
     parse_table_cell_inline_images, superscript_ordinal, update_entity_forgiving,
 };
 use crate::i18n::I18nManager;
@@ -592,7 +592,7 @@ async fn ctrl_s_saves_rendered_mode_edit_to_existing_file(cx: &mut TestAppContex
     let expected = editor.read_with(cx, |editor, cx| {
         assert!(editor.document_dirty);
         assert!(!editor.pending_save);
-        editor.document.markdown_text(cx)
+        editor.current_document_source(cx)
     });
     assert_ne!(expected, "alpha");
 
@@ -634,7 +634,7 @@ async fn saving_existing_document_replaces_file_without_leaving_temp_file(cx: &m
 
     cx.simulate_input("!");
     redraw(cx);
-    let expected = editor.read_with(cx, |editor, cx| editor.document.markdown_text(cx));
+    let expected = editor.read_with(cx, |editor, cx| editor.current_document_source(cx));
 
     cx.simulate_keystrokes("ctrl-s");
     redraw(cx);
@@ -682,7 +682,7 @@ async fn window_save_action_saves_current_editor_without_global_menu_route(
     redraw(cx);
     let expected = editor.read_with(cx, |editor, cx| {
         assert!(editor.document_dirty);
-        editor.document.markdown_text(cx)
+        editor.current_document_source(cx)
     });
     assert_ne!(expected, "alpha");
 
@@ -746,9 +746,9 @@ async fn dropped_markdown_replaces_clean_editor_in_current_window(cx: &mut TestA
             BlockKind::Table
         );
         assert!(
-            editor.document.markdown_text(cx).contains("# Dropped"),
+            editor.current_document_source(cx).contains("# Dropped"),
             "text: {:?}",
-            editor.document.markdown_text(cx)
+            editor.current_document_source(cx)
         );
     });
     assert_eq!(cx.cx.windows().len(), 1);
@@ -802,7 +802,7 @@ async fn dirty_drop_waits_for_replace_decision_and_cancel_preserves_document(
     editor.read_with(cx, |editor, cx| {
         assert!(editor.document_dirty);
         assert!(editor.show_drop_replace_dialog);
-        assert_eq!(editor.document.markdown_text(cx), "current");
+        assert_eq!(editor.current_document_source(cx), "current");
         assert!(editor.pending_drop_replace_path.is_some());
     });
 
@@ -812,7 +812,7 @@ async fn dirty_drop_waits_for_replace_decision_and_cancel_preserves_document(
         assert!(editor.document_dirty);
         assert!(!editor.show_drop_replace_dialog);
         assert!(editor.pending_drop_replace_path.is_none());
-        assert_eq!(editor.document.markdown_text(cx), "current");
+        assert_eq!(editor.current_document_source(cx), "current");
     });
 }
 
@@ -966,7 +966,7 @@ async fn dirty_drop_can_replace_without_saving(cx: &mut TestAppContext) {
 
     editor.read_with(cx, |editor, cx| {
         assert_eq!(editor.file_path.as_ref(), Some(&dropped_path));
-        assert_eq!(editor.document.markdown_text(cx), "dropped");
+        assert_eq!(editor.current_document_source(cx), "dropped");
         assert!(!editor.document_dirty);
         assert!(!editor.show_drop_replace_dialog);
     });
@@ -1017,7 +1017,7 @@ async fn dirty_drop_saves_existing_document_before_replace(cx: &mut TestAppConte
     );
     editor.read_with(cx, |editor, cx| {
         assert_eq!(editor.file_path.as_ref(), Some(&dropped_path));
-        assert_eq!(editor.document.markdown_text(cx), "dropped");
+        assert_eq!(editor.current_document_source(cx), "dropped");
         assert!(!editor.document_dirty);
         assert!(!editor.pending_drop_replace_after_save);
     });
@@ -1263,7 +1263,7 @@ async fn open_file_reuses_active_blank_window_instead_of_opening_another(cx: &mu
     window
         .update(cx, |editor, _window, cx| {
             assert_eq!(editor.file_path.as_deref(), Some(opened_path.as_path()));
-            assert_eq!(editor.document.markdown_text(cx), "opened content");
+            assert_eq!(editor.current_document_source(cx), "opened content");
             assert!(!editor.is_blank_document(cx));
         })
         .expect("window should stay open");
@@ -1296,7 +1296,7 @@ async fn open_file_opens_new_window_when_active_window_has_content(cx: &mut Test
     assert_eq!(cx.update(|cx| cx.windows().len()), 2);
     first
         .update(cx, |editor, _window, cx| {
-            assert_eq!(editor.document.markdown_text(cx), "已有内容");
+            assert_eq!(editor.current_document_source(cx), "已有内容");
             assert!(editor.file_path.is_none());
         })
         .expect("first window should stay open");
@@ -3099,108 +3099,190 @@ async fn toggling_source_mode_preserves_list_child_image_runtime(cx: &mut TestAp
 
 #[rgpui::test]
 async fn undo_reverts_recent_rendered_typing(cx: &mut TestAppContext) {
-    let editor = cx.new(|cx| Editor::from_markdown(cx, "alpha".to_string(), None));
+    init_editor_test_app(cx);
+    let (editor, cx) =
+        cx.add_window_view(|_window, cx| Editor::from_markdown(cx, "alpha".to_string(), None));
 
-    editor.update(cx, |editor, cx| {
+    let block = editor.update(cx, |editor, _cx| {
         let block = editor.document.first_root().expect("root").clone();
-        editor.active_entity_id = Some(block.entity_id());
-        block.update(cx, |block, cx| {
-            block.prepare_undo_capture(crate::components::UndoKind::CoalescibleText, cx);
-            block.replace_text_in_visible_range(5..5, " beta", None, false, cx);
-        });
+        editor.focus_block(block.entity_id());
+        block
+    });
+    redraw(cx);
+
+    block.update(cx, |block, cx| {
+        block.prepare_undo_capture(crate::components::UndoKind::CoalescibleText, cx);
+        block.replace_text_in_visible_range(5..5, " beta", None, false, cx);
+    });
+    redraw(cx);
+
+    editor.read_with(cx, |editor, cx| {
+        assert_eq!(editor.current_document_source(cx), "alpha beta");
     });
 
-    editor.update(cx, |editor, cx| {
-        assert_eq!(editor.document.markdown_text(cx), "alpha beta");
-        assert_eq!(editor.undo_history.len(), 1);
-        editor.undo_document(cx);
-        assert_eq!(editor.document.markdown_text(cx), "alpha");
-    });
+    for _ in 0..2 {
+        cx.dispatch_action(Undo);
+        redraw(cx);
+
+        editor.read_with(cx, |editor, cx| {
+            assert_eq!(editor.current_document_source(cx), "alpha");
+        });
+    }
 }
 
 #[rgpui::test]
 async fn consecutive_text_edits_within_window_coalesce_into_one_undo(cx: &mut TestAppContext) {
-    let editor = cx.new(|cx| Editor::from_markdown(cx, "a".to_string(), None));
+    init_editor_test_app(cx);
+    let (editor, cx) =
+        cx.add_window_view(|_window, cx| Editor::from_markdown(cx, "a".to_string(), None));
 
-    editor.update(cx, |editor, cx| {
+    let block = editor.update(cx, |editor, _cx| {
         let block = editor.document.first_root().expect("root").clone();
-        editor.active_entity_id = Some(block.entity_id());
+        editor.focus_block(block.entity_id());
+        block
+    });
+    redraw(cx);
 
-        block.update(cx, |block, cx| {
-            block.prepare_undo_capture(crate::components::UndoKind::CoalescibleText, cx);
-            block.replace_text_in_visible_range(1..1, "b", None, false, cx);
-        });
-        block.update(cx, |block, cx| {
-            block.prepare_undo_capture(crate::components::UndoKind::CoalescibleText, cx);
-            block.replace_text_in_visible_range(2..2, "c", None, false, cx);
-        });
+    block.update(cx, |block, cx| {
+        block.prepare_undo_capture(crate::components::UndoKind::CoalescibleText, cx);
+        block.replace_text_in_visible_range(1..1, "b", None, false, cx);
+    });
+    cx.run_until_parked();
+    editor.read_with(cx, |editor, cx| {
+        assert_eq!(editor.current_document_source(cx), "ab");
     });
 
-    editor.update(cx, |editor, cx| {
-        assert_eq!(editor.document.markdown_text(cx), "abc");
-        assert_eq!(editor.undo_history.len(), 1);
-
-        editor.undo_document(cx);
-        assert_eq!(editor.document.markdown_text(cx), "a");
+    block.update(cx, |block, cx| {
+        block.prepare_undo_capture(crate::components::UndoKind::CoalescibleText, cx);
+        block.replace_text_in_visible_range(2..2, "c", None, false, cx);
     });
+    redraw(cx);
+
+    editor.read_with(cx, |editor, cx| {
+        assert_eq!(editor.current_document_source(cx), "abc");
+    });
+
+    for _ in 0..2 {
+        cx.dispatch_action(Undo);
+        redraw(cx);
+
+        editor.read_with(cx, |editor, cx| {
+            assert_eq!(editor.current_document_source(cx), "a");
+        });
+    }
 }
 
 #[rgpui::test]
 async fn redo_restores_text_reverted_by_undo(cx: &mut TestAppContext) {
-    let editor = cx.new(|cx| Editor::from_markdown(cx, "alpha".to_string(), None));
+    init_editor_test_app(cx);
+    let (editor, cx) =
+        cx.add_window_view(|_window, cx| Editor::from_markdown(cx, "alpha".to_string(), None));
 
-    editor.update(cx, |editor, cx| {
+    let block = editor.update(cx, |editor, _cx| {
         let block = editor.document.first_root().expect("root").clone();
-        editor.active_entity_id = Some(block.entity_id());
-        block.update(cx, |block, cx| {
-            block.prepare_undo_capture(crate::components::UndoKind::CoalescibleText, cx);
-            block.replace_text_in_visible_range(5..5, " beta", None, false, cx);
+        editor.focus_block(block.entity_id());
+        block
+    });
+    redraw(cx);
+
+    block.update(cx, |block, cx| {
+        block.prepare_undo_capture(crate::components::UndoKind::CoalescibleText, cx);
+        block.replace_text_in_visible_range(5..5, " beta", None, false, cx);
+    });
+    redraw(cx);
+
+    editor.read_with(cx, |editor, cx| {
+        assert_eq!(editor.current_document_source(cx), "alpha beta");
+    });
+
+    for _ in 0..2 {
+        cx.dispatch_action(Undo);
+        redraw(cx);
+
+        editor.read_with(cx, |editor, cx| {
+            assert_eq!(editor.current_document_source(cx), "alpha");
         });
-    });
+    }
 
-    editor.update(cx, |editor, cx| {
-        editor.undo_document(cx);
-        assert_eq!(editor.document.markdown_text(cx), "alpha");
-        assert_eq!(editor.redo_history.len(), 1);
+    for _ in 0..2 {
+        cx.dispatch_action(Redo);
+        redraw(cx);
 
-        editor.redo_document(cx);
-        assert_eq!(editor.document.markdown_text(cx), "alpha beta");
-        assert!(editor.redo_history.is_empty());
-    });
+        editor.read_with(cx, |editor, cx| {
+            assert_eq!(editor.current_document_source(cx), "alpha beta");
+        });
+    }
 }
 
 #[rgpui::test]
 async fn fresh_edit_clears_pending_redo_history(cx: &mut TestAppContext) {
-    let editor = cx.new(|cx| Editor::from_markdown(cx, "alpha".to_string(), None));
+    init_editor_test_app(cx);
+    let (editor, cx) =
+        cx.add_window_view(|_window, cx| Editor::from_markdown(cx, "alpha".to_string(), None));
 
-    editor.update(cx, |editor, cx| {
+    let block = editor.update(cx, |editor, _cx| {
         let block = editor.document.first_root().expect("root").clone();
-        editor.active_entity_id = Some(block.entity_id());
-        block.update(cx, |block, cx| {
-            block.prepare_undo_capture(crate::components::UndoKind::CoalescibleText, cx);
-            block.replace_text_in_visible_range(5..5, " beta", None, false, cx);
-        });
+        editor.focus_block(block.entity_id());
+        block
+    });
+    redraw(cx);
+
+    block.update(cx, |block, cx| {
+        block.prepare_undo_capture(crate::components::UndoKind::CoalescibleText, cx);
+        block.replace_text_in_visible_range(5..5, " beta", None, false, cx);
+    });
+    redraw(cx);
+
+    editor.read_with(cx, |editor, cx| {
+        assert_eq!(editor.current_document_source(cx), "alpha beta");
+    });
+
+    cx.dispatch_action(Undo);
+    redraw(cx);
+
+    editor.read_with(cx, |editor, cx| {
+        assert_eq!(editor.current_document_source(cx), "alpha");
     });
 
     editor.update(cx, |editor, cx| {
-        editor.undo_document(cx);
-        assert_eq!(editor.redo_history.len(), 1);
-
-        // A new edit invalidates the redo stack so it cannot revive stale text.
         let block = editor.document.first_root().expect("root").clone();
         block.update(cx, |block, cx| {
             block.prepare_undo_capture(crate::components::UndoKind::CoalescibleText, cx);
             block.replace_text_in_visible_range(5..5, " gamma", None, false, cx);
         });
     });
+    redraw(cx);
 
-    editor.update(cx, |editor, cx| {
-        editor.finalize_pending_undo_capture(cx);
-        assert!(editor.redo_history.is_empty());
-
-        editor.redo_document(cx);
-        assert_eq!(editor.document.markdown_text(cx), "alpha gamma");
+    editor.read_with(cx, |editor, cx| {
+        assert_eq!(editor.current_document_source(cx), "alpha gamma");
     });
+
+    for _ in 0..2 {
+        cx.dispatch_action(Redo);
+        redraw(cx);
+
+        editor.read_with(cx, |editor, cx| {
+            assert_eq!(editor.current_document_source(cx), "alpha gamma");
+        });
+    }
+
+    for _ in 0..2 {
+        cx.dispatch_action(Undo);
+        redraw(cx);
+
+        editor.read_with(cx, |editor, cx| {
+            assert_eq!(editor.current_document_source(cx), "alpha");
+        });
+    }
+
+    for _ in 0..2 {
+        cx.dispatch_action(Redo);
+        redraw(cx);
+
+        editor.read_with(cx, |editor, cx| {
+            assert_eq!(editor.current_document_source(cx), "alpha gamma");
+        });
+    }
 }
 
 #[rgpui::test]
@@ -3306,7 +3388,11 @@ async fn ctrl_a_selects_entire_source_document_in_source_mode(cx: &mut TestAppCo
     editor.read_with(cx, |editor, cx| {
         let source = editor.document.visible_blocks()[0].entity.read(cx);
         assert_eq!(source.selected_range, 0..source.plain_len());
-        assert!(editor.cross_block_selection.is_none());
+        assert_eq!(
+            editor.selected_markdown_text(cx).as_deref(),
+            Some("alpha\n\nbeta")
+        );
+        assert_eq!(editor.capture_source_selection_snapshot(cx).range, 0..11);
     });
 }
 
@@ -3334,7 +3420,8 @@ async fn ctrl_a_selects_only_focused_block_text_in_rendered_mode(cx: &mut TestAp
         let second = editor.document.visible_blocks()[1].entity.read(cx);
         assert_eq!(first.selected_range, 0..0);
         assert_eq!(second.selected_range, 0..second.plain_len());
-        assert!(editor.cross_block_selection.is_none());
+        assert_eq!(editor.selected_markdown_text(cx).as_deref(), Some("beta"));
+        assert_eq!(editor.capture_source_selection_snapshot(cx).range, 7..11);
     });
 }
 
@@ -3363,42 +3450,37 @@ async fn repeated_ctrl_a_selects_all_rendered_blocks(cx: &mut TestAppContext) {
     editor.read_with(cx, |editor, cx| {
         let first = editor.document.visible_blocks()[0].entity.read(cx);
         assert_eq!(first.selected_range, 0..first.plain_len());
-        assert!(editor.cross_block_selection.is_none());
+        assert_eq!(editor.selected_markdown_text(cx).as_deref(), Some("alpha"));
+        assert_eq!(editor.capture_source_selection_snapshot(cx).range, 0..5);
     });
 
     cx.simulate_keystrokes("ctrl-a");
     redraw(cx);
 
-    editor.read_with(cx, |editor, cx| {
-        let visible = editor.document.visible_blocks();
-        let first_id = visible[0].entity.entity_id();
-        let last = visible.last().expect("visible blocks");
-        let last_id = last.entity.entity_id();
-        let last_len = last.entity.read(cx).plain_len();
-        let selection = editor
-            .cross_block_selection
-            .expect("second Ctrl+A should select the rendered document");
-        assert_eq!(selection.anchor.entity_id, first_id);
-        assert_eq!(selection.anchor.offset, 0);
-        assert_eq!(selection.focus.entity_id, last_id);
-        assert_eq!(selection.focus.offset, last_len);
-        for visible in visible {
+    let selected_after_second = editor.read_with(cx, |editor, cx| {
+        assert_eq!(editor.selected_markdown_text(cx).as_deref(), Some(markdown));
+        let selection = editor.capture_source_selection_snapshot(cx);
+        assert_eq!(selection.range, 0..markdown.len());
+        assert!(!selection.reversed);
+        for visible in editor.document.visible_blocks() {
             let block = visible.entity.read(cx);
             let len = block.plain_len();
             if len > 0 {
                 assert_eq!(block.editor_selection_range, Some(0..len));
             }
         }
+        selection
     });
 
-    let selected_after_second = editor.read_with(cx, |editor, _cx| editor.cross_block_selection);
     cx.simulate_keystrokes("ctrl-a");
     redraw(cx);
 
     editor.read_with(cx, |editor, cx| {
+        assert_eq!(editor.selected_markdown_text(cx).as_deref(), Some(markdown));
         assert_eq!(
-            editor.cross_block_selection, selected_after_second,
-            "third Ctrl+A should keep the full rendered document selected"
+            editor.capture_source_selection_snapshot(cx),
+            selected_after_second,
+            "第三次 Ctrl+A 应保持整篇渲染文档的选区"
         );
         for visible in editor.document.visible_blocks() {
             let block = visible.entity.read(cx);
@@ -3448,14 +3530,23 @@ async fn rendered_ctrl_a_cycle_expires_before_second_press(cx: &mut TestAppConte
     editor.read_with(cx, |editor, cx| {
         let second = editor.document.visible_blocks()[1].entity.read(cx);
         assert_eq!(second.selected_range, 0..second.plain_len());
-        assert!(editor.cross_block_selection.is_none());
+        assert_eq!(editor.selected_markdown_text(cx).as_deref(), Some("beta"));
+        assert_eq!(editor.capture_source_selection_snapshot(cx).range, 7..11);
+    });
+
+    cx.simulate_keystrokes("ctrl-a");
+    redraw(cx);
+
+    editor.read_with(cx, |editor, cx| {
         assert_eq!(
-            editor
-                .rendered_select_all_cycle
-                .expect("cycle should be reset by expired second press")
-                .count,
-            1
+            editor.selected_markdown_text(cx).as_deref(),
+            Some("alpha\n\nbeta")
         );
+        assert_eq!(editor.capture_source_selection_snapshot(cx).range, 0..11);
+        for visible in editor.document.visible_blocks() {
+            let block = visible.entity.read(cx);
+            assert_eq!(block.editor_selection_range, Some(0..block.plain_len()));
+        }
     });
 }
 
@@ -3480,7 +3571,7 @@ async fn tab_key_inserts_tab_in_focused_paragraph(cx: &mut TestAppContext) {
     editor.update(cx, |editor, cx| {
         let block = editor.document.visible_blocks()[0].entity.clone();
         assert_eq!(block.read(cx).rendered_text(), "a    b");
-        assert_eq!(editor.document.markdown_text(cx), "a    b");
+        assert_eq!(editor.current_document_source(cx), "a    b");
     });
 }
 
@@ -3506,7 +3597,7 @@ async fn tab_key_inserts_tab_in_focused_code_block(cx: &mut TestAppContext) {
     editor.update(cx, |editor, cx| {
         let block = editor.document.visible_blocks()[0].entity.clone();
         assert_eq!(block.read(cx).rendered_text(), "a    b");
-        assert_eq!(editor.document.markdown_text(cx), "```rust\na    b\n```");
+        assert_eq!(editor.current_document_source(cx), "```rust\na    b\n```");
     });
 }
 
@@ -3685,7 +3776,7 @@ async fn tab_key_keeps_list_indent_semantics(cx: &mut TestAppContext) {
         let visible = editor.document.visible_blocks();
         assert_eq!(visible.len(), 2);
         assert_eq!(visible[1].entity.read(cx).render_depth, 1);
-        assert_eq!(editor.document.markdown_text(cx), "- a\n  - b");
+        assert_eq!(editor.current_document_source(cx), "- a\n  - b");
     });
 }
 
@@ -3871,7 +3962,7 @@ async fn ctrl_enter_exits_focused_math_block(cx: &mut TestAppContext) {
         assert_eq!(visible[0].entity.read(cx).rendered_text(), "$$n^2$$");
         assert_eq!(visible[1].entity.read(cx).kind(), BlockKind::Paragraph);
         assert_eq!(visible[1].entity.read(cx).rendered_text(), "");
-        assert_eq!(editor.document.markdown_text(cx), "$$n^2$$\n\n");
+        assert_eq!(editor.current_document_source(cx), "$$n^2$$\n\n");
     });
 }
 

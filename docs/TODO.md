@@ -7,7 +7,7 @@
 
 本轮改动**已全部提交，工作区干净**（见 `git log --oneline -6`）：脚注族跨块映射、Typora 对比体验、图片请求与偏好/i18n/PDF 修复、落盘原子写，另有 `docs:`（本文件 + AGENTS.md）与 `test:`（`docs/render-sample.md` 夹具）两个小提交。
 
-`docs/render-sample.md` 被 `include_str!` 进多处测试（`components/markdown/inline.rs`、`editor/document.rs`、`editor/tests.rs`、`export/{pdf,docx}.rs`），**改它就是改测试夹具**，改完必须跑全量 `cargo test -p rumark`。
+`docs/render-sample.md` 被 `include_str!` 进多处测试（`components/markdown/inline/tests.rs`、`editor/document.rs`、`editor/tests.rs`、`export/{pdf,docx}.rs`），**改它就是改测试夹具**，改完必须跑全量 `cargo test -p rumark`。
 
 若后续又有未提交改动，按下面四个主题归组提交（多主题文件按「主主题」归组；要严格按主题落提交就用 `git add -p` 分块暂存）。提交信息风格 `type: 中文描述`（`fix:` / `test:` / `chore:` / `docs:`）：
 
