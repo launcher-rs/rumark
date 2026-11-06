@@ -25,6 +25,7 @@ impl Block {
             ClipboardEntry::Image(image) => Some(PastedImageSource::ClipboardImage(image.clone())),
             ClipboardEntry::String(_) => None,
             ClipboardEntry::ExternalPaths(_) => None,
+            ClipboardEntry::Format(_) => None,
         })
     }
 

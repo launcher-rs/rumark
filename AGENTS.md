@@ -14,7 +14,7 @@
 
 ## 依赖与 Feature 约定
 
-- `rgpui` / `rgpui-platform` 为 crates.io 版本依赖（当前 `1.5`，`Cargo.lock` 锁定精确版本）。框架升级时同步改 `Cargo.toml` 两处版本号 + `dev-dependencies` 的 `test-support` 项（三处必须同版本，不要留旧号靠 `^` 兜底），跑通后提交 `Cargo.lock`。不要改回 path 依赖，不要在本仓 patch 框架代码。
+- `rgpui` / `rgpui-platform` 为 crates.io 版本依赖（当前 `1.7`，`Cargo.lock` 锁定精确版本）。框架升级时同步改 `Cargo.toml` 两处版本号 + `dev-dependencies` 的 `test-support` 项（三处必须同版本，不要留旧号靠 `^` 兜底），跑通后提交 `Cargo.lock`。不要改回 path 依赖，不要在本仓 patch 框架代码。
 - 代码高亮是可选裁剪的：`code-highlight-core/official/config`、`html-native` 控制 `tree-sitter*` 依赖。默认全开。各 `build_*_config` 的 `#[cfg]` 必须与注册表里的调用点门控一致（yaml 归 `official`、toml 归 `config`），否则最小构建会引用未链接的 crate。
   - 最小编译验证：`cargo check -p rumark --no-default-features`
   - tree-sitter 版本全部 pin 死（`=x.y.z`），升级需整组对齐，不要单独 bump。
@@ -31,7 +31,7 @@
 - 界面文案走 rgpui 通用 `I18nManager` 包装（`src/i18n/mod.rs`，键值包 `zh-CN.json`/`en-US.json` 内嵌；热路径传 owned `I18nSnapshot`，勿持 `cx.global` 借用跨 `&mut` 调用）。键名一律下划线分层 `域[_组]_项`（如 `menu_file_save`、`keys_save`、`table_column_align_left`），域固定为 `win`/`dialog`/`menu`/`message`/`pref`/`keys`/`find`/`workspace`/`context`/`insert`/`table`/`image`/`code`/`status`/`export`；新增文案沿用该规范，两包键集必须一致。
 - 颜色直接用 rgpui `Theme` 调色板（`theme.colors.X` 经 `Deref` 可写作 `theme.X`）；布局/字排是 `theme` 模块的 `ThemeDimensions::DEFAULT` / `ThemeTypography::DEFAULT` 常量。主题只有明暗两档（id 为 `rumark`(暗)/`rumark-light`(亮)），无自定义主题包导入（`AddThemeConfig` 动作已删除）。
 - 窗口标题栏直接用 rgpui `TitleBar` 组件（`app_menu.rs` 的 `rumark_window_options` 只做选项基座；编辑器渲染单行 `TitleBar`：开头品牌名 + 框架 `Button` 菜单（`dropdown_menu` 下拉，定位/子菜单由组件处理），右侧三键由组件自动追加；有菜单时清零组件左内边距）：高度固定 34px（`TITLE_BAR_HEIGHT`），流式布局占位；窗口关闭一律走平台路径，经窗口级关闭保护拦截。
-- 块文本测量走 `Window::request_measured_layout_simple`，不要“顺手”迁到 1.5 带 `fingerprint`/`text_state` 的复用入口：`TextLayout` 只有只读访问器（`line_layouts`/`bounds` 等），外部无法写入自己的换行结果，carry 命中时会交还空状态、绘制阶段拿不到行。框架侧开放写入后再评估。
+- 块文本测量走 `Window::request_measured_layout_simple`，不要“顺手”迁到 1.7 带 `fingerprint`/`text_state` 的复用入口：`TextLayout` 只有只读访问器（`line_layouts`/`bounds` 等），外部无法写入自己的换行结果，carry 命中时会交还空状态、绘制阶段拿不到行。框架侧开放写入后再评估。
 - 内部标识（改名会破坏已存用户配置）：内置主题 id（`rumark` / `rumark-light`，映射到组件明暗两档）、action 命名空间（`rumark::...`，用户键位配置依赖）、测试临时文件 `rumark-*` 前缀（`config` 的历史记录过滤器依赖它；`AddThemeConfig` 已随自定义主题包删除而移除）。应用标识与配置/缓存目录为 `rs.launcher.Rumark`。
 - 版权：`LICENSE-APACHE` 正文为 Apache-2.0 标准文本（文件头版权为 `launcher-rs`）；不要改 `LICENSE-APACHE` 正文。
 

@@ -277,10 +277,11 @@ pub(crate) fn aligned_line_left(
     align: TextAlign,
 ) -> Pixels {
     let slack = (bounds.size.width - line.width()).max(px(0.0));
+    // `Start`/`End` 是逻辑对齐，本编辑器只排 LTR 内容，按 LTR 解析成左/右。
     match align {
-        TextAlign::Left => bounds.left(),
+        TextAlign::Left | TextAlign::Start => bounds.left(),
         TextAlign::Center => bounds.left() + slack / 2.0,
-        TextAlign::Right => bounds.left() + slack,
+        TextAlign::Right | TextAlign::End => bounds.left() + slack,
     }
 }
 
@@ -357,10 +358,11 @@ fn wrapped_row_origin_x(
     let align_width = line.width();
     let slack = (align_width - row_width).max(px(0.0));
     let line_left = aligned_line_left(line, bounds, align);
+    // `Start`/`End` 是逻辑对齐，本编辑器只排 LTR 内容，按 LTR 解析成左/右。
     match align {
-        TextAlign::Left => line_left,
+        TextAlign::Left | TextAlign::Start => line_left,
         TextAlign::Center => line_left + slack / 2.0,
-        TextAlign::Right => line_left + slack,
+        TextAlign::Right | TextAlign::End => line_left + slack,
     }
 }
 
