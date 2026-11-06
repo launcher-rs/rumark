@@ -456,12 +456,6 @@ impl Block {
         self.current_cache().footnote_hit(offset)
     }
 
-    #[allow(dead_code)]
-    /// 取指定偏移的行内公式。
-    pub(crate) fn inline_math_at(&self, offset: usize) -> Option<&crate::components::InlineMath> {
-        self.current_cache().inline_math_at(offset)
-    }
-
     /// 是否含混合行内视觉。
     pub(crate) fn has_mixed_inline_visuals(&self) -> bool {
         self.record.title.has_mixed_inline_visuals()

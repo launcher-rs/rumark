@@ -172,77 +172,6 @@ pub(crate) struct InlineExpansionProjection {
     pub(super) footnote_runs: Vec<FootnoteExpansionRun>,
 }
 
-#[cfg(test)]
-pub(super) fn expanded_display_offset_for_clean(
-    fragments: &[InlineFragment],
-    clean: usize,
-) -> usize {
-    let mut display = 0usize;
-    let mut clean_cursor = 0usize;
-    for fragment in fragments {
-        let clean_len = fragment.text.len();
-        let clean_end = clean_cursor + clean_len;
-        if clean <= clean_end {
-            let off = clean.saturating_sub(clean_cursor);
-            if (fragment.style.code || fragment.style.script != InlineScript::Normal)
-                && clean_len > 0
-            {
-                if off == clean_len {
-                    return display + clean_len + 2;
-                }
-                return display + 1 + off;
-            }
-            return display + off;
-        }
-        clean_cursor = clean_end;
-        display += if (fragment.style.code || fragment.style.script != InlineScript::Normal)
-            && clean_len > 0
-        {
-            clean_len + 2
-        } else {
-            clean_len
-        };
-    }
-    display
-}
-
-#[cfg(test)]
-pub(super) fn expanded_display_cursor_offset_for_clean(
-    fragments: &[InlineFragment],
-    clean: usize,
-) -> usize {
-    let mut display = 0usize;
-    let mut clean_cursor = 0usize;
-    for fragment in fragments {
-        let clean_len = fragment.text.len();
-        let clean_end = clean_cursor + clean_len;
-        if clean <= clean_end {
-            let off = clean.saturating_sub(clean_cursor);
-            if (fragment.style.code || fragment.style.script != InlineScript::Normal)
-                && clean_len > 0
-            {
-                if off == 0 {
-                    return display + 1;
-                }
-                if off >= clean_len {
-                    return display + clean_len + 1;
-                }
-                return display + 1 + off;
-            }
-            return display + off;
-        }
-        clean_cursor = clean_end;
-        display += if (fragment.style.code || fragment.style.script != InlineScript::Normal)
-            && clean_len > 0
-        {
-            clean_len + 2
-        } else {
-            clean_len
-        };
-    }
-    display
-}
-
 impl InlineExpansionProjection {
     /// 构建投影：仅对光标、选区或输入法标记触及的片段暴露分隔符，同时保留回纯文本偏移的映射。
     pub(super) fn build(
@@ -1034,10 +963,7 @@ fn push_projected_fragment(
 mod tests {
     use crate::components::markdown::inline::InlineTextTree;
 
-    use super::{
-        ExpandedInlineSegmentKind, InlineExpansionKind, InlineExpansionProjection,
-        expanded_display_cursor_offset_for_clean, expanded_display_offset_for_clean,
-    };
+    use super::{ExpandedInlineSegmentKind, InlineExpansionKind, InlineExpansionProjection};
 
     /// 构造一个纯文本片段（测试辅助）。
     fn plain_fragment(text: &str) -> crate::components::markdown::inline::InlineFragment {
@@ -1179,13 +1105,24 @@ mod tests {
 
     #[test]
     fn expanded_code_offsets_account_for_backticks() {
-        let fragments = vec![plain_fragment("123")];
-        let mut fragments = fragments;
-        fragments[0].style.code = true;
+        let mut fragment = plain_fragment("123");
+        fragment.style.code = true;
+        // 光标 0 落在片段内，代码分隔符展开为 `123`。
+        let projection = InlineExpansionProjection::build(&[fragment], 0..0, None)
+            .expect("touched code span should expand");
 
-        assert_eq!(expanded_display_offset_for_clean(&fragments, 0), 1);
-        assert_eq!(expanded_display_offset_for_clean(&fragments, 3), 5);
-        assert_eq!(expanded_display_cursor_offset_for_clean(&fragments, 0), 1);
-        assert_eq!(expanded_display_cursor_offset_for_clean(&fragments, 3), 4);
+        // 默认亲和停在反引号之内，OuterEnd 越过闭合反引号。
+        assert_eq!(
+            projection.display_offset_for_clean_cursor(0, super::CaretAffinity::Default),
+            Some(1)
+        );
+        assert_eq!(
+            projection.display_offset_for_clean_cursor(3, super::CaretAffinity::Default),
+            Some(4)
+        );
+        assert_eq!(
+            projection.display_offset_for_clean_cursor(3, super::CaretAffinity::OuterEnd),
+            Some(5)
+        );
     }
 }

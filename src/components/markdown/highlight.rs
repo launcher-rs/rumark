@@ -1,5 +1,6 @@
 //! 代码块语法高亮支持。
 
+#[cfg(feature = "code-highlight-core")]
 use std::collections::HashMap;
 use std::ops::Range;
 #[cfg(feature = "code-highlight-core")]
@@ -59,6 +60,9 @@ pub(crate) enum HighlightLanguage {
 }
 
 /// 映射到主题色的语义高亮类别。
+///
+/// 无 tree-sitter 核心时不会构造任何类别（高亮结果恒为空），因此放开未构造告警。
+#[cfg_attr(not(feature = "code-highlight-core"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HighlightClass {
     /// 注释文本。
@@ -197,6 +201,8 @@ const HIGHLIGHT_LANGUAGES: &[HighlightLanguageSpec] = &[
     },
 ];
 
+/// tree-sitter 标签名表，顺序与官方 highlightr 的 tags.json 一致。
+#[cfg(feature = "code-highlight-core")]
 const HIGHLIGHT_TAG_NAMES: &[&str] = &[
     "attribute",
     "comment",
@@ -617,6 +623,8 @@ pub(crate) fn resolve_code_language_key(language: Option<&str>) -> Option<Highli
 }
 
 /// 高亮代码块源码。
+// 无 tree-sitter 核心时只解析语言键，源码不参与高亮，参数留给核心分支使用。
+#[cfg_attr(not(feature = "code-highlight-core"), allow(unused_variables))]
 pub(crate) fn highlight_code_block(
     language: Option<&str>,
     source: &str,
@@ -676,6 +684,7 @@ pub(crate) fn highlight_code_block(
 }
 
 /// 追加高亮区间并合并相邻同类区间。
+#[cfg(feature = "code-highlight-core")]
 fn push_highlight_span(spans: &mut Vec<HighlightSpan>, range: Range<usize>, class: HighlightClass) {
     if range.start >= range.end {
         return;

@@ -255,15 +255,6 @@ fn escape_link_title(title: &str) -> String {
     escaped
 }
 
-/// 行内文本树中的光标。
-///
-/// `fragment_index` 标识片段，`byte_offset` 为该片段文本内的字节边界。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct CaretBlink {
-    pub fragment_index: usize,
-    pub byte_offset: usize,
-}
-
 /// 带 [`InlineStyle`] 的可见文本范围，供渲染缓存为文本系统构建样式跑。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InlineSpan {
@@ -287,15 +278,11 @@ pub struct InlineInsertionAttributes {
 
 /// 为渲染优化的 [`InlineTextTree`] 预计算视图。
 ///
-/// 把片段树拍平为可见文本串与 [`InlineSpan`] 列表，并维护可见偏移与片段位置的双向映射，供输入法子系统使用。
+/// 把片段树拍平为可见文本串与 [`InlineSpan`] 列表，供文本系统按样式跑构建布局。
 #[derive(Clone, Debug, Default)]
 pub struct InlineRenderCache {
     plain_text: String,
     spans: Vec<InlineSpan>,
-    #[allow(dead_code)]
-    visible_to_tree: Vec<CaretBlink>,
-    #[allow(dead_code)]
-    tree_to_visible: Vec<usize>,
 }
 
 /// 源码 Markdown 与可见行内文本的双向偏移映射。
@@ -344,12 +331,9 @@ impl InlineRenderCache {
     pub fn from_tree(tree: &InlineTextTree) -> Self {
         let mut plain_text = String::new();
         let mut spans = Vec::new();
-        let mut visible_to_tree = vec![CaretBlink::default(); tree.plain_len() + 1];
-        let mut tree_to_visible = Vec::with_capacity(tree.fragments.len() + 1);
         let mut visible_offset = 0;
 
-        for (fragment_index, fragment) in tree.fragments.iter().enumerate() {
-            tree_to_visible.push(visible_offset);
+        for fragment in tree.fragments.iter() {
             let fragment_start = visible_offset;
             plain_text.push_str(&fragment.text);
             let fragment_len = fragment.text.len();
@@ -367,27 +351,10 @@ impl InlineRenderCache {
                 });
             }
 
-            for byte_offset in 0..=fragment_len {
-                visible_to_tree[fragment_start + byte_offset] = CaretBlink {
-                    fragment_index,
-                    byte_offset,
-                };
-            }
-
             visible_offset += fragment_len;
         }
 
-        tree_to_visible.push(visible_offset);
-        if tree.fragments.is_empty() {
-            visible_to_tree[0] = CaretBlink::default();
-        }
-
-        Self {
-            plain_text,
-            spans,
-            visible_to_tree,
-            tree_to_visible,
-        }
+        Self { plain_text, spans }
     }
 
     /// 取可见文本。
@@ -1228,14 +1195,6 @@ impl InlineTextTree {
             tree: InlineTextTree::from_fragments(temp.fragments),
             visible_to_normalized: (0..=len).collect(),
         }
-    }
-
-    /// 核心的标记转样式归一化：扫描片段文本中的分隔符序列
-    ///（`**`、`*`、`<u>` 等），移除它们，并把对应的 [`InlineStyle`]
-    /// 应用于配对之间的文本，未配对的分隔符按字面文本输出。
-    #[allow(dead_code)]
-    pub fn normalize_inline_syntax(&self) -> InlineEditOutcome {
-        self.normalize_inline_syntax_with_link_references(&LinkReferenceDefinitions::default())
     }
 
     /// 按引用定义归一化行内语法。

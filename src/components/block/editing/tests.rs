@@ -1,9 +1,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use super::projection::{
-    expanded_display_cursor_offset_for_clean, expanded_display_offset_for_clean,
-};
+use super::projection::InlineExpansionProjection;
 use crate::components::markdown::highlight::HighlightLanguage;
 use crate::components::markdown::inline::{
     InlineFragment, InlineInsertionAttributes, InlineLinkHit, InlineScript, InlineStyle,
@@ -326,6 +324,23 @@ async fn tab_inserts_character_in_code_block(cx: &mut TestAppContext) {
     });
 }
 
+/// 用生产投影路径构建展开结果：`cursor` 处的空选区决定哪些片段暴露分隔符。
+fn projection_at(fragments: &[InlineFragment], cursor: usize) -> InlineExpansionProjection {
+    InlineExpansionProjection::build(fragments, cursor..cursor, None)
+        .expect("touched span should expand")
+}
+
+/// 取展示光标偏移，缺失时直接失败而不是静默回退。
+fn display_offset(
+    projection: &InlineExpansionProjection,
+    clean: usize,
+    affinity: super::CaretAffinity,
+) -> usize {
+    projection
+        .display_offset_for_clean_cursor(clean, affinity)
+        .unwrap_or_else(|| panic!("no display offset for clean {clean}"))
+}
+
 #[test]
 fn expanded_code_cursor_offset_stays_before_closing_backtick() {
     let fragments = vec![InlineFragment {
@@ -339,11 +354,21 @@ fn expanded_code_cursor_offset_stays_before_closing_backtick() {
         footnote: None,
         math: None,
     }];
+    let projection = projection_at(&fragments, 0);
 
-    assert_eq!(expanded_display_offset_for_clean(&fragments, 0), 1);
-    assert_eq!(expanded_display_offset_for_clean(&fragments, 3), 5);
-    assert_eq!(expanded_display_cursor_offset_for_clean(&fragments, 0), 1);
-    assert_eq!(expanded_display_cursor_offset_for_clean(&fragments, 3), 4);
+    // 默认亲和落在反引号之内，OuterEnd 越过闭合反引号。
+    assert_eq!(
+        display_offset(&projection, 0, super::CaretAffinity::Default),
+        1
+    );
+    assert_eq!(
+        display_offset(&projection, 3, super::CaretAffinity::Default),
+        4
+    );
+    assert_eq!(
+        display_offset(&projection, 3, super::CaretAffinity::OuterEnd),
+        5
+    );
 }
 
 #[test]
@@ -369,9 +394,26 @@ fn expanded_code_cursor_offset_keeps_plain_text_boundaries() {
             math: None,
         },
     ];
+    // 只有代码片段被触及，其前的纯文本区间不受撑开影响。
+    let projection = projection_at(&fragments, 2);
 
-    assert_eq!(expanded_display_cursor_offset_for_clean(&fragments, 1), 1);
-    assert_eq!(expanded_display_cursor_offset_for_clean(&fragments, 3), 4);
+    assert_eq!(
+        display_offset(&projection, 0, super::CaretAffinity::Default),
+        0
+    );
+    // 纯文本与代码的交界：默认亲和进入反引号之内，OuterStart 仍可退回标记之前。
+    assert_eq!(
+        display_offset(&projection, 1, super::CaretAffinity::Default),
+        2
+    );
+    assert_eq!(
+        display_offset(&projection, 1, super::CaretAffinity::OuterStart),
+        1
+    );
+    assert_eq!(
+        display_offset(&projection, 3, super::CaretAffinity::Default),
+        4
+    );
 }
 
 #[test]
@@ -397,8 +439,10 @@ fn typing_inside_manual_backticks_keeps_cursor_inside_code_span() {
 
     let clean_cursor = result.map_offset(2);
     assert_eq!(clean_cursor, 1);
+    // 展示光标仍在成对反引号之内（`\`1\`` 的第二个位置）。
+    let projection = projection_at(&result.tree.fragments, clean_cursor);
     assert_eq!(
-        expanded_display_cursor_offset_for_clean(&result.tree.fragments, clean_cursor),
+        display_offset(&projection, clean_cursor, super::CaretAffinity::Default),
         2
     );
 }
