@@ -665,7 +665,7 @@ fn markdown_to_standalone_html(
     options.insert(Options::ENABLE_HEADING_ATTRIBUTES);
     let parser = Parser::new_ext(&anchored, options);
     let mut body = String::new();
-    html::push_html(&mut body, parser);
+    html::push_html(&mut body, sanitize_export_events(parser));
     let toc = if include_toc {
         render_export_toc(&headings, toc_title)
     } else {
@@ -705,20 +705,26 @@ fn markdown_to_standalone_html(
     )
 }
 
+/// 把 Markdown 事件流里的原始 HTML 片段替换为清洗后的安全标记。
+///
+/// `pulldown-cmark` 默认把原始 HTML 原样写出，导出的 HTML 与剪贴板内容
+/// 因此会带上可执行脚本。清洗按标签逐个进行，块级与行内片段同样适用。
+fn sanitize_export_events<'a>(
+    events: impl Iterator<Item = pulldown_cmark::Event<'a>>,
+) -> impl Iterator<Item = pulldown_cmark::Event<'a>> {
+    events.map(|event| match event {
+        pulldown_cmark::Event::Html(raw) | pulldown_cmark::Event::InlineHtml(raw) => {
+            pulldown_cmark::Event::Html(pulldown_cmark::CowStr::from(
+                crate::components::markdown::html::sanitize_html_fragment(&raw),
+            ))
+        }
+        other => other,
+    })
+}
+
 /// 转义 HTML 标题中的特殊字符。
 fn html_escape(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
-    for ch in text.chars() {
-        match ch {
-            '&' => escaped.push_str("&amp;"),
-            '<' => escaped.push_str("&lt;"),
-            '>' => escaped.push_str("&gt;"),
-            '"' => escaped.push_str("&quot;"),
-            '\'' => escaped.push_str("&#39;"),
-            _ => escaped.push(ch),
-        }
-    }
-    escaped
+    crate::components::markdown::html::escape_html_text(text)
 }
 
 /// 在导出窗口上显示失败提示。
@@ -838,5 +844,47 @@ mod tests {
     #[test]
     fn html_escape_covers_special_characters() {
         assert_eq!(html_escape("A&B<>\"'"), "A&amp;B&lt;&gt;&quot;&#39;");
+    }
+
+    #[test]
+    fn standalone_html_escapes_script_blocks() {
+        let html = markdown_to_standalone_html(
+            "<script>alert(1)</script>\n\n正文",
+            "T",
+            false,
+            false,
+            "目录",
+        );
+        assert!(!html.contains("<script>"), "html: {html:?}");
+        assert!(html.contains("&lt;script&gt;"), "html: {html:?}");
+        assert!(html.contains("正文"), "html: {html:?}");
+    }
+
+    #[test]
+    fn standalone_html_drops_event_handlers_and_javascript_urls() {
+        let html = markdown_to_standalone_html(
+            "<img src=\"a.png\" onerror=\"alert(1)\">\n\n<a href=\"javascript:alert(1)\">x</a>",
+            "T",
+            false,
+            false,
+            "目录",
+        );
+        assert!(!html.contains("onerror"), "html: {html:?}");
+        assert!(!html.contains("javascript:"), "html: {html:?}");
+        assert!(html.contains("<img src=\"a.png\">"), "html: {html:?}");
+    }
+
+    #[test]
+    fn standalone_html_keeps_safe_html_blocks() {
+        let html = markdown_to_standalone_html(
+            "<details open>\n<summary>标题</summary>\n正文\n</details>",
+            "T",
+            false,
+            false,
+            "目录",
+        );
+        assert!(html.contains("<details open=\"\">"), "html: {html:?}");
+        assert!(html.contains("<summary>标题</summary>"), "html: {html:?}");
+        assert!(html.contains("</details>"), "html: {html:?}");
     }
 }

@@ -1056,6 +1056,247 @@ fn is_void_tag(name: &str) -> bool {
     matches!(name, "br" | "hr" | "img")
 }
 
+/// 清洗原始 HTML 片段，输出只含白名单标签与属性的安全标记。
+///
+/// 编辑器内 HTML 块按语义渲染，导出与复制则面向浏览器和外部站点：脚本标签、
+/// 事件属性与危险协议必须在此拦截。无法识别的标签按文本转义保留可见性，
+/// 注释与声明直接丢弃。
+pub(crate) fn sanitize_html_fragment(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut index = 0usize;
+
+    while index < raw.len() {
+        let Some(relative) = raw[index..].find('<') else {
+            out.push_str(&escape_html_text(&raw[index..]));
+            break;
+        };
+        let tag_start = index + relative;
+        if tag_start > index {
+            out.push_str(&escape_html_text(&raw[index..tag_start]));
+        }
+
+        let Some(token) = parse_tag_token(raw, tag_start) else {
+            out.push_str("&lt;");
+            index = tag_start + 1;
+            continue;
+        };
+        index = token.source_range.end;
+
+        match token.kind {
+            // 注释与声明没有视觉含义，也不该出现在导出产物里。
+            TagKind::CommentLike => {}
+            TagKind::Open => push_safe_open_tag(&mut out, raw, &token),
+            TagKind::Close => {
+                if is_safe_tag(&token.name) {
+                    out.push_str("</");
+                    out.push_str(&token.name);
+                    out.push('>');
+                } else {
+                    out.push_str(&escape_html_text(&raw[token.source_range.clone()]));
+                }
+            }
+        }
+    }
+
+    out
+}
+
+/// 输出白名单开始标签；非白名单标签按文本转义。
+fn push_safe_open_tag(out: &mut String, raw: &str, token: &HtmlTagToken) {
+    if !is_safe_tag(&token.name) {
+        out.push_str(&escape_html_text(&raw[token.source_range.clone()]));
+        return;
+    }
+
+    out.push('<');
+    out.push_str(&token.name);
+    for attr in &token.attrs {
+        let Some(rendered) = sanitize_attr(&token.name, attr) else {
+            continue;
+        };
+        out.push(' ');
+        out.push_str(&rendered);
+    }
+    if token.self_closing {
+        out.push_str(" />");
+    } else {
+        out.push('>');
+    }
+}
+
+/// 渲染单个白名单属性；不在白名单内或取值不安全时返回 `None` 表示丢弃。
+fn sanitize_attr(tag_name: &str, attr: &HtmlAttr) -> Option<String> {
+    let name = attr.name.as_str();
+    if !is_allowed_attr(tag_name, name) {
+        return None;
+    }
+
+    let value = attr.value.as_deref().unwrap_or_default();
+    match name {
+        "style" => {
+            // 只保留白名单视觉声明，其余样式（含 `url(...)`）整条丢弃。
+            let css = parse_inline_style(value).to_css()?;
+            Some(format!("style=\"{css}\""))
+        }
+        "href" | "src" | "cite" => {
+            if !is_safe_url(value) {
+                return None;
+            }
+            Some(format!("{name}=\"{}\"", escape_html_text(value)))
+        }
+        "target" => {
+            let target = value.trim().to_ascii_lowercase();
+            if !matches!(target.as_str(), "_blank" | "_self" | "_parent" | "_top") {
+                return None;
+            }
+            Some(format!("target=\"{target}\""))
+        }
+        "open" | "reversed" => Some(format!("{name}=\"\"")),
+        _ => Some(format!("{name}=\"{}\"", escape_html_text(value))),
+    }
+}
+
+/// 判断属性是否在白名单内。
+fn is_allowed_attr(tag_name: &str, name: &str) -> bool {
+    match name {
+        "class" | "id" | "title" | "dir" | "lang" | "style" => true,
+        "href" | "target" | "rel" => tag_name == "a",
+        "src" | "alt" | "width" | "height" => tag_name == "img",
+        "cite" => tag_name == "blockquote",
+        "colspan" | "rowspan" | "align" | "valign" | "scope" | "headers" => {
+            matches!(tag_name, "td" | "th")
+        }
+        "start" | "type" | "reversed" => tag_name == "ol",
+        "value" => tag_name == "li",
+        "open" => tag_name == "details",
+        "span" => matches!(tag_name, "col" | "colgroup"),
+        _ => false,
+    }
+}
+
+/// 判断 URL 是否可安全写入导出产物。
+///
+/// 协议判定前先解码 HTML 实体并剔除控制字符：浏览器会把
+/// `java&#115;cript:`、`javascript&colon;` 之类的写法还原成可执行协议。
+fn is_safe_url(url: &str) -> bool {
+    let decoded = decode_html_entities(url);
+    let normalized: String = decoded
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && *ch != '\0' && (*ch as u32) > 0x20 && *ch != '\u{7f}')
+        .collect();
+    let lower = normalized.to_ascii_lowercase();
+
+    if lower.starts_with("data:") {
+        return is_safe_data_url(&lower);
+    }
+
+    match url_scheme(&lower) {
+        None => true,
+        Some(scheme) => matches!(scheme, "http" | "https" | "mailto" | "ftp" | "ftps" | "tel"),
+    }
+}
+
+/// 判断 data URL 是否为安全图片类型。
+fn is_safe_data_url(lower_url: &str) -> bool {
+    let Some(rest) = lower_url.strip_prefix("data:") else {
+        return false;
+    };
+    let mime = rest.split(';').next().unwrap_or_default();
+    matches!(
+        mime,
+        "image/png"
+            | "image/jpeg"
+            | "image/jpg"
+            | "image/gif"
+            | "image/webp"
+            | "image/bmp"
+            | "image/avif"
+    )
+}
+
+/// 取 URL 的协议部分；相对地址与片段返回 `None`。
+fn url_scheme(lower_url: &str) -> Option<&str> {
+    for (index, ch) in lower_url.char_indices() {
+        match ch {
+            ':' => return Some(&lower_url[..index]),
+            '/' | '?' | '#' => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// 解码常见 HTML 实体引用，用于 URL 协议判定。
+fn decode_html_entities(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(index) = rest.find('&') {
+        out.push_str(&rest[..index]);
+        rest = &rest[index..];
+        let Some(end) = rest.find(';') else {
+            out.push('&');
+            rest = &rest[1..];
+            continue;
+        };
+        match decode_entity(&rest[1..end]) {
+            Some(decoded) => {
+                out.push(decoded);
+                rest = &rest[end + 1..];
+            }
+            None => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// 解码单个实体名（不含首尾 `&`、`;`）。
+fn decode_entity(entity: &str) -> Option<char> {
+    if let Some(digits) = entity.strip_prefix('#') {
+        let code = if let Some(hex) = digits
+            .strip_prefix('x')
+            .or_else(|| digits.strip_prefix('X'))
+        {
+            u32::from_str_radix(hex, 16).ok()?
+        } else {
+            digits.parse::<u32>().ok()?
+        };
+        return char::from_u32(code);
+    }
+
+    match entity {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        "colon" => Some(':'),
+        "sol" => Some('/'),
+        "tab" => Some('\t'),
+        "newline" => Some('\n'),
+        _ => None,
+    }
+}
+
+/// 转义 HTML 特殊字符。
+pub(crate) fn escape_html_text(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
 /// 用解析器判断源码是否有错。
 #[cfg(feature = "html-native")]
 fn tree_sitter_reports_error(raw_source: &str) -> bool {
@@ -1245,5 +1486,85 @@ mod tests {
         let css = style.to_css().expect("safe declarations produce css");
         assert!(css.contains("color: rgba(0,0,255,1.000)"));
         assert!(css.contains("font-size: 120%"));
+    }
+
+    #[test]
+    fn sanitize_keeps_safe_tags_and_attributes() {
+        assert_eq!(
+            sanitize_html_fragment("<span class=\"a\">文本</span>"),
+            "<span class=\"a\">文本</span>"
+        );
+        assert_eq!(
+            sanitize_html_fragment("<img src=\"a.png\" alt=\"图\">"),
+            "<img src=\"a.png\" alt=\"图\">"
+        );
+    }
+
+    #[test]
+    fn sanitize_escapes_unsafe_tags() {
+        assert_eq!(
+            sanitize_html_fragment("<script>alert(1)</script>"),
+            "&lt;script&gt;alert(1)&lt;/script&gt;"
+        );
+        assert_eq!(
+            sanitize_html_fragment("<iframe src=\"a\"></iframe>"),
+            "&lt;iframe src=&quot;a&quot;&gt;&lt;/iframe&gt;"
+        );
+    }
+
+    #[test]
+    fn sanitize_drops_event_handlers_and_dangerous_urls() {
+        assert_eq!(
+            sanitize_html_fragment("<img src=\"a.png\" onerror=\"alert(1)\">"),
+            "<img src=\"a.png\">"
+        );
+        assert_eq!(
+            sanitize_html_fragment("<a href=\"javascript:alert(1)\">x</a>"),
+            "<a>x</a>"
+        );
+        assert_eq!(
+            sanitize_html_fragment("<a href=\"java&#115;cript:alert(1)\">x</a>"),
+            "<a>x</a>"
+        );
+        assert_eq!(
+            sanitize_html_fragment("<a href=\"javascript&colon;alert(1)\">x</a>"),
+            "<a>x</a>"
+        );
+        assert_eq!(
+            sanitize_html_fragment("<img src=\"data:image/svg+xml;base64,AAA\">"),
+            "<img>"
+        );
+    }
+
+    #[test]
+    fn sanitize_keeps_safe_urls_and_relative_paths() {
+        assert_eq!(
+            sanitize_html_fragment("<a href=\"https://example.com/a?b=1&c=2\">x</a>"),
+            "<a href=\"https://example.com/a?b=1&amp;c=2\">x</a>"
+        );
+        assert_eq!(
+            sanitize_html_fragment("<a href=\"#anchor\">x</a>"),
+            "<a href=\"#anchor\">x</a>"
+        );
+        assert_eq!(
+            sanitize_html_fragment("<img src=\"./img/a.png\">"),
+            "<img src=\"./img/a.png\">"
+        );
+    }
+
+    #[test]
+    fn sanitize_filters_style_to_whitelisted_declarations() {
+        assert_eq!(
+            sanitize_html_fragment(
+                "<span style=\"color:red; background-image:url(javascript:x)\">y</span>"
+            ),
+            "<span style=\"color: rgba(255,0,0,1.000);\">y</span>"
+        );
+    }
+
+    #[test]
+    fn sanitize_drops_comments_and_keeps_plain_text() {
+        assert_eq!(sanitize_html_fragment("<!-- 注释 -->文本"), "文本");
+        assert_eq!(sanitize_html_fragment("a < b"), "a &lt; b");
     }
 }
