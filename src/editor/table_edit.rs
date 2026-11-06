@@ -1035,10 +1035,10 @@ impl Editor {
 
         let visible_tables = self
             .document
-            .flatten_visible_blocks()
-            .into_iter()
+            .visible_blocks()
+            .iter()
             .filter(|visible| visible.entity.read(cx).kind() == BlockKind::Table)
-            .map(|visible| visible.entity)
+            .map(|visible| visible.entity.clone())
             .collect::<Vec<_>>();
 
         for table_block in &visible_tables {
@@ -1099,5 +1099,235 @@ impl Editor {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rgpui::{App, AppContext, Entity, TestAppContext};
+
+    use super::Editor;
+    use crate::components::{Block, BlockKind, TableAxisKind, TableColumnAlignment};
+    use crate::editor::AxisSelection;
+    use crate::i18n::I18nManager;
+
+    /// 表格示例文档：两列三行。
+    const SAMPLE: &str = "| a | b |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |\n";
+
+    /// 初始化测试应用并返回承载表格块的编辑器（测试辅助）。
+    fn editor_with_table(cx: &mut TestAppContext) -> Entity<Editor> {
+        cx.update(|cx| {
+            I18nManager::init_with_language_id(cx, "en-US");
+            rgpui::theme::init(cx);
+            crate::components::init(cx);
+        });
+        let (editor, _cx) =
+            cx.add_window_view(|_window, cx| Editor::from_markdown(cx, SAMPLE.to_string(), None));
+        editor
+    }
+
+    /// 取文档里的表格块实体（测试辅助）。
+    fn table_block(editor: &Editor, cx: &App) -> Entity<Block> {
+        editor
+            .document
+            .visible_blocks()
+            .iter()
+            .find(|visible| visible.entity.read(cx).kind() == BlockKind::Table)
+            .map(|visible| visible.entity.clone())
+            .expect("document should hold a table block")
+    }
+
+    /// 读回文档源码（测试辅助）。
+    fn source(editor: &Entity<Editor>, cx: &mut TestAppContext) -> String {
+        editor.update(cx, |editor, cx| editor.document.markdown_text(cx))
+    }
+
+    /// 去掉首尾竖线后按单元格切分一行（测试辅助）。
+    fn cells(line: &str) -> Vec<String> {
+        line.trim()
+            .trim_matches('|')
+            .split('|')
+            .map(|cell| cell.trim().to_string())
+            .collect()
+    }
+
+    #[rgpui::test]
+    async fn axis_marker_carries_selection_kind_and_index(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let table_block_id = cx.new(|_cx| 0usize).entity_id();
+            let selection = AxisSelection {
+                table_block_id,
+                kind: TableAxisKind::Row,
+                index: 2,
+            };
+            let marker = Editor::table_axis_marker(selection);
+
+            assert_eq!(marker.kind, TableAxisKind::Row);
+            assert_eq!(marker.index, 2);
+        });
+    }
+
+    #[rgpui::test]
+    async fn append_table_column_widens_header_delimiter_and_every_body_row(
+        cx: &mut TestAppContext,
+    ) {
+        let editor = editor_with_table(cx);
+        editor.update(cx, |editor, cx| {
+            let table = table_block(editor, cx);
+            editor.append_table_column(&table, cx);
+        });
+
+        let text = source(&editor, cx);
+        let lines: Vec<String> = text.lines().map(|line| line.to_string()).collect();
+        assert_eq!(lines.len(), 4, "text: {text:?}");
+        for line in &lines {
+            assert_eq!(cells(line).len(), 3, "line: {line:?}");
+        }
+        assert_eq!(cells(&lines[0]), ["a", "b", ""]);
+        assert_eq!(cells(&lines[2]), ["1", "2", ""]);
+    }
+
+    #[rgpui::test]
+    async fn insert_table_row_at_adds_a_blank_visual_row(cx: &mut TestAppContext) {
+        let editor = editor_with_table(cx);
+        // 可视行 1 是首个正文行之前，插入后新行占据该位置。
+        editor.update(cx, |editor, cx| {
+            let table = table_block(editor, cx);
+            editor.insert_table_row_at(&table, 1, 0, cx);
+        });
+
+        let text = source(&editor, cx);
+        let lines: Vec<String> = text.lines().map(|line| line.to_string()).collect();
+        assert_eq!(lines.len(), 5, "text: {text:?}");
+        assert!(
+            cells(&lines[2]).iter().all(|cell| cell.is_empty()),
+            "inserted row should be blank: {:?}",
+            lines[2]
+        );
+        assert_eq!(cells(&lines[3]), ["1", "2"]);
+        assert_eq!(cells(&lines[4]), ["3", "4"]);
+    }
+
+    #[rgpui::test]
+    async fn delete_table_row_removes_only_the_target_body_row(cx: &mut TestAppContext) {
+        let editor = editor_with_table(cx);
+        editor.update(cx, |editor, cx| {
+            let table = table_block(editor, cx);
+            editor.delete_table_row(&table, 0, cx);
+        });
+
+        let text = source(&editor, cx);
+        let lines: Vec<String> = text.lines().map(|line| line.to_string()).collect();
+        assert_eq!(lines.len(), 3, "text: {text:?}");
+        assert_eq!(cells(&lines[0]), ["a", "b"]);
+        assert_eq!(cells(&lines[2]), ["3", "4"]);
+    }
+
+    #[rgpui::test]
+    async fn move_table_row_down_swaps_adjacent_body_rows(cx: &mut TestAppContext) {
+        let editor = editor_with_table(cx);
+        // 可视行 1（首个正文行）下移一行。
+        editor.update(cx, |editor, cx| {
+            let table = table_block(editor, cx);
+            editor.move_table_row(&table, 1, 1, cx);
+        });
+
+        let text = source(&editor, cx);
+        let lines: Vec<String> = text.lines().map(|line| line.to_string()).collect();
+        assert_eq!(cells(&lines[2]), ["3", "4"]);
+        assert_eq!(cells(&lines[3]), ["1", "2"]);
+    }
+
+    #[rgpui::test]
+    async fn set_table_column_alignment_rewrites_the_delimiter_row(cx: &mut TestAppContext) {
+        let editor = editor_with_table(cx);
+        editor.update(cx, |editor, cx| {
+            let table = table_block(editor, cx);
+            editor.set_table_column_alignment(&table, 1, TableColumnAlignment::Center, cx);
+        });
+
+        let text = source(&editor, cx);
+        let delimiter = text
+            .lines()
+            .nth(1)
+            .unwrap_or_default()
+            .trim()
+            .trim_matches('|')
+            .to_string();
+        assert_eq!(delimiter.trim(), "--- | :---:");
+    }
+
+    #[rgpui::test]
+    async fn axis_selection_is_dropped_once_its_axis_shrinks(cx: &mut TestAppContext) {
+        let editor = editor_with_table(cx);
+
+        // 两列表格：列 1 有效，列 2 越界。
+        editor.update(cx, |editor, cx| {
+            let table_id = table_block(editor, cx).entity_id();
+            let column_one = AxisSelection {
+                table_block_id: table_id,
+                kind: TableAxisKind::Column,
+                index: 1,
+            };
+            assert!(editor.table_axis_selection_valid(column_one, cx));
+
+            let column_two = AxisSelection {
+                table_block_id: table_id,
+                kind: TableAxisKind::Column,
+                index: 2,
+            };
+            assert!(!editor.table_axis_selection_valid(column_two, cx));
+
+            // 可视行上界为正文行数（2），3 已越界。
+            let last_row = AxisSelection {
+                table_block_id: table_id,
+                kind: TableAxisKind::Row,
+                index: 2,
+            };
+            assert!(editor.table_axis_selection_valid(last_row, cx));
+            let beyond = AxisSelection {
+                table_block_id: table_id,
+                kind: TableAxisKind::Row,
+                index: 3,
+            };
+            assert!(!editor.table_axis_selection_valid(beyond, cx));
+        });
+
+        // 删掉末列后，选中列自动回落到仍然存在的列。
+        editor.update(cx, |editor, cx| {
+            let table_id = table_block(editor, cx).entity_id();
+            editor.set_table_axis_selection(
+                Some(AxisSelection {
+                    table_block_id: table_id,
+                    kind: TableAxisKind::Column,
+                    index: 1,
+                }),
+                cx,
+            );
+            let table = table_block(editor, cx);
+            editor.delete_table_column(&table, 1, cx);
+            editor.normalize_table_axis_state(cx);
+
+            let selection = editor
+                .table_axis_selection
+                .expect("selection should fall back to a live column");
+            assert_eq!(selection.index, 0);
+            assert!(editor.table_axis_selection_valid(selection, cx));
+        });
+
+        // 指向已消失列的陈旧选中会被规范化清除。
+        editor.update(cx, |editor, cx| {
+            let table_id = table_block(editor, cx).entity_id();
+            editor.set_table_axis_selection(
+                Some(AxisSelection {
+                    table_block_id: table_id,
+                    kind: TableAxisKind::Column,
+                    index: 5,
+                }),
+                cx,
+            );
+            editor.normalize_table_axis_state(cx);
+            assert!(editor.table_axis_selection.is_none());
+        });
     }
 }

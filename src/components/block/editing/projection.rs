@@ -1029,3 +1029,163 @@ fn push_projected_fragment(
         *display_cursor += marker_len;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::components::markdown::inline::InlineTextTree;
+
+    use super::{
+        ExpandedInlineSegmentKind, InlineExpansionKind, InlineExpansionProjection,
+        expanded_display_cursor_offset_for_clean, expanded_display_offset_for_clean,
+    };
+
+    /// 构造一个纯文本片段（测试辅助）。
+    fn plain_fragment(text: &str) -> crate::components::markdown::inline::InlineFragment {
+        crate::components::markdown::inline::InlineFragment {
+            text: text.to_string(),
+            style: Default::default(),
+            html_style: None,
+            link: None,
+            footnote: None,
+            math: None,
+        }
+    }
+
+    #[test]
+    fn projection_is_absent_when_cursor_is_outside_styled_text() {
+        let tree = InlineTextTree::from_markdown("前缀**粗体**");
+        // 行内偏移按字节计，加粗片段从纯文本之后开始。
+        let bold_start = tree.fragments[0].text.len();
+        assert_eq!(
+            bold_start,
+            6,
+            "fragments: {:?}",
+            tree.fragments
+                .iter()
+                .map(|f| f.text.clone())
+                .collect::<Vec<_>>()
+        );
+
+        // 光标落在纯文本片段内，加粗片段未被触及。
+        let projection = InlineExpansionProjection::build(&tree.fragments, 0..0, None);
+        assert!(
+            projection.is_none(),
+            "untouched style should stay collapsed"
+        );
+
+        // 一旦进入加粗片段，分隔符就应展开。
+        let expanded =
+            InlineExpansionProjection::build(&tree.fragments, bold_start..bold_start, None)
+                .expect("cursor inside bold text should expand");
+        assert!(
+            expanded.segments.iter().any(|segment| segment.kind
+                == ExpandedInlineSegmentKind::OpeningDelimiter(InlineExpansionKind::BoldMarkdown)),
+            "segments: {:?}",
+            expanded.segments
+        );
+    }
+
+    #[test]
+    fn bold_selection_reveals_markdown_delimiters() {
+        let tree = InlineTextTree::from_markdown("**粗体**");
+        let projection = InlineExpansionProjection::build(&tree.fragments, 0..1, None)
+            .expect("bold fragment should expand");
+
+        let kinds: Vec<ExpandedInlineSegmentKind> = projection
+            .segments
+            .iter()
+            .map(|segment| segment.kind)
+            .collect();
+        assert!(
+            kinds.contains(&ExpandedInlineSegmentKind::OpeningDelimiter(
+                InlineExpansionKind::BoldMarkdown
+            )),
+            "segments: {kinds:?}"
+        );
+        assert!(
+            kinds.contains(&ExpandedInlineSegmentKind::ClosingDelimiter(
+                InlineExpansionKind::BoldMarkdown
+            )),
+            "segments: {kinds:?}"
+        );
+
+        // 展开后的展示文本应把 `**` 分隔符显式写回。
+        let display = projection.cache.plain_text().to_string();
+        assert!(display.contains("**"), "display: {display:?}");
+    }
+
+    #[test]
+    fn link_selection_reveals_target_text() {
+        let tree = InlineTextTree::from_markdown("[标签](https://example.com)");
+        let projection = InlineExpansionProjection::build(&tree.fragments, 0..1, None)
+            .expect("link fragment should expand");
+
+        assert_eq!(
+            projection.link_runs.len(),
+            1,
+            "runs: {:?}",
+            projection.link_runs
+        );
+        let run = &projection.link_runs[0];
+        assert_eq!(run.link.open_target(), "https://example.com");
+        assert!(run.target_display_range.start < run.target_display_range.end);
+
+        let display = projection.cache.plain_text().to_string();
+        assert!(
+            display.contains("https://example.com"),
+            "display: {display:?}"
+        );
+    }
+
+    #[test]
+    fn display_offset_for_clean_cursor_maps_into_expanded_display() {
+        let tree = InlineTextTree::from_markdown("**粗体**");
+        let projection = InlineExpansionProjection::build(&tree.fragments, 0..1, None)
+            .expect("bold fragment should expand");
+
+        // 纯偏移 0 对应展开后的起始分隔符之后。
+        let offset = projection
+            .display_offset_for_clean_cursor(0, super::CaretAffinity::Default)
+            .expect("clean offset should map");
+        assert!(
+            offset >= 2,
+            "clean offset 0 should land after the opening delimiter: {offset}"
+        );
+    }
+
+    #[test]
+    fn move_targets_jump_across_expanded_delimiters() {
+        let tree = InlineTextTree::from_markdown("**粗体**");
+        let projection = InlineExpansionProjection::build(&tree.fragments, 0..1, None)
+            .expect("bold fragment should expand");
+
+        let opening = projection
+            .segments
+            .iter()
+            .find(|segment| {
+                matches!(
+                    segment.kind,
+                    ExpandedInlineSegmentKind::OpeningDelimiter(InlineExpansionKind::BoldMarkdown)
+                )
+            })
+            .expect("opening delimiter segment");
+
+        let (target, affinity) = projection
+            .move_left_target(opening.display_range.end)
+            .expect("left move should target the delimiter start");
+        assert_eq!(target, opening.display_range.start);
+        assert_eq!(affinity, super::CaretAffinity::OuterStart);
+    }
+
+    #[test]
+    fn expanded_code_offsets_account_for_backticks() {
+        let fragments = vec![plain_fragment("123")];
+        let mut fragments = fragments;
+        fragments[0].style.code = true;
+
+        assert_eq!(expanded_display_offset_for_clean(&fragments, 0), 1);
+        assert_eq!(expanded_display_offset_for_clean(&fragments, 3), 5);
+        assert_eq!(expanded_display_cursor_offset_for_clean(&fragments, 0), 1);
+        assert_eq!(expanded_display_cursor_offset_for_clean(&fragments, 3), 4);
+    }
+}

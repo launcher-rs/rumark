@@ -443,3 +443,74 @@ impl Editor {
         .detach();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Editor;
+    use std::path::{Path, PathBuf};
+
+    /// 在独立临时目录里创建若干文件并返回其路径（测试辅助）。
+    fn temp_markdown_dir(files: &[(&str, &str)]) -> Vec<PathBuf> {
+        let root = std::env::temp_dir().join(format!("rumark-file-drop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("temp dir should be created");
+        files
+            .iter()
+            .map(|(name, content)| {
+                let path = root.join(name);
+                std::fs::write(&path, content).expect("temp file should be written");
+                path
+            })
+            .collect()
+    }
+
+    #[test]
+    fn markdown_suffixes_are_recognized_case_insensitively() {
+        let paths = temp_markdown_dir(&[
+            ("note.md", "# 标题"),
+            ("NOTE.MARKDOWN", "正文"),
+            ("notes.txt", "正文"),
+        ]);
+
+        assert!(Editor::is_markdown_file_path(&paths[0]));
+        assert!(Editor::is_markdown_file_path(&paths[1]));
+        assert!(!Editor::is_markdown_file_path(&paths[2]));
+    }
+
+    #[test]
+    fn missing_paths_and_directories_are_not_markdown_files() {
+        let root =
+            std::env::temp_dir().join(format!("rumark-file-drop-dir-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("temp dir should be created");
+
+        // 目录即使带 .md 后缀也不算 Markdown 文件。
+        let as_dir = root.join("package.md");
+        std::fs::create_dir_all(&as_dir).expect("nested dir should be created");
+        assert!(!Editor::is_markdown_file_path(&as_dir));
+
+        let missing = Path::new(&root).join("missing.md");
+        assert!(!Editor::is_markdown_file_path(&missing));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn first_dropped_markdown_path_skips_non_markdown_entries() {
+        let paths = temp_markdown_dir(&[
+            ("image.png", "二进制内容"),
+            ("readme.txt", "说明"),
+            ("doc.md", "# 文档"),
+            ("other.markdown", "## 另一篇"),
+        ]);
+
+        let picked = Editor::first_dropped_markdown_path(&paths);
+        assert_eq!(picked, Some(paths[2].clone()));
+    }
+
+    #[test]
+    fn first_dropped_markdown_path_returns_none_without_markdown() {
+        let paths = temp_markdown_dir(&[("a.png", "x"), ("b.txt", "y")]);
+
+        assert_eq!(Editor::first_dropped_markdown_path(&paths), None);
+        assert_eq!(Editor::first_dropped_markdown_path(&[]), None);
+    }
+}

@@ -408,3 +408,86 @@ impl Editor {
         cx.notify();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Editor;
+    use crate::theme::ThemeDimensions;
+
+    /// 构造视口尺寸（测试辅助）。
+    fn size(width: f32, height: f32) -> rgpui::Size<rgpui::Pixels> {
+        rgpui::Size {
+            width: rgpui::px(width),
+            height: rgpui::px(height),
+        }
+    }
+
+    #[test]
+    fn rendered_window_of_no_rows_is_an_empty_run() {
+        let window = Editor::rendered_window(&[], 0.0, 300.0, 0.0, None);
+
+        assert_eq!((window.run_start, window.run_end), (0, 0));
+        assert_eq!(window.top_h, 0.0);
+        assert_eq!(window.bottom_h, 0.0);
+        assert_eq!(window.focus_island, None);
+    }
+
+    #[test]
+    fn centered_column_width_stays_within_available_content_width() {
+        let dimensions = ThemeDimensions::DEFAULT;
+
+        // 窄视口保持全宽。
+        let narrow = Editor::centered_column_width(1000.0, &dimensions);
+        assert_eq!(narrow, 1000.0 - dimensions.editor_padding * 2.0);
+
+        // 到达收缩终点后按最小比例取宽。
+        let wide = Editor::centered_column_width(dimensions.centered_shrink_end, &dimensions);
+        let available = dimensions.centered_shrink_end - dimensions.editor_padding * 2.0;
+        assert!(
+            (wide - available * dimensions.centered_min_ratio).abs() < 0.01,
+            "wide: {wide}"
+        );
+
+        // 极窄视口下 320px 下限不得反噬可用宽度。
+        assert_eq!(
+            Editor::centered_column_width(200.0, &dimensions),
+            200.0 - dimensions.editor_padding * 2.0
+        );
+    }
+
+    #[test]
+    fn window_title_shows_file_name_and_dirty_marker() {
+        let manager = crate::i18n::I18nManager::new_with_language_id("en-US");
+        let i18n = manager.snapshot();
+
+        assert_eq!(Editor::window_title(None, false, &i18n), "Rumark");
+        assert_eq!(
+            Editor::window_title(Some(std::path::Path::new("/tmp/notes.md")), false, &i18n),
+            "Rumark - notes.md"
+        );
+
+        let dirty = Editor::window_title(Some(std::path::Path::new("/tmp/notes.md")), true, &i18n);
+        let marker = i18n.t("win_dirty_marker", &[]);
+        assert_eq!(dirty, format!("{marker} Rumark - notes.md"));
+    }
+
+    #[test]
+    fn viewport_size_change_ignores_sub_pixel_jitter() {
+        assert!(!Editor::viewport_size_changed(
+            size(800.0, 600.0),
+            size(800.0, 600.0)
+        ));
+        assert!(!Editor::viewport_size_changed(
+            size(800.0, 600.0),
+            size(800.4, 600.4)
+        ));
+        assert!(Editor::viewport_size_changed(
+            size(800.0, 600.0),
+            size(802.0, 600.0)
+        ));
+        assert!(Editor::viewport_size_changed(
+            size(800.0, 600.0),
+            size(800.0, 601.0)
+        ));
+    }
+}

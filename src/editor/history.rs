@@ -371,3 +371,47 @@ impl Editor {
         cx.notify();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Editor;
+
+    /// 构造源码区间（测试辅助）。
+    fn range(start: usize, end: usize) -> std::ops::Range<usize> {
+        start..end
+    }
+
+    #[test]
+    fn source_range_contains_includes_both_endpoints() {
+        assert!(Editor::source_range_contains(&range(4, 9), 4));
+        assert!(Editor::source_range_contains(&range(4, 9), 9));
+        assert!(Editor::source_range_contains(&range(4, 9), 6));
+        assert!(!Editor::source_range_contains(&range(4, 9), 3));
+        assert!(!Editor::source_range_contains(&range(4, 9), 10));
+    }
+
+    #[test]
+    fn empty_source_range_only_contains_its_own_offset() {
+        assert!(Editor::source_range_contains(&range(5, 5), 5));
+        assert!(!Editor::source_range_contains(&range(5, 5), 4));
+        assert!(!Editor::source_range_contains(&range(5, 5), 6));
+    }
+
+    #[test]
+    fn source_offset_distance_is_zero_inside_and_grows_outside() {
+        assert_eq!(Editor::source_offset_distance(&range(4, 9), 4), 0);
+        assert_eq!(Editor::source_offset_distance(&range(4, 9), 7), 0);
+        assert_eq!(Editor::source_offset_distance(&range(4, 9), 9), 0);
+        assert_eq!(Editor::source_offset_distance(&range(4, 9), 1), 3);
+        assert_eq!(Editor::source_offset_distance(&range(4, 9), 12), 3);
+        assert_eq!(Editor::source_offset_distance(&range(5, 5), 5), 0);
+        assert_eq!(Editor::source_offset_distance(&range(5, 5), 8), 3);
+    }
+
+    #[test]
+    fn empty_selection_snapshot_is_collapsed_at_origin() {
+        let snapshot = Editor::empty_selection_snapshot();
+        assert_eq!(snapshot.range, 0..0);
+        assert!(!snapshot.reversed);
+    }
+}

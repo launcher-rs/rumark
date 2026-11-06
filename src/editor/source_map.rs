@@ -784,3 +784,141 @@ impl Editor {
         (mappings, block_ranges)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use rgpui::{AppContext, TestAppContext};
+
+    use super::Editor;
+
+    /// 初始化测试应用（测试辅助）。
+    fn init_source_map_test_app(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            crate::i18n::I18nManager::init_with_language_id(cx, "en-US");
+            rgpui::theme::init(cx);
+            crate::components::init(cx);
+        });
+    }
+
+    #[test]
+    fn prefixed_content_mapping_tracks_offsets_across_prefixes() {
+        let (full, content_to_source, source_to_content) =
+            Editor::build_prefixed_content_mapping("ab\ncd", "> ", "> ");
+
+        assert_eq!(full, "> ab\n> cd");
+        // 每个内容偏移都指向源码中对应的字符。
+        assert_eq!(content_to_source.len(), 6);
+        assert_eq!(&full[content_to_source[0]..content_to_source[0] + 1], "a");
+        assert_eq!(&full[content_to_source[1]..content_to_source[1] + 1], "b");
+        assert_eq!(&full[content_to_source[2]..content_to_source[2] + 1], "\n");
+        assert_eq!(&full[content_to_source[3]..content_to_source[3] + 1], "c");
+        assert_eq!(&full[content_to_source[4]..content_to_source[4] + 1], "d");
+        // 末尾偏移落在全文长度上。
+        assert_eq!(content_to_source[5], full.len());
+
+        // 反向映射：源码中的每个偏移都回指到内容偏移。
+        assert_eq!(source_to_content.len(), full.len() + 1);
+        assert_eq!(source_to_content[0], 0);
+        assert_eq!(source_to_content[full.len()], 5);
+        for (source_offset, &content_offset) in source_to_content[..full.len()].iter().enumerate() {
+            assert!(
+                content_offset <= 5,
+                "source offset {source_offset} mapped out of range: {content_offset}"
+            );
+        }
+    }
+
+    #[test]
+    fn code_block_content_mapping_wraps_content_in_fence() {
+        let (full, content_to_source, source_to_content) =
+            Editor::build_code_block_content_mapping("a\nb", "", None);
+
+        assert_eq!(full, "```\na\nb\n```");
+        assert_eq!(content_to_source.len(), 4);
+        assert_eq!(&full[content_to_source[0]..content_to_source[0] + 1], "a");
+        assert_eq!(&full[content_to_source[1]..content_to_source[1] + 1], "\n");
+        assert_eq!(&full[content_to_source[2]..content_to_source[2] + 1], "b");
+        assert_eq!(content_to_source[3], full.len() - 4);
+        assert_eq!(source_to_content.len(), full.len() + 1);
+        assert_eq!(source_to_content[full.len()], 3);
+    }
+
+    #[test]
+    fn code_block_content_mapping_keeps_indentation_on_every_line() {
+        let (full, _, _) = Editor::build_code_block_content_mapping("x\ny", "  ", None);
+
+        assert_eq!(full, "  ```\n  x\n  y\n  ```");
+    }
+
+    #[test]
+    fn quote_wrapping_prefixes_each_line() {
+        let (full, content_to_source, source_to_content) = Editor::wrap_source_mapping_with_quotes(
+            "a\nb".to_string(),
+            vec![0, 1, 2],
+            vec![0, 1, 2],
+            1,
+        );
+
+        assert_eq!(full, "> a\n> b");
+        assert_eq!(content_to_source.len(), 3);
+        assert_eq!(&full[content_to_source[0]..content_to_source[0] + 1], "a");
+        assert_eq!(&full[content_to_source[2]..content_to_source[2] + 1], "b");
+        assert_eq!(source_to_content.len(), full.len() + 1);
+    }
+
+    #[test]
+    fn quote_wrapping_applies_prefix_once_per_depth() {
+        let (full, _, _) =
+            Editor::wrap_source_mapping_with_quotes("a".to_string(), vec![0, 1], vec![0, 1], 2);
+
+        assert_eq!(full, "> > a");
+    }
+
+    #[rgpui::test]
+    async fn source_mappings_cover_document_source(cx: &mut TestAppContext) {
+        init_source_map_test_app(cx);
+        let markdown = "# 标题\n\n段落一\n\n- 列表项\n\n```rust\nfn main() {}\n```\n".to_string();
+        let editor = cx.new(|cx| Editor::from_markdown(cx, markdown.clone(), None));
+
+        cx.update(|cx| {
+            let editor = editor.read(cx);
+            let mappings = editor.build_source_target_mappings(cx);
+            assert!(!mappings.is_empty(), "mappings should not be empty");
+
+            // 每条映射的源码区间都落在文档文本内。
+            for mapping in &mappings {
+                assert!(
+                    mapping.full_source_range.end <= markdown.len(),
+                    "mapping range {:?} exceeds source length {}",
+                    mapping.full_source_range,
+                    markdown.len()
+                );
+            }
+
+            // 各映射区间互不重叠且按顺序排列。
+            for pair in mappings.windows(2) {
+                assert!(
+                    pair[0].full_source_range.end <= pair[1].full_source_range.start,
+                    "mappings overlap: {:?} vs {:?}",
+                    pair[0].full_source_range,
+                    pair[1].full_source_range
+                );
+            }
+        });
+    }
+
+    #[rgpui::test]
+    async fn source_mapping_of_heading_points_at_heading_text(cx: &mut TestAppContext) {
+        init_source_map_test_app(cx);
+        let markdown = "# 标题\n\n正文\n".to_string();
+        let editor = cx.new(|cx| Editor::from_markdown(cx, markdown.clone(), None));
+
+        cx.update(|cx| {
+            let editor = editor.read(cx);
+            let mappings = editor.build_source_target_mappings(cx);
+            let heading = mappings.first().expect("heading should have a mapping");
+            let text = &markdown[heading.full_source_range.clone()];
+            assert!(text.starts_with("# 标题"), "heading source: {text:?}");
+        });
+    }
+}
