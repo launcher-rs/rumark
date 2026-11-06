@@ -10,7 +10,7 @@
 - 单测聚焦：`cargo test -p rumark <模块路径::测试名>`，如 `cargo test -p rumark editor::document`
 - 校验顺序：`cargo fmt --check` → `cargo clippy -p rumark --all-targets` → `cargo test -p rumark`
 - 手动渲染回归：用 `docs/render-sample.md` 打开验证（覆盖 CommonMark + GFM 扩展、嵌套、边界用例）
-- 待办与进度交接：根目录 `TODO.md`（未提交状态、待决事项、待办任务、验证基线、已知陷阱）
+- 待办与进度交接：`docs/TODO.md`（未提交状态、待决事项、待办任务、验证基线、已知陷阱）
 
 ## 依赖与 Feature 约定
 
@@ -19,20 +19,20 @@
   - 最小编译验证：`cargo check -p rumark --no-default-features`
   - tree-sitter 版本全部 pin 死（`=x.y.z`），升级需整组对齐，不要单独 bump。
 - `[profile.dev.package]` 把 `rgpui`、`rgpui-macros` 按 release 优化：debug 慢先怀疑自家代码，不要动这个配置。
-- 启动重、导出重依赖已主动移除（见 git log trim 提交）。加新重型依赖前先确认必要性。
+- 现存重型依赖：`printpdf` / `docx-rs`（PDF、DOCX 导出）、`mermaid-rs-renderer`（Mermaid）、`ratex-*`（LaTeX）、`reqwest`（远程图片与网络请求）。加新重型依赖前先确认必要性。
 
 ## 结构与入口
 
 - 入口 `src/main.rs`：解析 CLI → `config::load_or_create_app_preferences` → 初始化 `I18nManager` / `theme::init`（rgpui 明暗主题）/ `EditorSettings` / `net::install_http_client` → `components::init_with_keybindings` + `init_app_menu`。改启动流程只动这里。
-- `src/editor/`：文档模型与交互核心（`document.rs` 块模型、`tree.rs`、`events.rs`、`history.rs`、`persistence.rs`、`workspace.rs`、`table_edit.rs`、`render.rs`、`source_mapping.rs`、`selection.rs`）。
-- `src/components/{block,markdown,latex,mermaid}/`：各类块渲染；`actions.rs` 为装配层（开关用 rgpui `Switch` 组件）。
-- `src/{config,i18n,theme,net,app_menu.rs,app_identity.rs,file_url.rs,atomic_file.rs}`：设置持久化、多语言、主题、HTTP 客户端、菜单、原子写盘。`file_url.rs` 仅 macOS（含 test 下）编译。
+- `src/editor/`：文档模型与交互核心（`document.rs` 块模型、`tree.rs` 运行时树与可见快照、`events.rs` 事件分发、`history.rs` 撤销重做、`persistence.rs` 存取与导出、`workspace.rs`、`table_edit.rs`、`render.rs` 渲染、`source_map.rs` 源码映射、`selection.rs`、`find.rs` 查找替换、`context_menu.rs`、`image_menu.rs`、`file_drop.rs`、`status_bar.rs`、`window_layout.rs`、`close.rs` 关闭保护、`editor_context.rs`）。
+- `src/components/{block,markdown,latex,mermaid}/`：各类块渲染；`actions.rs` 是动作定义与按键绑定装配层（`actions!` 宏 + `install_keybindings`），偏好项开关用 rgpui `Switch` 组件（`config/preferences.rs`）。
+- `src/{config,i18n,theme,net,export,app_menu.rs,app_identity.rs,file_url.rs,atomic_file.rs,text_offsets.rs}`：设置持久化、多语言、主题、HTTP 客户端、导出渲染、菜单、原子写盘、文本偏移换算。`file_url.rs` 仅 macOS（含 test 下）编译。
 - 所有落盘统一走 `atomic_file`（`write_text`/`write_bytes`/`copy_file`：同目录临时文件 → `sync_all` → 重命名，失败清理临时文件），不要再用裸 `std::fs::write`/`fs::copy` 写配置文件、文档、粘贴图片或缓存。
 - 界面文案走 rgpui 通用 `I18nManager` 包装（`src/i18n/mod.rs`，键值包 `zh-CN.json`/`en-US.json` 内嵌；热路径传 owned `I18nSnapshot`，勿持 `cx.global` 借用跨 `&mut` 调用）。键名一律下划线分层 `域[_组]_项`（如 `menu_file_save`、`keys_save`、`table_column_align_left`），域固定为 `win`/`dialog`/`menu`/`message`/`pref`/`keys`/`find`/`workspace`/`context`/`insert`/`table`/`image`/`code`/`status`/`export`；新增文案沿用该规范，两包键集必须一致。
-- 颜色直接用 rgpui `Theme` 调色板（`theme.colors.X` 经 `Deref` 可写作 `theme.X`）；布局/字排是 `theme` 模块的 `ThemeDimensions::DEFAULT` / `ThemeTypography::DEFAULT` 常量。主题只有明暗两档（id 为 `rumark`(暗)/`rumark-light`(亮)），无自定义主题包导入（`AddThemeConfig` 动作已删除）。
+- 颜色直接用 rgpui `Theme` 调色板（`theme.colors.X` 经 `Deref` 可写作 `theme.X`）；布局/字排是 `theme` 模块的 `ThemeDimensions::DEFAULT` / `ThemeTypography::DEFAULT` 常量。内置主题只有明暗两档（id 为 `rumark`(暗)/`rumark-light`(亮)），另有用户主题包导入（`AddThemeConfig` 动作 → `theme::load_theme_config`）。
 - 窗口标题栏直接用 rgpui `TitleBar` 组件（`app_menu.rs` 的 `rumark_window_options` 只做选项基座；编辑器渲染单行 `TitleBar`：开头品牌名 + 框架 `Button` 菜单（`dropdown_menu` 下拉，定位/子菜单由组件处理），右侧三键由组件自动追加；有菜单时清零组件左内边距）：高度固定 34px（`TITLE_BAR_HEIGHT`），流式布局占位；窗口关闭一律走平台路径，经窗口级关闭保护拦截。
 - 块文本测量走 `Window::request_measured_layout_simple`，不要“顺手”迁到 1.7 带 `fingerprint`/`text_state` 的复用入口：`TextLayout` 只有只读访问器（`line_layouts`/`bounds` 等），外部无法写入自己的换行结果，carry 命中时会交还空状态、绘制阶段拿不到行。框架侧开放写入后再评估。
-- 内部标识（改名会破坏已存用户配置）：内置主题 id（`rumark` / `rumark-light`，映射到组件明暗两档）、action 命名空间（`rumark::...`，用户键位配置依赖）、测试临时文件 `rumark-*` 前缀（`config` 的历史记录过滤器依赖它；`AddThemeConfig` 已随自定义主题包删除而移除）。应用标识与配置/缓存目录为 `rs.launcher.Rumark`。
+- 内部标识（改名会破坏已存用户配置）：内置主题 id（`rumark` / `rumark-light`，映射到组件明暗两档）、action 命名空间（`rumark::...`，用户键位配置依赖）、测试临时文件 `rumark-*` 前缀（`config` 的历史记录过滤器依赖它）。应用标识与配置/缓存目录为 `rs.launcher.Rumark`。
 - 版权：`LICENSE-APACHE` 正文为 Apache-2.0 标准文本（文件头版权为 `launcher-rs`）；不要改 `LICENSE-APACHE` 正文。
 
 ## 注释与语言规范
@@ -45,4 +45,5 @@
 
 - 平台分支多用 `#[cfg(target_os = "macos")]`：`--detach` 重启自身、`on_open_urls` + 150ms 延迟启动窗口、`file_url`。非 macOS 改动后仍要在本机跑通测试，macOS 特有逻辑不要在 Windows/Linux 下强行验证。
 - `#[cfg(not(debug_assertions))] windows_subsystem = "windows"`：release 下 Windows 无控制台，`eprintln!` 调试信息看不到。
-- 已知被裁功能：版本更新检查、HTML/PDF 导出已删除，不要“补回”或加回 `semver`/`chromiumoxide`/`tokio`。
+- 已知被裁功能：版本更新检查（不要“补回”，也不要加回 `semver`）。HTML 单文件导出、PDF/DOCX 导出仍在，导出产物里的原始 HTML 必须经 `components::markdown::html::sanitize_html_fragment` 清洗，别绕过它直接 `push_html`。
+- 配置文件 `config.toml` 带 `version` 字段：解析失败时备份为 `config.toml.bak` 并重建默认配置，由 `PendingConfigRecovery` 在首个窗口弹窗告知；版本号高于当前实现时不得回写默认值。
