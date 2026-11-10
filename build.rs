@@ -12,7 +12,8 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         println!("cargo:rerun-if-changed=assets/rumark.rc");
         println!("cargo:rerun-if-changed=assets/rumark.ico");
-        // rgpui 的 Windows 后端从当前 EXE 加载编号为 1 的图标资源。
+        println!("cargo:rerun-if-changed=assets/markdown.ico");
+        // rgpui 使用图标资源 1；资源管理器文件关联另用资源 2。
         embed_resource::compile_for("assets/rumark.rc", ["rumark"], embed_resource::NONE)
             .manifest_required()
             .expect("Windows icon resource compilation failed");

@@ -54,10 +54,10 @@ fn owned_reg_value(value: &impl winreg::types::ToRegValue) -> RegValue<'static> 
     }
 }
 
-/// 校验可执行文件路径并返回 `("<exe>",0)` 与 `"<exe>" "%1"`。
+/// 校验可执行文件路径并返回应用图标、文档图标和打开命令。
 ///
 /// 全量校验在写入注册表之前完成，避免无效输入造成部分登记。
-fn validated_commands(executable: &Path) -> Result<(OsString, OsString)> {
+fn validated_commands(executable: &Path) -> Result<(OsString, OsString, OsString)> {
     ensure!(
         executable.is_absolute() && executable.file_name().is_some(),
         "executable path must be absolute and include a file name"
@@ -74,11 +74,13 @@ fn validated_commands(executable: &Path) -> Result<(OsString, OsString)> {
     let mut quoted_executable = OsString::from("\"");
     quoted_executable.push(executable.as_os_str());
     quoted_executable.push("\"");
-    let mut icon = quoted_executable.clone();
-    icon.push(",0");
+    let mut app_icon = quoted_executable.clone();
+    app_icon.push(",0");
+    let mut document_icon = quoted_executable.clone();
+    document_icon.push(",1");
     let mut command = quoted_executable;
     command.push(" \"%1\"");
-    Ok((icon, command))
+    Ok((app_icon, document_icon, command))
 }
 
 fn registration_plan(executable: &Path, description: &str) -> Result<Vec<RegistrationKey>> {
@@ -86,7 +88,7 @@ fn registration_plan(executable: &Path, description: &str) -> Result<Vec<Registr
         !description.contains('\0'),
         "application description contains a NUL"
     );
-    let (icon, command) = validated_commands(executable)?;
+    let (app_icon, document_icon, command) = validated_commands(executable)?;
 
     Ok(vec![
         RegistrationKey {
@@ -95,7 +97,7 @@ fn registration_plan(executable: &Path, description: &str) -> Result<Vec<Registr
         },
         RegistrationKey {
             path: r"Software\Classes\rs.launcher.Rumark.Markdown\DefaultIcon",
-            values: vec![("", owned_reg_value(&icon))],
+            values: vec![("", owned_reg_value(&document_icon))],
         },
         RegistrationKey {
             path: r"Software\Classes\rs.launcher.Rumark.Markdown\shell\open\command",
@@ -126,7 +128,7 @@ fn registration_plan(executable: &Path, description: &str) -> Result<Vec<Registr
             values: vec![
                 ("ApplicationName", "Rumark".to_reg_value()),
                 ("ApplicationDescription", owned_reg_value(&description)),
-                ("ApplicationIcon", owned_reg_value(&icon)),
+                ("ApplicationIcon", owned_reg_value(&app_icon)),
             ],
         },
         RegistrationKey {
@@ -160,7 +162,7 @@ fn context_menu_plan(executable: &Path, label: &str) -> Result<Vec<RegistrationK
         "context menu label must not be empty"
     );
     ensure!(!label.contains('\0'), "context menu label contains a NUL");
-    let (icon, command) = validated_commands(executable)?;
+    let (_, document_icon, command) = validated_commands(executable)?;
 
     let mut plan = Vec::with_capacity(CONTEXT_MENU_KEYS.len() * 2);
     for (entry_path, command_path) in CONTEXT_MENU_KEYS {
@@ -168,7 +170,7 @@ fn context_menu_plan(executable: &Path, label: &str) -> Result<Vec<RegistrationK
             path: entry_path,
             values: vec![
                 ("", owned_reg_value(&label)),
-                ("Icon", owned_reg_value(&icon)),
+                ("Icon", owned_reg_value(&document_icon)),
             ],
         });
         plan.push(RegistrationKey {
@@ -209,19 +211,19 @@ mod tests {
                 ),
                 &format!("\"{executable}\" \"%1\"").to_reg_value()
             );
-            let expected_icon = format!("\"{executable}\",0");
-            let expected_icon = expected_icon.to_reg_value();
+            let expected_document_icon = format!("\"{executable}\",1").to_reg_value();
             assert_eq!(
                 value(
                     &plan,
                     r"Software\Classes\rs.launcher.Rumark.Markdown\DefaultIcon",
                     ""
                 ),
-                &expected_icon
+                &expected_document_icon
             );
+            let expected_app_icon = format!("\"{executable}\",0").to_reg_value();
             assert_eq!(
                 value(&plan, CAPABILITIES, "ApplicationIcon"),
-                &expected_icon
+                &expected_app_icon
             );
         }
     }
@@ -244,7 +246,7 @@ mod tests {
             (
                 r"Software\Classes\rs.launcher.Rumark.Markdown\DefaultIcon",
                 "",
-                "\",0",
+                "\",1",
             ),
             (CAPABILITIES, "ApplicationIcon", "\",0"),
         ] {
@@ -366,7 +368,7 @@ mod tests {
             assert_eq!(value(&plan, entry_path, ""), &label.to_reg_value());
             assert_eq!(
                 value(&plan, entry_path, "Icon"),
-                &r#""C:\Program Files\Rumark\rumark.exe",0"#.to_reg_value()
+                &r#""C:\Program Files\Rumark\rumark.exe",1"#.to_reg_value()
             );
             assert_eq!(
                 value(&plan, command_path, ""),
