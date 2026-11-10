@@ -94,9 +94,39 @@ rgpui = { version = "1.7", features = ["test-support"] }
 # 仅测试用：解包生成的 docx 校验 document.xml 结构，不进正式构建。
 zip = "2"
 
-# Keep our own code in dev (fast incremental compile, debuggable), but
-# build the heavy framework crates at release-level optimization so debug
-# runs aren't dominated by per-call overhead.
+# 本 crate 开一档优化：块布局、文本测量与逐帧重绘这些热路径在 opt-level 0 下慢
+# 一个数量级；opt-level 1 相比 2 的运行时差别很小，但增量编译快得多。
+[profile.dev]
+opt-level = 1
+
+# 框架 crate 单独提到最高档：渲染与布局的每次调用都压在它们的开销上。
 [profile.dev.package]
 rgpui = { opt-level = 3 }
 rgpui-macros = { opt-level = 3 }
+
+# 日常 `cargo run` 也把其余依赖按优化编译：Markdown 解析、tree-sitter 高亮、数学
+# 与 Mermaid 渲染这些库在 opt-level 0 下开销明显，首屏会逐行刷出、拖动时也掉帧。
+[profile.dev.package."*"]
+opt-level = 2
+
+# release 优化
+# 日常发版用 thin LTO（构建快）；打安装包用下面的 size 档（体积最小）。
+[profile.release]
+# 最高优化等级，热路径都在 CPU 侧：逐帧重绘、语法高亮、导出渲染。
+opt-level = 3
+# 跨 crate 内联 + 死代码消除，增量代价可接受。
+lto = "thin"
+# 单代码生成单元，配合 LTO 进一步内联，牺牲并行编译速度换运行速度。
+codegen-units = 1
+# 剥离符号表，减小发布包体积。
+strip = true
+
+# size 档：只用于打安装包（构建慢，体积最小）。
+[profile.size]
+inherits = "release"
+# 体积优先。
+opt-level = "z"
+# fat LTO：比 thin 更彻底的跨 crate 内联与死代码消除。
+lto = true
+codegen-units = 1
+strip = true

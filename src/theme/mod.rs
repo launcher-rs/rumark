@@ -468,10 +468,6 @@ pub struct ThemeTypography {
     pub h6_weight: FontWeight,
     /// 字排 `code_size`。
     pub code_size: f32,
-    /// 字排 `dialog_title_size`。
-    pub dialog_title_size: f32,
-    /// 字重 `dialog_title_weight`。
-    pub dialog_title_weight: FontWeight,
     /// 字排 `dialog_body_size`。
     pub dialog_body_size: f32,
     /// 字重 `dialog_body_weight`。
@@ -500,8 +496,6 @@ impl ThemeTypography {
         h6_size: 14.0,
         h6_weight: FontWeight::SEMIBOLD,
         code_size: 15.0,
-        dialog_title_size: 20.0,
-        dialog_title_weight: FontWeight::SEMIBOLD,
         dialog_body_size: 14.0,
         dialog_body_weight: FontWeight::NORMAL,
         dialog_button_size: 14.0,

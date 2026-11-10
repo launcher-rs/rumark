@@ -42,6 +42,7 @@ mod selection;
 mod source_map;
 mod status_bar;
 mod table_edit;
+mod titlebar_menu;
 /// 测试用：统计右键弹出菜单的构造次数，用于回归“单次右键只弹一层菜单”。
 #[cfg(test)]
 pub(crate) static MENU_BUILD_COUNT: std::sync::atomic::AtomicUsize =
@@ -112,6 +113,14 @@ pub struct Editor {
     /// 框架文件树点击文件的延迟打开（事件无 `Window`，在渲染侧消费）。
     pending_workspace_open: Option<PathBuf>,
     context_menu: Option<ContextMenuState>,
+    /// 标题栏当前展开的菜单下标（同一时刻只允许一个）。
+    titlebar_menu_open: Option<usize>,
+    /// 展开中的标题栏下拉菜单实体。
+    titlebar_menu_popup: Option<Entity<PopupMenu>>,
+    /// 标题栏菜单的关闭订阅（丢弃菜单实体前释放）。
+    titlebar_menu_subscription: Option<Subscription>,
+    /// 展开标题栏菜单前的焦点，关闭后归还给文档。
+    titlebar_menu_restore_focus: Option<FocusHandle>,
     table_insert_dialog: Option<TableInsertDialogState>,
     link_dialog: Option<LinkDialogState>,
     find_bar: Option<FindBarState>,
@@ -344,6 +353,10 @@ impl Editor {
             outline_tree_state: outline_tree_state.clone(),
             pending_workspace_open: None,
             context_menu: None,
+            titlebar_menu_open: None,
+            titlebar_menu_popup: None,
+            titlebar_menu_subscription: None,
+            titlebar_menu_restore_focus: None,
             table_insert_dialog: None,
             link_dialog: None,
             find_bar: None,

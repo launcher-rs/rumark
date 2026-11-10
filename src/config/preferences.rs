@@ -1051,6 +1051,43 @@ impl PreferencesWindow {
         }
     }
 
+    /// 把「用 Rumark 打开」登记到资源管理器右键菜单。
+    #[cfg(target_os = "windows")]
+    fn add_explorer_context_menu(
+        &mut self,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let i18n = cx.global::<I18nManager>().snapshot();
+        let result = std::env::current_exe()
+            .map_err(anyhow::Error::from)
+            .and_then(|path| {
+                crate::windows_integration::register_explorer_context_menu(
+                    &path,
+                    &i18n.t("context_open_with_rumark", &[]),
+                )
+            });
+        let (title, detail, level) = match result {
+            Ok(()) => (
+                i18n.t("message_context_menu_added", &[]),
+                i18n.t("message_context_menu_added_detail", &[]),
+                PromptLevel::Info,
+            ),
+            Err(error) => (
+                i18n.t("message_file_association_failed", &[]),
+                format!("{error:#}"),
+                PromptLevel::Critical,
+            ),
+        };
+        let ok = i18n.t("dialog_ok", &[]);
+        let prompt = window.prompt(level, &title, Some(&detail), &[ok.as_str()], cx);
+        cx.spawn(async move |_, _| {
+            let _ = prompt.await;
+        })
+        .detach();
+    }
+
     /// 保存草稿偏好并应用到全局。
     fn save(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         if !self.has_unsaved_changes() {
@@ -1157,7 +1194,7 @@ impl PreferencesWindow {
     ) -> impl IntoElement {
         let button = Button::new(id)
             .label(label)
-            .w(px(156.0))
+            .w_full()
             .on_click(cx.listener(on_click));
         if selected {
             button.primary()
@@ -1166,20 +1203,35 @@ impl PreferencesWindow {
         }
     }
 
-    /// 构造带标签的设置行。
-    fn labeled_row(&self, label: &str, control: impl IntoElement, theme: &Theme) -> Div {
-        let t = &ThemeTypography::DEFAULT;
+    /// 设置页外壳：内容从顶部开始排布，窗口较矮时可滚动。
+    fn settings_page(id: &'static str, content: impl IntoElement) -> AnyElement {
         div()
+            .id(id)
+            .w_full()
+            .flex_1()
+            .min_h(px(0.0))
+            .overflow_y_scroll()
             .flex()
             .flex_col()
+            .child(content)
+            .into_any_element()
+    }
+
+    /// 设置行：左侧标签、右侧控件，整行撑满内容区。
+    fn setting_row(label: &str, control: impl IntoElement, theme: &Theme) -> Div {
+        let t = &ThemeTypography::DEFAULT;
+        div()
+            .w_full()
+            .min_h(px(34.0))
+            .flex()
             .items_center()
-            .gap(px(8.0))
+            .justify_between()
+            .gap(px(16.0))
             .child(
                 div()
-                    .w(px(280.0))
+                    .flex_shrink_0()
                     .text_size(px(t.dialog_body_size))
-                    .font_weight(t.dialog_button_weight)
-                    .text_color(theme.popover_foreground)
+                    .text_color(theme.foreground)
                     .child(SharedString::from(label.to_string())),
             )
             .child(control)
@@ -1191,7 +1243,7 @@ impl PreferencesWindow {
         theme: &Theme,
         i18n: &crate::i18n::I18nSnapshot,
         cx: &mut Context<Self>,
-    ) -> Div {
+    ) -> AnyElement {
         let options = [
             StartupOpenPreference::NewFile,
             StartupOpenPreference::LastOpenedFile,
@@ -1225,36 +1277,43 @@ impl PreferencesWindow {
                 }
             });
         let page = div()
+            .w_full()
             .flex()
             .flex_col()
-            .gap(px(24.0))
-            .child(self.labeled_row(&i18n.t("pref_startup_label", &[]), select, theme));
+            .gap(px(10.0))
+            .child(Self::setting_row(
+                &i18n.t("pref_startup_label", &[]),
+                select,
+                theme,
+            ));
         #[cfg(target_os = "windows")]
-        let page = page.child(
-            div()
-                .w(px(280.0))
-                .flex()
-                .flex_col()
-                .gap(px(10.0))
-                .child(
-                    self.labeled_row(
-                        &i18n.t("pref_file_association", &[]),
-                        Button::new("preferences-file-association")
-                            .label(i18n.t("pref_file_association_button", &[]))
-                            .w(px(280.0))
-                            .secondary()
-                            .on_click(cx.listener(Self::set_default_markdown_app)),
-                        theme,
-                    ),
-                )
-                .child(
-                    div()
-                        .text_size(px(ThemeTypography::DEFAULT.dialog_body_size))
-                        .text_color(theme.muted_foreground)
-                        .child(i18n.t("pref_file_association_hint", &[])),
-                ),
-        );
-        page
+        let page = page
+            .child(Self::setting_row(
+                &i18n.t("pref_context_menu", &[]),
+                Button::new("preferences-context-menu")
+                    .label(i18n.t("pref_context_menu_button", &[]))
+                    .w(px(280.0))
+                    .secondary()
+                    .on_click(cx.listener(Self::add_explorer_context_menu)),
+                theme,
+            ))
+            .child(Self::setting_row(
+                &i18n.t("pref_file_association", &[]),
+                Button::new("preferences-file-association")
+                    .label(i18n.t("pref_file_association_button", &[]))
+                    .w(px(280.0))
+                    .secondary()
+                    .on_click(cx.listener(Self::set_default_markdown_app)),
+                theme,
+            ))
+            .child(
+                div()
+                    .w_full()
+                    .text_size(px(ThemeTypography::DEFAULT.dialog_body_size))
+                    .text_color(theme.muted_foreground)
+                    .child(i18n.t("pref_file_association_hint", &[])),
+            );
+        Self::settings_page("preferences-page-file", page)
     }
 
     /// 渲染主题选择页（下拉框由框架 `Select` 组件承载）。
@@ -1263,7 +1322,7 @@ impl PreferencesWindow {
         theme: &Theme,
         i18n: &crate::i18n::I18nSnapshot,
         cx: &mut Context<Self>,
-    ) -> Div {
+    ) -> AnyElement {
         let entries = self.theme_options.clone();
         let labels: Vec<SharedString> = entries
             .iter()
@@ -1286,7 +1345,10 @@ impl PreferencesWindow {
                     });
                 }
             });
-        self.labeled_row(&i18n.t("pref_theme_local", &[]), select, theme)
+        Self::settings_page(
+            "preferences-page-theme",
+            Self::setting_row(&i18n.t("pref_theme_local", &[]), select, theme),
+        )
     }
 
     /// 返回图片粘贴行为的显示文案。
@@ -1313,7 +1375,7 @@ impl PreferencesWindow {
         theme: &Theme,
         i18n: &crate::i18n::I18nSnapshot,
         cx: &mut Context<Self>,
-    ) -> Div {
+    ) -> AnyElement {
         let options = [
             ImagePasteBehavior::None,
             ImagePasteBehavior::CopyToDocumentFolder,
@@ -1341,7 +1403,10 @@ impl PreferencesWindow {
                     });
                 }
             });
-        self.labeled_row(&i18n.t("pref_image_insert_behavior", &[]), select, theme)
+        Self::settings_page(
+            "preferences-page-image",
+            Self::setting_row(&i18n.t("pref_image_insert_behavior", &[]), select, theme),
+        )
     }
 
     /// 返回导出配色的显示文案。
@@ -1359,34 +1424,20 @@ impl PreferencesWindow {
         theme: &Theme,
         i18n: &crate::i18n::I18nSnapshot,
         cx: &mut Context<Self>,
-    ) -> Div {
-        let t = &ThemeTypography::DEFAULT;
+    ) -> AnyElement {
         let accent = theme.button_primary;
         let entity = cx.entity();
         let include_toc = self.export_include_toc;
-        let toggle = div()
-            .w(px(280.0))
-            .flex()
-            .items_center()
-            .justify_between()
-            .child(
-                div()
-                    .text_size(px(t.dialog_body_size))
-                    .text_color(theme.foreground)
-                    .child(SharedString::from(i18n.t("pref_export_include_toc", &[]))),
-            )
-            .child(
-                Switch::new(ElementId::Name("preferences-toggle-export-toc".into()))
-                    .checked(include_toc)
-                    .color(accent)
-                    .on_change(move |new_checked: bool, _, cx| {
-                        let value = new_checked;
-                        entity.update(cx, |this, cx| {
-                            this.export_include_toc = value;
-                            cx.notify();
-                        });
-                    }),
-            );
+        let toggle = Switch::new(ElementId::Name("preferences-toggle-export-toc".into()))
+            .checked(include_toc)
+            .color(accent)
+            .on_change(move |new_checked: bool, _, cx| {
+                let value = new_checked;
+                entity.update(cx, |this, cx| {
+                    this.export_include_toc = value;
+                    cx.notify();
+                });
+            });
         let options = [
             ExportThemeMode::FollowEditor,
             ExportThemeMode::Light,
@@ -1410,13 +1461,22 @@ impl PreferencesWindow {
                     });
                 }
             });
-        div()
+        let page = div()
+            .w_full()
             .flex()
             .flex_col()
-            .items_center()
-            .gap(px(12.0))
-            .child(toggle)
-            .child(self.labeled_row(&i18n.t("pref_export_theme", &[]), select, theme))
+            .gap(px(10.0))
+            .child(Self::setting_row(
+                &i18n.t("pref_export_include_toc", &[]),
+                toggle,
+                theme,
+            ))
+            .child(Self::setting_row(
+                &i18n.t("pref_export_theme", &[]),
+                select,
+                theme,
+            ));
+        Self::settings_page("preferences-page-export", page)
     }
 
     /// 返回快捷键分组的显示文案。
@@ -1677,9 +1737,9 @@ impl PreferencesWindow {
 
         div()
             .w_full()
-            .min_h(px(42.0))
+            .min_h(px(38.0))
             .px(px(10.0))
-            .py(px(6.0))
+            .py(px(4.0))
             .flex()
             .items_center()
             .justify_between()
@@ -1710,7 +1770,7 @@ impl PreferencesWindow {
         theme: &Theme,
         i18n: &crate::i18n::I18nSnapshot,
         cx: &mut Context<Self>,
-    ) -> Div {
+    ) -> AnyElement {
         let d = &ThemeDimensions::DEFAULT;
         let t = &ThemeTypography::DEFAULT;
         let mut content = div()
@@ -1721,7 +1781,7 @@ impl PreferencesWindow {
             .overflow_y_scroll()
             .flex()
             .flex_col()
-            .gap(px(18.0))
+            .gap(px(14.0))
             .pr(px(4.0));
 
         let categories = [
@@ -1734,7 +1794,7 @@ impl PreferencesWindow {
         ];
 
         for category in categories {
-            let mut group = div().w_full().flex().flex_col().gap(px(8.0)).child(
+            let mut group = div().w_full().flex().flex_col().gap(px(6.0)).child(
                 div()
                     .w_full()
                     .flex()
@@ -1771,7 +1831,6 @@ impl PreferencesWindow {
             .min_h(px(0.0))
             .flex()
             .flex_col()
-            .items_center()
             .gap(px(8.0));
         if let Some(error) = &self.shortcut_error {
             page = page.child(
@@ -1783,7 +1842,7 @@ impl PreferencesWindow {
                     .child(error.clone()),
             );
         }
-        page.child(content)
+        page.child(content).into_any_element()
     }
 
     /// 渲染状态栏设置页。
@@ -1792,9 +1851,7 @@ impl PreferencesWindow {
         theme: &Theme,
         i18n: &crate::i18n::I18nSnapshot,
         cx: &mut Context<Self>,
-    ) -> Div {
-        let t = &ThemeTypography::DEFAULT;
-
+    ) -> AnyElement {
         // 开关行：标签 + rgpui 开关组件（选中色沿用拾墨主题强调色）。
         let accent = theme.button_primary;
         let switch_row = |label: &str,
@@ -1802,36 +1859,25 @@ impl PreferencesWindow {
                           on_toggle: fn(&mut Self, bool, &mut Context<Self>),
                           cx: &mut Context<Self>| {
             let entity = cx.entity().clone();
-            div()
-                .w(px(280.0))
-                .flex()
-                .items_center()
-                .justify_between()
-                .child(
-                    div()
-                        .text_size(px(t.dialog_body_size))
-                        .text_color(theme.foreground)
-                        .child(SharedString::from(label.to_string())),
-                )
-                .child(
-                    Switch::new(ElementId::Name(
-                        format!("preferences-toggle-{label}").into(),
-                    ))
-                    .checked(checked)
-                    .color(accent)
-                    .on_change(move |new_checked: bool, _, cx| {
-                        let value = new_checked;
-                        entity.update(cx, |this, cx| {
-                            on_toggle(this, value, cx);
-                        });
-                    }),
-                )
+            let toggle = Switch::new(ElementId::Name(
+                format!("preferences-toggle-{label}").into(),
+            ))
+            .checked(checked)
+            .color(accent)
+            .on_change(move |new_checked: bool, _, cx| {
+                let value = new_checked;
+                entity.update(cx, |this, cx| {
+                    on_toggle(this, value, cx);
+                });
+            });
+            Self::setting_row(label, toggle, theme)
         };
 
         let items = div()
+            .w_full()
             .flex()
             .flex_col()
-            .gap(px(12.0))
+            .gap(px(10.0))
             .child(switch_row(
                 &i18n.t("pref_status_bar_enabled", &[]),
                 self.status_bar_enabled,
@@ -1878,14 +1924,7 @@ impl PreferencesWindow {
                 cx,
             ));
 
-        div()
-            .w_full()
-            .flex_1()
-            .min_h(px(0.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(items)
+        Self::settings_page("preferences-page-status-bar", items)
     }
 }
 
@@ -1895,7 +1934,6 @@ impl Render for PreferencesWindow {
         let theme = rgpui::Theme::global(cx).clone();
         let i18n = cx.global::<I18nManager>().snapshot();
         let d = &ThemeDimensions::DEFAULT;
-        let t = &ThemeTypography::DEFAULT;
         let can_save = self.has_unsaved_changes();
         let window_title = SharedString::from(format!("Rumark - {}", i18n.t("pref_title", &[])));
         window.set_window_title(window_title.as_ref());
@@ -1911,159 +1949,93 @@ impl Render for PreferencesWindow {
             .text_color(theme.foreground)
             .child(
                 div()
-                    .w(relative(0.3))
+                    .w(px(170.0))
+                    .flex_shrink_0()
                     .h_full()
-                    .pr(px(20.0))
+                    .p(px(d.dialog_padding))
                     .flex()
-                    .items_center()
-                    .justify_end()
+                    .flex_col()
+                    .gap(px(6.0))
                     .border_r(px(d.dialog_border_width))
                     .border_color(theme.border)
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(8.0))
-                            .child(self.nav_button(
-                                "preferences-nav-file",
-                                i18n.t("pref_nav_file", &[]),
-                                self.nav == PreferencesNav::File,
-                                &theme,
-                                Self::set_nav_file,
-                                cx,
-                            ))
-                            .child(self.nav_button(
-                                "preferences-nav-theme",
-                                i18n.t("pref_nav_theme", &[]),
-                                self.nav == PreferencesNav::Theme,
-                                &theme,
-                                Self::set_nav_theme,
-                                cx,
-                            ))
-                            .child(self.nav_button(
-                                "preferences-nav-image",
-                                i18n.t("pref_nav_image", &[]),
-                                self.nav == PreferencesNav::Image,
-                                &theme,
-                                Self::set_nav_image,
-                                cx,
-                            ))
-                            .child(self.nav_button(
-                                "preferences-nav-export",
-                                i18n.t("pref_nav_export", &[]),
-                                self.nav == PreferencesNav::Export,
-                                &theme,
-                                Self::set_nav_export,
-                                cx,
-                            ))
-                            .child(self.nav_button(
-                                "preferences-nav-shortcuts",
-                                i18n.t("pref_nav_shortcuts", &[]),
-                                self.nav == PreferencesNav::Shortcuts,
-                                &theme,
-                                Self::set_nav_shortcuts,
-                                cx,
-                            ))
-                            .child(self.nav_button(
-                                "preferences-nav-status-bar",
-                                i18n.t("pref_nav_status_bar", &[]),
-                                self.nav == PreferencesNav::StatusBar,
-                                &theme,
-                                Self::set_nav_status_bar,
-                                cx,
-                            )),
-                    ),
+                    .child(self.nav_button(
+                        "preferences-nav-file",
+                        i18n.t("pref_nav_file", &[]),
+                        self.nav == PreferencesNav::File,
+                        &theme,
+                        Self::set_nav_file,
+                        cx,
+                    ))
+                    .child(self.nav_button(
+                        "preferences-nav-theme",
+                        i18n.t("pref_nav_theme", &[]),
+                        self.nav == PreferencesNav::Theme,
+                        &theme,
+                        Self::set_nav_theme,
+                        cx,
+                    ))
+                    .child(self.nav_button(
+                        "preferences-nav-image",
+                        i18n.t("pref_nav_image", &[]),
+                        self.nav == PreferencesNav::Image,
+                        &theme,
+                        Self::set_nav_image,
+                        cx,
+                    ))
+                    .child(self.nav_button(
+                        "preferences-nav-export",
+                        i18n.t("pref_nav_export", &[]),
+                        self.nav == PreferencesNav::Export,
+                        &theme,
+                        Self::set_nav_export,
+                        cx,
+                    ))
+                    .child(self.nav_button(
+                        "preferences-nav-shortcuts",
+                        i18n.t("pref_nav_shortcuts", &[]),
+                        self.nav == PreferencesNav::Shortcuts,
+                        &theme,
+                        Self::set_nav_shortcuts,
+                        cx,
+                    ))
+                    .child(self.nav_button(
+                        "preferences-nav-status-bar",
+                        i18n.t("pref_nav_status_bar", &[]),
+                        self.nav == PreferencesNav::StatusBar,
+                        &theme,
+                        Self::set_nav_status_bar,
+                        cx,
+                    )),
             )
             .child(
                 div()
-                    .w(relative(0.7))
+                    .flex_1()
+                    .min_w(px(0.0))
                     .h_full()
                     .p(px(d.dialog_padding))
                     .flex()
                     .flex_col()
                     .gap(px(d.dialog_gap))
-                    .child(
-                        div()
-                            .w_full()
-                            .flex_1()
-                            .min_h(px(0.0))
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .gap(px(d.dialog_gap * 1.5))
-                            .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .text_size(px(t.dialog_title_size))
-                                    .font_weight(t.dialog_title_weight)
-                                    .text_color(theme.popover_foreground)
-                                    .child(match self.nav {
-                                        PreferencesNav::File => i18n.t("pref_nav_file", &[]),
-                                        PreferencesNav::Theme => i18n.t("pref_nav_theme", &[]),
-                                        PreferencesNav::Image => i18n.t("pref_nav_image", &[]),
-                                        PreferencesNav::Export => i18n.t("pref_nav_export", &[]),
-                                        PreferencesNav::Shortcuts => {
-                                            i18n.t("pref_nav_shortcuts", &[])
-                                        }
-                                        PreferencesNav::StatusBar => {
-                                            i18n.t("pref_nav_status_bar", &[])
-                                        }
-                                    }),
-                            )
-                            .child(match self.nav {
-                                PreferencesNav::File => div()
-                                    .w_full()
-                                    .flex_1()
-                                    .min_h(px(0.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(self.render_startup_page(&theme, &i18n, cx))
-                                    .into_any_element(),
-                                PreferencesNav::Theme => div()
-                                    .w_full()
-                                    .flex_1()
-                                    .min_h(px(0.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(self.render_theme_page(&theme, &i18n, cx))
-                                    .into_any_element(),
-                                PreferencesNav::Image => div()
-                                    .w_full()
-                                    .flex_1()
-                                    .min_h(px(0.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(self.render_image_page(&theme, &i18n, cx))
-                                    .into_any_element(),
-                                PreferencesNav::Export => div()
-                                    .w_full()
-                                    .flex_1()
-                                    .min_h(px(0.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(self.render_export_page(&theme, &i18n, cx))
-                                    .into_any_element(),
-                                PreferencesNav::Shortcuts => div()
-                                    .w_full()
-                                    .flex_1()
-                                    .min_h(px(0.0))
-                                    .child(self.render_shortcuts_page(&theme, &i18n, cx))
-                                    .into_any_element(),
-                                PreferencesNav::StatusBar => div()
-                                    .w_full()
-                                    .flex_1()
-                                    .min_h(px(0.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(self.render_status_bar_page(&theme, &i18n, cx))
-                                    .into_any_element(),
-                            }),
-                    )
+                    .child(match self.nav {
+                        PreferencesNav::File => self
+                            .render_startup_page(&theme, &i18n, cx)
+                            .into_any_element(),
+                        PreferencesNav::Theme => {
+                            self.render_theme_page(&theme, &i18n, cx).into_any_element()
+                        }
+                        PreferencesNav::Image => {
+                            self.render_image_page(&theme, &i18n, cx).into_any_element()
+                        }
+                        PreferencesNav::Export => self
+                            .render_export_page(&theme, &i18n, cx)
+                            .into_any_element(),
+                        PreferencesNav::Shortcuts => self
+                            .render_shortcuts_page(&theme, &i18n, cx)
+                            .into_any_element(),
+                        PreferencesNav::StatusBar => self
+                            .render_status_bar_page(&theme, &i18n, cx)
+                            .into_any_element(),
+                    })
                     .child(
                         div()
                             .w_full()
@@ -2115,7 +2087,7 @@ fn open_preferences_window_with_state(
     preferences: AppPreferences,
     theme_options: Vec<ThemeCatalogEntry>,
 ) -> WindowHandle<PreferencesWindow> {
-    let bounds = Bounds::centered(None, size(px(720.0), px(480.0)), cx);
+    let bounds = Bounds::centered(None, size(px(660.0), px(420.0)), cx);
     let handle = cx
         .open_window(rumark_window_options(bounds), move |_window, cx| {
             cx.new(move |cx| PreferencesWindow::new(preferences, theme_options, cx))

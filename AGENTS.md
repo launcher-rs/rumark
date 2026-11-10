@@ -5,6 +5,7 @@
 ## 构建 / 运行 / 验证
 
 - 构建：`cargo build -p rumark`；运行：`cargo run -p rumark -- [FILES...]`（无参数打开空文档）
+- 发布构建用默认 `release`（thin LTO）；打安装包用 `cargo build -p rumark --profile size`（体积最小，构建慢）
 - 常用参数：`--help/-h`、`--version/-v`、`--detach/-d`（仅 macOS 生效，其他平台忽略）
 - 测试：`cargo test -p rumark`（单元测试全在源码内 `#[cfg(test)]` 模块，无独立 `tests/` 目录）
 - 单测聚焦：`cargo test -p rumark <模块路径::测试名>`，如 `cargo test -p rumark editor::document`
@@ -18,15 +19,15 @@
 - 代码高亮是可选裁剪的：`code-highlight-core/official/config`、`html-native` 控制 `tree-sitter*` 依赖。默认全开。各 `build_*_config` 的 `#[cfg]` 必须与注册表里的调用点门控一致（yaml 归 `official`、toml 归 `config`），否则最小构建会引用未链接的 crate。
   - 最小编译验证：`cargo check -p rumark --no-default-features`
   - tree-sitter 版本全部 pin 死（`=x.y.z`），升级需整组对齐，不要单独 bump。
-- `[profile.dev.package]` 把 `rgpui`、`rgpui-macros` 按 release 优化：debug 慢先怀疑自家代码，不要动这个配置。
+- 构建档位：`[profile.dev]` 本 crate `opt-level = 1`，`[profile.dev.package."*"]` 依赖 `opt-level = 2`，`rgpui`/`rgpui-macros` 再提到 `3`。debug 慢先怀疑自家代码，不要随手调低这些档位（`opt-level = 0` 下块布局与逐帧重绘会慢一个数量级）。
 - 现存重型依赖：`printpdf` / `docx-rs`（PDF、DOCX 导出）、`mermaid-rs-renderer`（Mermaid）、`ratex-*`（LaTeX）、`reqwest`（远程图片与网络请求）。加新重型依赖前先确认必要性。
 
 ## 结构与入口
 
 - 入口 `src/main.rs`：解析 CLI → `config::load_or_create_app_preferences` → 初始化 `I18nManager` / `theme::init`（rgpui 明暗主题）/ `EditorSettings` / `net::install_http_client` → `components::init_with_keybindings` + `init_app_menu`。改启动流程只动这里。
-- `src/editor/`：文档模型与交互核心（`document.rs` 块模型、`tree.rs` 运行时树与可见快照、`events.rs` 事件分发、`history.rs` 撤销重做、`persistence.rs` 存取与导出、`workspace.rs`、`table_edit.rs`、`render.rs` 渲染、`source_map.rs` 源码映射、`selection.rs`、`find.rs` 查找替换、`context_menu.rs`、`image_menu.rs`、`file_drop.rs`、`status_bar.rs`、`window_layout.rs`、`close.rs` 关闭保护、`editor_context.rs`）。
+- `src/editor/`：文档模型与交互核心（`document.rs` 块模型、`tree.rs` 运行时树与可见快照、`events.rs` 事件分发、`history.rs` 撤销重做、`persistence.rs` 存取与导出、`workspace.rs`、`table_edit.rs`、`render.rs` 渲染、`source_map.rs` 源码映射、`selection.rs`、`find.rs` 查找替换、`context_menu.rs`、`image_menu.rs`、`file_drop.rs`、`status_bar.rs`、`window_layout.rs`、`titlebar_menu.rs` 标题栏菜单展开状态、`close.rs` 关闭保护、`editor_context.rs`）。
 - `src/components/{block,markdown,latex,mermaid}/`：各类块渲染；`actions.rs` 是动作定义与按键绑定装配层（`actions!` 宏 + `install_keybindings`），偏好项开关用 rgpui `Switch` 组件（`config/preferences.rs`）。
-- `src/{config,i18n,theme,net,export,app_menu.rs,app_identity.rs,file_url.rs,atomic_file.rs,text_offsets.rs}`：设置持久化、多语言、主题、HTTP 客户端、导出渲染、菜单、原子写盘、文本偏移换算。`file_url.rs` 仅 macOS（含 test 下）编译。
+- `src/{config,i18n,theme,net,export,app_menu.rs,app_identity.rs,file_url.rs,atomic_file.rs,text_offsets.rs,windows_integration.rs}`：设置持久化、多语言、主题、HTTP 客户端、导出渲染、菜单、原子写盘、文本偏移换算、Windows 打开方式与右键菜单登记。`file_url.rs` 仅 macOS（含 test 下）编译，`windows_integration.rs` 仅 Windows 编译；后者只写 HKCU，不碰 `UserChoice`。
 - 所有落盘统一走 `atomic_file`（`write_text`/`write_bytes`/`copy_file`：同目录临时文件 → `sync_all` → 重命名，失败清理临时文件），不要再用裸 `std::fs::write`/`fs::copy` 写配置文件、文档、粘贴图片或缓存。临时名带进程号与 UUID（同进程并发写同一目标不互撞），重命名遇共享冲突只短时重试 3 次。
 - 文档读取一律走 `editor::read_markdown_file`（剥 UTF-8 BOM，非 UTF-8 返回 `NonUtf8Document`），提示文案用 `editor::read_error_detail`；不要再用 `std::fs::read_to_string` 直接读 Markdown，也不要在读取失败时只 `eprintln!`（release 的 Windows 没有控制台）。
 - 界面文案走 rgpui 通用 `I18nManager` 包装（`src/i18n/mod.rs`，键值包 `zh-CN.json`/`en-US.json` 内嵌；热路径传 owned `I18nSnapshot`，勿持 `cx.global` 借用跨 `&mut` 调用）。键名一律下划线分层 `域[_组]_项`（如 `menu_file_save`、`keys_save`、`table_column_align_left`），域固定为 `win`/`dialog`/`menu`/`message`/`pref`/`keys`/`find`/`workspace`/`context`/`insert`/`table`/`image`/`code`/`status`/`export`；新增文案沿用该规范，两包键集必须一致。

@@ -17,8 +17,17 @@ const PROG_ID: &str = "rs.launcher.Rumark.Markdown";
 const CAPABILITIES: &str = r"Software\Rumark\Capabilities";
 
 pub(crate) fn register_markdown_application(executable: &Path, description: &str) -> Result<()> {
-    // 先构造并校验全部值，避免无效输入造成部分写入。
     let plan = registration_plan(executable, description)?;
+    apply_registration_plan(plan)
+}
+
+/// 在 `.md` / `.markdown` 的资源管理器右键菜单中登记「用 Rumark 打开」。
+pub(crate) fn register_explorer_context_menu(executable: &Path, label: &str) -> Result<()> {
+    let plan = context_menu_plan(executable, label)?;
+    apply_registration_plan(plan)
+}
+
+fn apply_registration_plan(plan: Vec<RegistrationKey>) -> Result<()> {
     let current_user = RegKey::predef(HKEY_CURRENT_USER);
     for entry in plan {
         let (key, _) = current_user
@@ -45,7 +54,10 @@ fn owned_reg_value(value: &impl winreg::types::ToRegValue) -> RegValue<'static> 
     }
 }
 
-fn registration_plan(executable: &Path, description: &str) -> Result<Vec<RegistrationKey>> {
+/// 校验可执行文件路径并返回 `("<exe>",0)` 与 `"<exe>" "%1"`。
+///
+/// 全量校验在写入注册表之前完成，避免无效输入造成部分登记。
+fn validated_commands(executable: &Path) -> Result<(OsString, OsString)> {
     ensure!(
         executable.is_absolute() && executable.file_name().is_some(),
         "executable path must be absolute and include a file name"
@@ -57,10 +69,6 @@ fn registration_plan(executable: &Path, description: &str) -> Result<Vec<Registr
             .any(|unit| unit == 0 || unit == u16::from(b'"')),
         "executable path contains a NUL or quote"
     );
-    ensure!(
-        !description.contains('\0'),
-        "application description contains a NUL"
-    );
 
     // 保留原始 Windows 路径，不经 UTF-8 或有损转换。
     let mut quoted_executable = OsString::from("\"");
@@ -70,6 +78,15 @@ fn registration_plan(executable: &Path, description: &str) -> Result<Vec<Registr
     icon.push(",0");
     let mut command = quoted_executable;
     command.push(" \"%1\"");
+    Ok((icon, command))
+}
+
+fn registration_plan(executable: &Path, description: &str) -> Result<Vec<RegistrationKey>> {
+    ensure!(
+        !description.contains('\0'),
+        "application description contains a NUL"
+    );
+    let (icon, command) = validated_commands(executable)?;
 
     Ok(vec![
         RegistrationKey {
@@ -124,6 +141,42 @@ fn registration_plan(executable: &Path, description: &str) -> Result<Vec<Registr
             values: vec![("Rumark", CAPABILITIES.to_reg_value())],
         },
     ])
+}
+
+const CONTEXT_MENU_KEYS: [(&str, &str); 2] = [
+    (
+        r"Software\Classes\SystemFileAssociations\.md\shell\Rumark",
+        r"Software\Classes\SystemFileAssociations\.md\shell\Rumark\command",
+    ),
+    (
+        r"Software\Classes\SystemFileAssociations\.markdown\shell\Rumark",
+        r"Software\Classes\SystemFileAssociations\.markdown\shell\Rumark\command",
+    ),
+];
+
+fn context_menu_plan(executable: &Path, label: &str) -> Result<Vec<RegistrationKey>> {
+    ensure!(
+        !label.trim().is_empty(),
+        "context menu label must not be empty"
+    );
+    ensure!(!label.contains('\0'), "context menu label contains a NUL");
+    let (icon, command) = validated_commands(executable)?;
+
+    let mut plan = Vec::with_capacity(CONTEXT_MENU_KEYS.len() * 2);
+    for (entry_path, command_path) in CONTEXT_MENU_KEYS {
+        plan.push(RegistrationKey {
+            path: entry_path,
+            values: vec![
+                ("", owned_reg_value(&label)),
+                ("Icon", owned_reg_value(&icon)),
+            ],
+        });
+        plan.push(RegistrationKey {
+            path: command_path,
+            values: vec![("", owned_reg_value(&command))],
+        });
+    }
+    Ok(plan)
 }
 
 #[cfg(test)]
@@ -301,6 +354,39 @@ mod tests {
             DEFAULT_APPS_URI,
             "ms-settings:defaultapps?registeredAppUser=Rumark"
         );
+    }
+
+    #[test]
+    fn context_menu_plan_targets_markdown_extensions_without_touching_defaults() {
+        let label = "用 Rumark 打开";
+        let plan = context_menu_plan(Path::new(r"C:\Program Files\Rumark\rumark.exe"), label)
+            .expect("valid executable should produce a plan");
+
+        for (entry_path, command_path) in CONTEXT_MENU_KEYS {
+            assert_eq!(value(&plan, entry_path, ""), &label.to_reg_value());
+            assert_eq!(
+                value(&plan, entry_path, "Icon"),
+                &r#""C:\Program Files\Rumark\rumark.exe",0"#.to_reg_value()
+            );
+            assert_eq!(
+                value(&plan, command_path, ""),
+                &r#""C:\Program Files\Rumark\rumark.exe" "%1""#.to_reg_value()
+            );
+        }
+        assert_eq!(plan.len(), CONTEXT_MENU_KEYS.len() * 2);
+        for entry in &plan {
+            assert!(!entry.path.to_ascii_lowercase().contains("userchoice"));
+            assert!(!entry.path.to_ascii_lowercase().contains("openwithprogids"));
+        }
+    }
+
+    #[test]
+    fn context_menu_plan_rejects_empty_or_invalid_labels() {
+        let executable = Path::new(r"C:\Rumark\rumark.exe");
+        for label in ["", "   ", "bad\0label"] {
+            assert!(context_menu_plan(executable, label).is_err());
+        }
+        assert!(context_menu_plan(Path::new(r"rumark.exe"), "Open with Rumark").is_err());
     }
 
     #[test]

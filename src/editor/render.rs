@@ -10,7 +10,7 @@ use crate::components::CalloutVariant;
 use crate::components::{Block, NoRecentFiles, update_entity_forgiving};
 use crate::i18n::{I18nManager, I18nSnapshot};
 use crate::theme::{ThemeDimensions, ThemeTypography};
-use rgpui::menu::{ContextMenuExt, DropdownMenu, PopupMenu};
+use rgpui::menu::{ContextMenuExt, PopupMenu};
 use rgpui::prelude::FluentBuilder as _;
 use rgpui::title_bar::{TITLE_BAR_LEFT_PADDING, TitleBar};
 
@@ -207,7 +207,7 @@ const TITLEBAR_BRAND_LABEL: &str = "拾墨";
 
 /// 把原生菜单项逐项装入框架弹出菜单（递归处理子菜单）。
 /// 点击后经窗口标准分发路由到已注册的动作处理。
-fn push_owned_menu_items(
+pub(super) fn push_owned_menu_items(
     mut menu: PopupMenu,
     items: &[OwnedMenuItem],
     window: &mut Window,
@@ -1326,6 +1326,7 @@ impl Render for Editor {
         };
         // 标题栏按钮收敛到 Small 高度（24px）：34px 栏内上下各留约 5px，
         // 文字用标题栏专用 13px 覆盖 Small 默认 14px，比品牌小一档。
+        // 展开状态由编辑器统一持有，同一时刻只允许一个菜单展开。
         let titlebar_menu_text_size = d.titlebar_menu_text_size;
         let menu_buttons: Vec<AnyElement> = menus
             .as_ref()
@@ -1333,22 +1334,7 @@ impl Render for Editor {
                 list.iter()
                     .enumerate()
                     .map(|(index, menu)| {
-                        let items = menu.items.clone();
-                        let label = menu.name.clone();
-                        Button::new(("titlebar-menu", index))
-                            .with_variant(ButtonVariant::Ghost)
-                            .with_size(ElementSize::Small)
-                            .compact()
-                            .child(
-                                div()
-                                    .text_size(px(titlebar_menu_text_size))
-                                    .line_height(relative(1.0))
-                                    .child(label),
-                            )
-                            .dropdown_menu(move |menu, window, cx| {
-                                push_owned_menu_items(menu, &items, window, cx)
-                            })
-                            .into_any_element()
+                        self.render_titlebar_menu(index, menu, titlebar_menu_text_size, cx)
                     })
                     .collect()
             })
