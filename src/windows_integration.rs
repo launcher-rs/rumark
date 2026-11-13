@@ -211,7 +211,7 @@ mod tests {
                 ),
                 &format!("\"{executable}\" \"%1\"").to_reg_value()
             );
-            let expected_document_icon = format!("\"{executable}\",1").to_reg_value();
+            let expected_document_icon = owned_reg_value(&format!("\"{executable}\",1"));
             assert_eq!(
                 value(
                     &plan,
@@ -220,7 +220,7 @@ mod tests {
                 ),
                 &expected_document_icon
             );
-            let expected_app_icon = format!("\"{executable}\",0").to_reg_value();
+            let expected_app_icon = owned_reg_value(&format!("\"{executable}\",0"));
             assert_eq!(
                 value(&plan, CAPABILITIES, "ApplicationIcon"),
                 &expected_app_icon
