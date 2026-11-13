@@ -125,6 +125,8 @@
   "keys_jump_to_bottom": "跳至末尾",
   "keys_select_left": "向左选择",
   "keys_select_right": "向右选择",
+  "keys_select_up": "向上选择",
+  "keys_select_down": "向下选择",
   "keys_word_select_left": "向左选择单词",
   "keys_word_select_right": "向右选择单词",
   "keys_select_home": "选择到行首",

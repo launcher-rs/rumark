@@ -1141,7 +1141,6 @@ impl Render for Editor {
             .on_hover(cx.listener(Self::on_editor_hover))
             .capture_any_mouse_down(cx.listener(Self::on_editor_capture_mouse_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_editor_mouse_down))
-            .on_mouse_move(cx.listener(Self::on_editor_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_editor_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_editor_mouse_up))
             .on_scroll_wheel(cx.listener(Self::on_editor_scroll_wheel))
@@ -1253,10 +1252,21 @@ impl Render for Editor {
                     window.refresh();
                 }
             })
+            // 挂在根元素而非滚动容器上：拖选指针移出滚动区（标题栏、状态栏）后
+            // 仍能收到移动事件，越界自动滚动才知道指针的真实位置。
+            .on_mouse_move(cx.listener(Self::on_editor_mouse_move))
             .capture_action(cx.listener(Self::on_copy_capture))
             .capture_action(cx.listener(Self::on_cut_capture))
             .capture_action(cx.listener(Self::on_delete_capture))
             .capture_action(cx.listener(Self::on_delete_back_capture))
+            .capture_action(cx.listener(Self::on_move_left_capture))
+            .capture_action(cx.listener(Self::on_move_right_capture))
+            .capture_action(cx.listener(Self::on_word_move_left_capture))
+            .capture_action(cx.listener(Self::on_word_move_right_capture))
+            .capture_action(cx.listener(Self::on_focus_prev_capture))
+            .capture_action(cx.listener(Self::on_focus_next_capture))
+            .capture_action(cx.listener(Self::on_home_capture))
+            .capture_action(cx.listener(Self::on_end_capture))
             .capture_key_down(cx.listener(Self::on_editor_key_down_capture))
             .can_drop(|dragged, _window, _cx| dragged.is::<ExternalPaths>())
             .on_drop::<ExternalPaths>(cx.listener(Self::on_external_paths_drop))

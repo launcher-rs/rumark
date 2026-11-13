@@ -96,7 +96,7 @@ impl EntityInputHandler for Block {
             return;
         }
 
-        if self.editor_selection_range.is_some() {
+        if self.cross_block_selected {
             cx.emit(BlockEvent::RequestReplaceCrossBlockSelection {
                 text: new_text.to_string(),
                 selected_range_relative: None,
@@ -153,7 +153,7 @@ impl EntityInputHandler for Block {
             return;
         }
 
-        if self.editor_selection_range.is_some() {
+        if self.cross_block_selected {
             let selected_range_relative = new_selected_range_utf16
                 .as_ref()
                 .map(|range_utf16| Self::utf16_range_to_utf8_in(new_text, range_utf16))

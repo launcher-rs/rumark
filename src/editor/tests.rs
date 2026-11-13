@@ -3932,6 +3932,264 @@ async fn left_arrow_at_cell_start_moves_to_previous_cell(cx: &mut TestAppContext
 }
 
 #[rgpui::test]
+async fn shift_down_at_block_end_extends_selection_into_next_block(cx: &mut TestAppContext) {
+    // 端到端：Shift+下应命中选区扩展动作（而非普通下移），
+    // 走到末行后焦点端接入下一块顶部。
+    init_editor_test_app(cx);
+    let (editor, cx) = cx.add_window_view(|_window, cx| {
+        Editor::from_markdown(cx, "alpha\n\nbeta".to_string(), None)
+    });
+
+    let (first, second) = editor.update(cx, |editor, cx| {
+        let visible = editor.document.visible_blocks().to_vec();
+        let first = visible[0].entity.clone();
+        let second = visible[1].entity.clone();
+        first.update(cx, |block, block_cx| {
+            block.move_to(block.plain_len(), block_cx);
+        });
+        editor.focus_block(first.entity_id());
+        (first, second)
+    });
+    redraw(cx);
+
+    cx.simulate_keystrokes("shift-down");
+    redraw(cx);
+
+    editor.update(cx, |editor, cx| {
+        let selection = editor
+            .cross_block_selection
+            .expect("Shift+下越过块边界后应生成跨块选区");
+        assert_eq!(selection.anchor.entity_id, first.entity_id());
+        assert_eq!(selection.anchor.offset, first.read(cx).plain_len());
+        assert_eq!(selection.focus.entity_id, second.entity_id());
+        // 光标在块末换块，沿用期望横坐标；两段等宽文本落点即下一块行尾。
+        assert_eq!(selection.focus.offset, second.read(cx).plain_len());
+        assert_eq!(editor.active_entity_id, Some(second.entity_id()));
+    });
+}
+
+#[rgpui::test]
+async fn shift_up_at_block_start_extends_selection_into_previous_block(cx: &mut TestAppContext) {
+    // 反向：Shift+上从块首进入上一块首行，锚点留在原块。
+    init_editor_test_app(cx);
+    let (editor, cx) = cx.add_window_view(|_window, cx| {
+        Editor::from_markdown(cx, "alpha\n\nbeta".to_string(), None)
+    });
+
+    let (first, second) = editor.update(cx, |editor, cx| {
+        let visible = editor.document.visible_blocks().to_vec();
+        let first = visible[0].entity.clone();
+        let second = visible[1].entity.clone();
+        second.update(cx, |block, block_cx| {
+            block.move_to(0, block_cx);
+        });
+        editor.focus_block(second.entity_id());
+        (first, second)
+    });
+    redraw(cx);
+
+    cx.simulate_keystrokes("shift-up");
+    redraw(cx);
+
+    editor.update(cx, |editor, _cx| {
+        let selection = editor
+            .cross_block_selection
+            .expect("Shift+上越过块边界后应生成跨块选区");
+        assert_eq!(selection.anchor.entity_id, second.entity_id());
+        assert_eq!(selection.anchor.offset, 0);
+        assert_eq!(selection.focus.entity_id, first.entity_id());
+        assert_eq!(selection.focus.offset, 0);
+        assert_eq!(editor.active_entity_id, Some(first.entity_id()));
+    });
+}
+
+#[rgpui::test]
+async fn shift_right_extends_cross_block_focus_endpoint(cx: &mut TestAppContext) {
+    // 端到端：已有跨块选区时，Shift+右应命中选区扩展动作并推动跨块焦点端点。
+    init_editor_test_app(cx);
+    let (editor, cx) = cx.add_window_view(|_window, cx| {
+        Editor::from_markdown(cx, "alpha\n\nbeta".to_string(), None)
+    });
+
+    let (first, second) = editor.update(cx, |editor, cx| {
+        let visible = editor.document.visible_blocks().to_vec();
+        let first = visible[0].entity.clone();
+        let second = visible[1].entity.clone();
+        let (first_id, second_id) = (first.entity_id(), second.entity_id());
+        first.update(cx, |block, block_cx| block.move_to(0, block_cx));
+        second.update(cx, |block, block_cx| block.move_to(2, block_cx));
+        editor.cross_block_selection = Some(super::CrossBlockSelection {
+            anchor: super::CrossBlockSelectionEndpoint {
+                entity_id: second_id,
+                offset: 2,
+            },
+            focus: super::CrossBlockSelectionEndpoint {
+                entity_id: first_id,
+                offset: 0,
+            },
+        });
+        editor.focus_block(first_id);
+        editor.sync_cross_block_selection_visuals(cx);
+        (first, second)
+    });
+    redraw(cx);
+
+    cx.simulate_keystrokes("shift-right");
+    redraw(cx);
+
+    editor.update(cx, |editor, cx| {
+        let selection = editor.cross_block_selection.expect("跨块选区应保留");
+        assert_eq!(selection.focus.entity_id, first.entity_id());
+        assert_eq!(selection.focus.offset, 1, "焦点端点应向右扩一个字符");
+        assert_eq!(selection.anchor.entity_id, second.entity_id());
+        assert_eq!(selection.anchor.offset, 2, "锚点不应移动");
+        // 反向选区（焦点在前）右移焦点端是收缩：首块高亮从 0..5 变为 1..5。
+        assert_eq!(first.read(cx).editor_selection_range, Some(1..5));
+    });
+}
+
+#[rgpui::test]
+async fn shift_left_into_anchor_block_collapses_cross_block_selection(cx: &mut TestAppContext) {
+    // 端到端：焦点端从块首继续左移退回锚点块，跨块选区应收敛为块内原生选区。
+    init_editor_test_app(cx);
+    let (editor, cx) = cx.add_window_view(|_window, cx| {
+        Editor::from_markdown(cx, "alpha\n\nbeta".to_string(), None)
+    });
+
+    let (first, second) = editor.update(cx, |editor, cx| {
+        let visible = editor.document.visible_blocks().to_vec();
+        let first = visible[0].entity.clone();
+        let second = visible[1].entity.clone();
+        let (first_id, second_id) = (first.entity_id(), second.entity_id());
+        first.update(cx, |block, block_cx| block.move_to(2, block_cx));
+        second.update(cx, |block, block_cx| block.move_to(0, block_cx));
+        editor.cross_block_selection = Some(super::CrossBlockSelection {
+            anchor: super::CrossBlockSelectionEndpoint {
+                entity_id: first_id,
+                offset: 2,
+            },
+            focus: super::CrossBlockSelectionEndpoint {
+                entity_id: second_id,
+                offset: 0,
+            },
+        });
+        editor.focus_block(second_id);
+        editor.sync_cross_block_selection_visuals(cx);
+        (first, second)
+    });
+    redraw(cx);
+
+    cx.simulate_keystrokes("shift-left");
+    redraw(cx);
+
+    editor.update(cx, |editor, cx| {
+        assert!(
+            editor.cross_block_selection.is_none(),
+            "退回锚点块后不应保留跨块选区"
+        );
+        let first = first.read(cx);
+        assert_eq!(first.selected_range, 2..5);
+        assert_eq!(first.caret_offset(), 5);
+        assert!(second.read(cx).editor_selection_range.is_none());
+    });
+}
+
+#[rgpui::test]
+async fn plain_arrow_collapses_cross_block_selection(cx: &mut TestAppContext) {
+    // 端到端：跨块选区存在时，普通方向键应先折叠选区而不是只移动隐藏的块内光标。
+    init_editor_test_app(cx);
+    let (editor, cx) = cx.add_window_view(|_window, cx| {
+        Editor::from_markdown(cx, "alpha\n\nbeta".to_string(), None)
+    });
+
+    let (first, second) = editor.update(cx, |editor, cx| {
+        let visible = editor.document.visible_blocks().to_vec();
+        let first = visible[0].entity.clone();
+        let second = visible[1].entity.clone();
+        let (first_id, second_id) = (first.entity_id(), second.entity_id());
+        first.update(cx, |block, block_cx| block.move_to(2, block_cx));
+        second.update(cx, |block, block_cx| block.move_to(1, block_cx));
+        editor.cross_block_selection = Some(super::CrossBlockSelection {
+            anchor: super::CrossBlockSelectionEndpoint {
+                entity_id: first_id,
+                offset: 2,
+            },
+            focus: super::CrossBlockSelectionEndpoint {
+                entity_id: second_id,
+                offset: 1,
+            },
+        });
+        editor.focus_block(second_id);
+        editor.sync_cross_block_selection_visuals(cx);
+        (first, second)
+    });
+    redraw(cx);
+
+    cx.simulate_keystrokes("left");
+    redraw(cx);
+
+    editor.update(cx, |editor, cx| {
+        assert!(
+            editor.cross_block_selection.is_none(),
+            "普通方向键应折叠跨块选区"
+        );
+        let first_id = first.entity_id();
+        assert_eq!(first.read(cx).selected_range, 2..2, "左移应折叠到选区起点");
+        assert_eq!(editor.active_entity_id, Some(first_id));
+        assert!(!second.read(cx).cross_block_selected);
+    });
+}
+
+#[rgpui::test]
+async fn typing_at_empty_cross_block_focus_endpoint_replaces_selection(cx: &mut TestAppContext) {
+    // 端到端：焦点端在块首（空区间）时输入仍应替换整个跨块选区。
+    init_editor_test_app(cx);
+    let (editor, cx) = cx.add_window_view(|_window, cx| {
+        Editor::from_markdown(cx, "alpha\n\nbeta".to_string(), None)
+    });
+
+    editor.update(cx, |editor, cx| {
+        let visible = editor.document.visible_blocks().to_vec();
+        let (first_id, second_id) = (visible[0].entity.entity_id(), visible[1].entity.entity_id());
+        visible[1].entity.update(cx, |block, block_cx| {
+            block.move_to(0, block_cx);
+        });
+        editor.cross_block_selection = Some(super::CrossBlockSelection {
+            anchor: super::CrossBlockSelectionEndpoint {
+                entity_id: first_id,
+                offset: 2,
+            },
+            focus: super::CrossBlockSelectionEndpoint {
+                entity_id: second_id,
+                offset: 0,
+            },
+        });
+        editor.focus_block(second_id);
+        editor.sync_cross_block_selection_visuals(cx);
+    });
+    redraw(cx);
+
+    cx.simulate_keystrokes("x");
+    redraw(cx);
+
+    editor.update(cx, |editor, cx| {
+        assert!(editor.cross_block_selection.is_none());
+        assert_eq!(
+            editor.document.markdown_text(cx),
+            "alxbeta",
+            "输入应替换从锚点到焦点端的整段选区"
+        );
+        assert!(
+            editor
+                .document
+                .visible_blocks()
+                .iter()
+                .all(|visible| !visible.entity.read(cx).cross_block_selected)
+        );
+    });
+}
+
+#[rgpui::test]
 async fn inserting_table_at_document_end_adds_trailing_paragraph(cx: &mut TestAppContext) {
     let cx = cx.add_empty_window();
     let editor = cx.new(|cx| Editor::from_markdown(cx, String::new(), None));

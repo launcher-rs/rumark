@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::ops::Range;
+use std::time::Duration;
 
 use rgpui::*;
 
@@ -10,8 +11,15 @@ use super::{
     SelectionUndoSnapshot, SourceMapEntry, ViewMode,
 };
 use crate::components::{
-    Block, BlockKind, Copy, Cut, Delete, DeleteBack, UndoKind, table_to_markdown_lines,
+    Block, BlockKind, Copy, Cut, Delete, DeleteBack, End, FocusNext, FocusPrev, Home,
+    HorizontalSelectMotion, MoveLeft, MoveRight, UndoKind, WordMoveLeft, WordMoveRight,
+    table_to_markdown_lines, update_entity_forgiving,
 };
+
+/// 触发拖拽自动滚动的视口边缘宽度。
+const DRAG_AUTOSCROLL_EDGE: f32 = 24.0;
+/// 拖拽自动滚动的最大滚动速度（每帧逻辑像素）。
+const DRAG_AUTOSCROLL_MAX_STEP: f32 = 22.0;
 
 /// 按可见块位置排序后的跨块选区。
 #[derive(Clone, Copy)]
@@ -29,7 +37,12 @@ impl Editor {
         let mut changed = false;
         for visible in self.document.visible_blocks().to_vec() {
             visible.entity.update(cx, |block, cx| {
-                if block.editor_selection_range.take().is_some() {
+                let mut block_changed = block.editor_selection_range.take().is_some();
+                if block.cross_block_selected {
+                    block.cross_block_selected = false;
+                    block_changed = true;
+                }
+                if block_changed {
                     changed = true;
                     cx.notify();
                 }
@@ -102,11 +115,11 @@ impl Editor {
             })
     }
 
-    /// 编辑器鼠标按下捕获：左键在渲染模式开始跨块拖拽。
+    /// 编辑器鼠标按下捕获：左键在渲染模式开始跨块拖拽，Shift+点击延伸选区。
     pub(super) fn on_editor_capture_mouse_down(
         &mut self,
         event: &MouseDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if event.button != MouseButton::Left {
@@ -120,35 +133,389 @@ impl Editor {
         }
 
         self.rendered_select_all_cycle = None;
+        // 上一轮拖拽若漏掉松开（如窗口失焦），丢弃残留的自动滚动循环。
+        self.drag_autoscroll_task = None;
+        self.drag_pointer = Some(event.position);
+
+        if event.modifiers.shift
+            && self.extend_cross_block_selection_to_point(event.position, window, cx)
+        {
+            cx.stop_propagation();
+            return;
+        }
+
         self.begin_cross_block_drag_at_point(event.position, cx);
         cx.propagate();
     }
 
-    /// 编辑器鼠标移动：拖拽中更新跨块选区。
+    /// Shift+点击：把选区固定端点延伸到点击处，返回真表示已按跨块处理。
+    /// 返回假时点击落在同一块内，交由块自身的 Shift 扩展逻辑。
+    fn extend_cross_block_selection_to_point(
+        &mut self,
+        position: Point<Pixels>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(focus) = self.cross_block_endpoint_for_point(position, cx) else {
+            return false;
+        };
+        let anchor = self
+            .cross_block_selection
+            .map(|selection| selection.anchor)
+            .or_else(|| self.shift_click_anchor(window, cx));
+        let Some(anchor) = anchor else {
+            return false;
+        };
+
+        if anchor.entity_id == focus.entity_id {
+            // 点击回到锚点块：撤掉跨块高亮，块内 Shift 点击自行收缩选区。
+            self.clear_cross_block_selection(cx);
+            return false;
+        }
+
+        let selection = CrossBlockSelection { anchor, focus };
+        self.cross_block_selection =
+            (!self.cross_block_selection_is_empty(selection, cx)).then_some(selection);
+        self.cross_block_drag = Some(CrossBlockDrag { anchor });
+        self.sync_cross_block_selection_visuals(cx);
+        cx.notify();
+        true
+    }
+
+    /// Shift 点击的固定端点：有选区时取远离光标的一端，否则取光标位置。
+    fn shift_click_anchor(&self, window: &Window, cx: &App) -> Option<CrossBlockSelectionEndpoint> {
+        let entity = self.focused_edit_target(window, cx)?;
+        let entity_id = entity.entity_id();
+        let block = entity.read(cx);
+        let offset = if block.selected_range.is_empty() {
+            block.caret_offset()
+        } else if block.selection_reversed {
+            block.selected_range.end
+        } else {
+            block.selected_range.start
+        };
+        Some(CrossBlockSelectionEndpoint { entity_id, offset })
+    }
+
+    /// Shift+上/下：按视觉行扩展选区，焦点端越过块边界时接续到相邻可见块。
+    ///
+    /// 块内扩展统一走块自身的视觉行计算；已有跨块选区时只移动焦点端点，
+    /// 不碰块的原生选区，避免块内高亮与跨块高亮重叠。
+    pub(super) fn extend_vertical_selection(
+        &mut self,
+        block: &Entity<Block>,
+        delta: i32,
+        preferred_x: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let preferred = px(preferred_x);
+        let Some(selection) = self.cross_block_selection else {
+            if block.update(cx, |block, cx| {
+                block.select_vertically(delta, preferred, cx)
+            }) {
+                cx.notify();
+                return;
+            }
+            let block_ref = block.read(cx);
+            let (anchor_offset, _) = block_ref.selection_anchor_focus();
+            let focus = CrossBlockSelectionEndpoint {
+                entity_id: block.entity_id(),
+                offset: block_ref.caret_offset(),
+            };
+            self.extend_vertical_selection_beyond(
+                CrossBlockSelectionEndpoint {
+                    entity_id: block.entity_id(),
+                    offset: anchor_offset,
+                },
+                focus,
+                delta,
+                preferred,
+                cx,
+            );
+            return;
+        };
+
+        // 焦点仍在当前块内：只更新跨块选区的焦点端点并移动光标。
+        let focus_block = self.document.block_entity_by_id(selection.focus.entity_id);
+        if let Some(focus_block) = focus_block
+            && let Some(target) = focus_block.read(cx).vertical_move_target(delta, preferred)
+        {
+            let focus = CrossBlockSelectionEndpoint {
+                entity_id: selection.focus.entity_id,
+                offset: target,
+            };
+            focus_block.update(cx, |focus_block, cx| {
+                focus_block.move_to_with_preferred_x(target, Some(preferred), cx);
+            });
+            let next = CrossBlockSelection {
+                anchor: selection.anchor,
+                focus,
+            };
+            self.cross_block_selection =
+                (!self.cross_block_selection_is_empty(next, cx)).then_some(next);
+            self.sync_cross_block_selection_visuals(cx);
+            cx.notify();
+            return;
+        }
+
+        self.extend_vertical_selection_beyond(
+            selection.anchor,
+            selection.focus,
+            delta,
+            preferred,
+            cx,
+        );
+    }
+
+    /// 焦点端已在首末行：把选区接入相邻可见块并放置光标。
+    fn extend_vertical_selection_beyond(
+        &mut self,
+        anchor: CrossBlockSelectionEndpoint,
+        focus: CrossBlockSelectionEndpoint,
+        delta: i32,
+        preferred_x: Pixels,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(focus_index) = self.document.visible_index_for_entity_id(focus.entity_id) else {
+            return;
+        };
+        let target_index = focus_index as i32 + delta;
+        if target_index < 0 {
+            return;
+        }
+        let Some(target) = self.document.visible_block_at(target_index as usize) else {
+            return;
+        };
+        let target_id = target.entity_id();
+        let offset = target
+            .read(cx)
+            .vertical_focus_offset(delta < 0, Some(preferred_x));
+        let next_focus = CrossBlockSelectionEndpoint {
+            entity_id: target_id,
+            offset,
+        };
+
+        if anchor.entity_id == target_id {
+            // 焦点回到锚点块：退回块内选区，避免残留单点跨块选区。
+            self.cross_block_selection = None;
+            self.clear_cross_block_selection_visuals(cx);
+            self.focus_block(target_id);
+            target.update(cx, |target, cx| {
+                target.move_to(anchor.offset, cx);
+                target.select_to(offset, cx);
+            });
+            cx.notify();
+            return;
+        }
+
+        self.collapse_anchor_block_native(anchor, cx);
+
+        self.focus_block(target_id);
+        target.update(cx, |target, cx| {
+            target.move_to_with_preferred_x(offset, Some(preferred_x), cx);
+        });
+
+        let next = CrossBlockSelection {
+            anchor,
+            focus: next_focus,
+        };
+        self.cross_block_selection =
+            (!self.cross_block_selection_is_empty(next, cx)).then_some(next);
+        self.sync_cross_block_selection_visuals(cx);
+        cx.notify();
+    }
+
+    /// 跨块选区绘制期间收起锚点块自身的原生选区。
+    fn collapse_anchor_block_native(
+        &self,
+        anchor: CrossBlockSelectionEndpoint,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(anchor_block) = self.document.block_entity_by_id(anchor.entity_id) else {
+            return;
+        };
+        let anchor_offset = anchor.offset;
+        anchor_block.update(cx, |anchor_block, cx| {
+            let collapsed = anchor_block.selected_range.is_empty()
+                && anchor_block.caret_offset() == anchor_offset;
+            if !collapsed {
+                anchor_block.move_to(anchor_offset, cx);
+            }
+        });
+    }
+
+    /// Shift+左/右、Shift+Home/End：扩展选区。
+    ///
+    /// 没有跨块选区时按块内计算的落点就地扩选；已有跨块选区时只移动焦点端点，
+    /// 焦点越过块边界则接续到相邻可见块，回到锚点块则收敛为块内原生选区。
+    pub(super) fn extend_horizontal_selection(
+        &mut self,
+        block: &Entity<Block>,
+        motion: HorizontalSelectMotion,
+        target: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(selection) = self.cross_block_selection else {
+            block.update(cx, |block, cx| block.select_to(target, cx));
+            return;
+        };
+        // 拖拽后键盘焦点常留在锚点块，跨块扩选一律以选区焦点端点为基准。
+        let Some(focus_block) = self.document.block_entity_by_id(selection.focus.entity_id) else {
+            return;
+        };
+
+        // 跨块拖拽不会同步焦点块的原生光标，落点一律按跨块端点重新计算。
+        let (focus_len, focus_offset, local_target) = {
+            let block_ref = focus_block.read(cx);
+            let len = block_ref.plain_len();
+            let offset = selection.focus.offset.min(len);
+            let target = match motion {
+                HorizontalSelectMotion::CharLeft => block_ref
+                    .projected_move_left_target(offset)
+                    .map(|(target, _)| target)
+                    .unwrap_or_else(|| block_ref.previous_boundary(offset)),
+                HorizontalSelectMotion::CharRight => block_ref
+                    .projected_move_right_target(offset)
+                    .map(|(target, _)| target)
+                    .unwrap_or_else(|| block_ref.next_boundary(offset)),
+                HorizontalSelectMotion::WordLeft => block_ref.prev_word_boundary(offset),
+                HorizontalSelectMotion::WordRight => block_ref.next_word_boundary(offset),
+                HorizontalSelectMotion::Home => 0,
+                HorizontalSelectMotion::End => len,
+            };
+            (len, offset, target)
+        };
+
+        let crosses = match motion {
+            HorizontalSelectMotion::CharLeft | HorizontalSelectMotion::WordLeft => {
+                focus_offset == 0
+            }
+            HorizontalSelectMotion::CharRight | HorizontalSelectMotion::WordRight => {
+                focus_offset >= focus_len
+            }
+            HorizontalSelectMotion::Home | HorizontalSelectMotion::End => false,
+        };
+        if crosses {
+            let delta = if matches!(
+                motion,
+                HorizontalSelectMotion::CharLeft | HorizontalSelectMotion::WordLeft
+            ) {
+                -1
+            } else {
+                1
+            };
+            self.extend_horizontal_selection_beyond(selection, delta, cx);
+            return;
+        }
+
+        let step = local_target.min(focus_len);
+        focus_block.update(cx, |focus_block, cx| focus_block.move_to(step, cx));
+        let next = CrossBlockSelection {
+            anchor: selection.anchor,
+            focus: CrossBlockSelectionEndpoint {
+                entity_id: selection.focus.entity_id,
+                offset: step,
+            },
+        };
+        self.cross_block_selection =
+            (!self.cross_block_selection_is_empty(next, cx)).then_some(next);
+        self.sync_cross_block_selection_visuals(cx);
+        cx.notify();
+    }
+
+    /// 焦点端已到块首/块尾：把选区接入相邻可见块并放置光标。
+    fn extend_horizontal_selection_beyond(
+        &mut self,
+        selection: CrossBlockSelection,
+        delta: i32,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(focus_index) = self
+            .document
+            .visible_index_for_entity_id(selection.focus.entity_id)
+        else {
+            return;
+        };
+        let target_index = focus_index as i32 + delta;
+        if target_index < 0 {
+            return;
+        }
+        let Some(target) = self.document.visible_block_at(target_index as usize) else {
+            return;
+        };
+        let target_id = target.entity_id();
+        let offset = if delta < 0 {
+            target.read(cx).plain_len()
+        } else {
+            0
+        };
+
+        if selection.anchor.entity_id == target_id {
+            // 焦点回到锚点块：退回块内选区，避免残留单点跨块选区。
+            self.cross_block_selection = None;
+            self.clear_cross_block_selection_visuals(cx);
+            self.focus_block(target_id);
+            target.update(cx, |target, cx| {
+                target.move_to(selection.anchor.offset, cx);
+                target.select_to(offset, cx);
+            });
+            cx.notify();
+            return;
+        }
+
+        self.collapse_anchor_block_native(selection.anchor, cx);
+        self.focus_block(target_id);
+        target.update(cx, |target, cx| target.move_to(offset, cx));
+
+        let next = CrossBlockSelection {
+            anchor: selection.anchor,
+            focus: CrossBlockSelectionEndpoint {
+                entity_id: target_id,
+                offset,
+            },
+        };
+        self.cross_block_selection =
+            (!self.cross_block_selection_is_empty(next, cx)).then_some(next);
+        self.sync_cross_block_selection_visuals(cx);
+        cx.notify();
+    }
+
+    /// 编辑器鼠标移动：拖拽中更新选区并维持越界自动滚动。
     pub(super) fn on_editor_mouse_move(
         &mut self,
         event: &MouseMoveEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !event.dragging() {
+        if !event.dragging() || self.cross_block_drag.is_none() {
             return;
         }
+
+        self.drag_pointer = Some(event.position);
+        if self.apply_drag_selection_at(event.position, cx) {
+            cx.notify();
+        }
+        self.ensure_drag_autoscroll(cx);
+    }
+
+    /// 按指针位置更新跨块拖拽选区，返回选区是否变化。
+    fn apply_drag_selection_at(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) -> bool {
         let Some(drag) = self.cross_block_drag else {
-            return;
+            return false;
         };
-        let Some(focus) = self.cross_block_endpoint_for_point(event.position, cx) else {
-            return;
+        let Some(focus) = self.cross_block_endpoint_for_point(position, cx) else {
+            return false;
         };
 
         if self.cross_block_selection.is_none() && drag.anchor.entity_id == focus.entity_id {
-            // 分隔线单独一块时也能整体选中（无可见文本，偏移恒为 0）。
-            let anchor_is_separator = self
+            // 同块拖拽由块内指针会话负责；分隔线等整块可选中项无可见文本，
+            // 仍需编辑器接管，否则拖不出选区。
+            let anchor_is_whole = self
                 .document
                 .block_entity_by_id(drag.anchor.entity_id)
                 .is_some_and(|entity| Editor::block_is_whole_block_selectable(entity.read(cx)));
-            if !anchor_is_separator {
-                return;
+            if !anchor_is_whole {
+                return false;
             }
         }
 
@@ -156,16 +523,110 @@ impl Editor {
             anchor: drag.anchor,
             focus,
         };
-        if self.cross_block_selection_is_empty(selection, cx) {
-            self.cross_block_selection = None;
+        let next = if self.cross_block_selection_is_empty(selection, cx) {
+            None
         } else {
-            self.cross_block_selection = Some(selection);
+            Some(selection)
+        };
+        if next == self.cross_block_selection {
+            return false;
         }
+        self.cross_block_selection = next;
         self.sync_cross_block_selection_visuals(cx);
-        cx.notify();
+        true
     }
 
-    /// 编辑器鼠标松开：结束跨块拖拽与块内指针选区。
+    /// 拖拽指针越过视口上下边缘时启动自动滚动循环（已在运行则忽略）。
+    fn ensure_drag_autoscroll(&mut self, cx: &mut Context<Self>) {
+        if self.drag_autoscroll_task.is_some() || self.cross_block_drag.is_none() {
+            return;
+        }
+        self.drag_autoscroll_task = Some(cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(16))
+                    .await;
+                // 借用冲突（嵌套派发）时保留循环，下一拍重试。
+                let Some(result) = update_entity_forgiving(&this, cx, |editor, cx| {
+                    editor.drag_autoscroll_tick(cx)
+                }) else {
+                    continue;
+                };
+                match result {
+                    Ok(true) => {}
+                    Ok(false) | Err(_) => break,
+                }
+            }
+        }));
+    }
+
+    /// 拖拽自动滚动单帧：滚动视口并用视口内探测点延伸选区；拖拽结束返回假。
+    fn drag_autoscroll_tick(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.cross_block_drag.is_none() {
+            return false;
+        }
+        let Some(pointer) = self.drag_pointer else {
+            return false;
+        };
+        let viewport = self.scroll_handle.bounds();
+        if viewport.size.height <= px(0.0) {
+            return true;
+        }
+
+        let edge = px(DRAG_AUTOSCROLL_EDGE);
+        let overshoot = if pointer.y < viewport.top() + edge {
+            pointer.y - (viewport.top() + edge)
+        } else if pointer.y > viewport.bottom() - edge {
+            pointer.y - (viewport.bottom() - edge)
+        } else {
+            return true;
+        };
+
+        // 越界越远滚得越快，指针停在边缘外也能持续滚动。
+        let step = overshoot
+            .as_f32()
+            .clamp(-DRAG_AUTOSCROLL_MAX_STEP, DRAG_AUTOSCROLL_MAX_STEP);
+        let current = self.scroll_handle.offset().y;
+        let max_offset_y = self.scroll_handle.max_offset().y.max(px(0.0));
+        let target = (current - px(step)).min(px(0.0)).max(-max_offset_y);
+        if target != current {
+            self.set_vertical_scroll_offset(target, cx);
+        }
+
+        // 指针停在视口外时不再有新的鼠标事件，用夹取到视口内的探测点
+        // 继续延伸选区，内容随滚动逐帧进入探测点。
+        let probe = point(
+            pointer.x,
+            pointer
+                .y
+                .clamp(viewport.top() + px(2.0), viewport.bottom() - px(2.0)),
+        );
+        if self.apply_drag_selection_at(probe, cx) {
+            cx.notify();
+        } else if self.cross_block_selection.is_none() {
+            self.extend_anchor_block_selection_at(probe, cx);
+        }
+        true
+    }
+
+    /// 自动滚动时用探测点延伸锚点块的块内选区（块已滚出视口时由跨块路径接管）。
+    fn extend_anchor_block_selection_at(
+        &mut self,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(drag) = self.cross_block_drag else {
+            return;
+        };
+        let Some(entity) = self.document.block_entity_by_id(drag.anchor.entity_id) else {
+            return;
+        };
+        entity.update(cx, |block, cx| {
+            block.extend_pointer_selection_at(position, cx);
+        });
+    }
+
+    /// 编辑器鼠标松开：结束跨块拖拽、自动滚动与块内指针选区。
     pub(super) fn on_editor_mouse_up(
         &mut self,
         _event: &MouseUpEvent,
@@ -173,6 +634,8 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         self.cross_block_drag = None;
+        self.drag_pointer = None;
+        self.drag_autoscroll_task = None;
         self.end_block_pointer_selection_sessions(cx);
     }
 
@@ -228,6 +691,111 @@ impl Editor {
             return;
         }
         cx.stop_propagation();
+    }
+
+    /// 方向键折叠跨块选区：移动到选区起点（`at_end` 为假）或终点，并拦截事件。
+    fn collapse_cross_block_selection_for_navigation(
+        &mut self,
+        at_end: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.cross_block_selection.is_none() {
+            cx.propagate();
+            return;
+        }
+        let endpoint = self.normalized_cross_block_selection(cx).map(|selection| {
+            if at_end {
+                selection.end
+            } else {
+                selection.start
+            }
+        });
+        self.cross_block_drag = None;
+        self.cross_block_selection = None;
+        self.clear_cross_block_selection_visuals(cx);
+        if let Some(endpoint) = endpoint
+            && let Some(block) = self.document.block_entity_by_id(endpoint.entity_id)
+        {
+            self.focus_block(endpoint.entity_id);
+            block.update(cx, |block, cx| block.move_to(endpoint.offset, cx));
+        }
+        cx.notify();
+        cx.stop_propagation();
+    }
+
+    /// 左移捕获。
+    pub(super) fn on_move_left_capture(
+        &mut self,
+        _: &MoveLeft,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.collapse_cross_block_selection_for_navigation(false, cx);
+    }
+
+    /// 右移捕获。
+    pub(super) fn on_move_right_capture(
+        &mut self,
+        _: &MoveRight,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.collapse_cross_block_selection_for_navigation(true, cx);
+    }
+
+    /// 按词左移捕获。
+    pub(super) fn on_word_move_left_capture(
+        &mut self,
+        _: &WordMoveLeft,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.collapse_cross_block_selection_for_navigation(false, cx);
+    }
+
+    /// 按词右移捕获。
+    pub(super) fn on_word_move_right_capture(
+        &mut self,
+        _: &WordMoveRight,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.collapse_cross_block_selection_for_navigation(true, cx);
+    }
+
+    /// 上移捕获。
+    pub(super) fn on_focus_prev_capture(
+        &mut self,
+        _: &FocusPrev,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.collapse_cross_block_selection_for_navigation(false, cx);
+    }
+
+    /// 下移捕获。
+    pub(super) fn on_focus_next_capture(
+        &mut self,
+        _: &FocusNext,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.collapse_cross_block_selection_for_navigation(true, cx);
+    }
+
+    /// 行首捕获。
+    pub(super) fn on_home_capture(
+        &mut self,
+        _: &Home,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.collapse_cross_block_selection_for_navigation(false, cx);
+    }
+
+    /// 行尾捕获。
+    pub(super) fn on_end_capture(&mut self, _: &End, _window: &mut Window, cx: &mut Context<Self>) {
+        self.collapse_cross_block_selection_for_navigation(true, cx);
     }
 
     /// 判断渲染文档是否已被跨块选区整体选中。
@@ -548,12 +1116,15 @@ impl Editor {
     }
 
     /// 同步跨块选区在各块上的高亮区间。
-    fn sync_cross_block_selection_visuals(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn sync_cross_block_selection_visuals(&mut self, cx: &mut Context<Self>) {
         let normalized = self.normalized_cross_block_selection(cx);
         let visible_blocks = self.document.visible_blocks().to_vec();
         for (index, visible) in visible_blocks.into_iter().enumerate() {
+            let in_selection = normalized.is_some_and(|selection| {
+                index >= selection.start_index && index <= selection.end_index
+            });
             let next_range = normalized.and_then(|selection| {
-                if index < selection.start_index || index > selection.end_index {
+                if !in_selection {
                     return None;
                 }
                 let block = visible.entity.read(cx);
@@ -573,8 +1144,15 @@ impl Editor {
             });
 
             visible.entity.update(cx, |block, cx| {
-                if block.editor_selection_range != next_range {
+                let mut changed = block.editor_selection_range != next_range;
+                if changed {
                     block.editor_selection_range = next_range.clone();
+                }
+                if block.cross_block_selected != in_selection {
+                    block.cross_block_selected = in_selection;
+                    changed = true;
+                }
+                if changed {
                     cx.notify();
                 }
             });
@@ -1174,7 +1752,7 @@ mod tests {
     use rgpui::{AppContext, Bounds, Context, TestAppContext, point, px, size};
 
     use super::{CrossBlockSelection, CrossBlockSelectionEndpoint, Editor};
-    use crate::components::{BlockKind, Cut, Undo, UndoKind};
+    use crate::components::{BlockKind, Cut, HorizontalSelectMotion, Undo, UndoKind};
     use crate::i18n::I18nManager;
 
     /// 初始化跨块选区测试应用（测试辅助）。
@@ -2146,6 +2724,329 @@ mod tests {
             );
         });
 
+        cx.quit();
+    }
+
+    #[test]
+    fn shift_down_at_last_line_extends_selection_into_next_block() {
+        // 未渲染（无布局）的块内无法再往下走，焦点端应接入下一块顶部，
+        // 锚点块的原生选区收起为单光标，高亮统一交给跨块选区。
+        let mut cx = TestAppContext::single();
+        init_editor_test_app(&mut cx);
+        let editor = cx.new(|cx| Editor::from_markdown(cx, "alpha\n\nbeta".to_string(), None));
+
+        editor.update(&mut cx, |editor, cx| {
+            let visible = editor.document.visible_blocks().to_vec();
+            let first_id = visible[0].entity.entity_id();
+            let second_id = visible[1].entity.entity_id();
+            visible[0].entity.update(cx, |block, _cx| {
+                block.selected_range = 2..5;
+                block.selection_reversed = false;
+            });
+
+            editor.extend_vertical_selection(&visible[0].entity, 1, 0.0, cx);
+
+            let selection = editor
+                .cross_block_selection
+                .expect("越过块边界后应生成跨块选区");
+            assert_eq!(selection.anchor.entity_id, first_id);
+            assert_eq!(selection.anchor.offset, 2, "锚点应固定在选区起点");
+            assert_eq!(selection.focus.entity_id, second_id);
+            assert_eq!(selection.focus.offset, 0, "从上往下进入块时落在首行行首");
+
+            let first = visible[0].entity.read(cx);
+            assert_eq!(first.selected_range, 2..2, "锚点块原生选区应收起");
+            assert_eq!(first.caret_offset(), 2);
+            assert_eq!(visible[1].entity.read(cx).caret_offset(), 0);
+            assert_eq!(editor.active_entity_id, Some(second_id));
+        });
+        cx.quit();
+    }
+
+    #[test]
+    fn shift_up_from_block_start_extends_selection_into_previous_block() {
+        // 反向：从下一块行首往上，焦点端落到上一块末行行尾。
+        let mut cx = TestAppContext::single();
+        init_editor_test_app(&mut cx);
+        let editor = cx.new(|cx| Editor::from_markdown(cx, "alpha\n\nbeta".to_string(), None));
+
+        editor.update(&mut cx, |editor, cx| {
+            let visible = editor.document.visible_blocks().to_vec();
+            let first_id = visible[0].entity.entity_id();
+            let second_id = visible[1].entity.entity_id();
+            visible[1].entity.update(cx, |block, _cx| {
+                block.selected_range = 0..0;
+                block.selection_reversed = false;
+            });
+
+            editor.extend_vertical_selection(&visible[1].entity, -1, 0.0, cx);
+
+            let selection = editor
+                .cross_block_selection
+                .expect("向上越过块边界后应生成跨块选区");
+            assert_eq!(selection.anchor.entity_id, second_id);
+            assert_eq!(selection.anchor.offset, 0);
+            assert_eq!(selection.focus.entity_id, first_id);
+            let first_len = visible[0].entity.read(cx).plain_len();
+            assert_eq!(
+                selection.focus.offset, first_len,
+                "从下往上进入块时应落在末行行尾"
+            );
+            assert_eq!(editor.active_entity_id, Some(first_id));
+        });
+        cx.quit();
+    }
+
+    #[test]
+    fn shift_back_into_anchor_block_collapses_cross_block_selection() {
+        // 焦点端退回锚点块：应恢复块内选区，不残留单点跨块选区。
+        let mut cx = TestAppContext::single();
+        init_editor_test_app(&mut cx);
+        let editor = cx.new(|cx| Editor::from_markdown(cx, "alpha\n\nbeta".to_string(), None));
+
+        editor.update(&mut cx, |editor, cx| {
+            let visible = editor.document.visible_blocks().to_vec();
+            let first_id = visible[0].entity.entity_id();
+            visible[0].entity.update(cx, |block, _cx| {
+                block.selected_range = 2..5;
+                block.selection_reversed = false;
+            });
+
+            editor.extend_vertical_selection(&visible[0].entity, 1, 0.0, cx);
+            assert!(editor.cross_block_selection.is_some());
+
+            editor.extend_vertical_selection(&visible[1].entity, -1, 0.0, cx);
+
+            assert!(
+                editor.cross_block_selection.is_none(),
+                "退回锚点块后不应保留跨块选区"
+            );
+            let first = visible[0].entity.read(cx);
+            assert_eq!(first.selected_range, 2..5);
+            assert_eq!(first.caret_offset(), 5);
+            assert_eq!(editor.active_entity_id, Some(first_id));
+            assert!(
+                editor
+                    .document
+                    .visible_blocks()
+                    .iter()
+                    .all(|visible| visible.entity.read(cx).editor_selection_range.is_none())
+            );
+        });
+        cx.quit();
+    }
+
+    #[test]
+    fn shift_right_moves_cross_block_focus_endpoint() {
+        // 跨块选区存在时，Shift+右应移动跨块焦点端点，而不是只改块内被覆盖的原生选区。
+        let mut cx = TestAppContext::single();
+        init_editor_test_app(&mut cx);
+        let editor = cx.new(|cx| Editor::from_markdown(cx, "alpha\n\nbeta".to_string(), None));
+
+        editor.update(&mut cx, |editor, cx| {
+            let visible = editor.document.visible_blocks().to_vec();
+            let first_id = visible[0].entity.entity_id();
+            let second_id = visible[1].entity.entity_id();
+            set_selection(editor, 0, 2, 1, 1, cx);
+
+            editor.extend_horizontal_selection(
+                &visible[1].entity,
+                HorizontalSelectMotion::CharRight,
+                0,
+                cx,
+            );
+
+            let selection = editor.cross_block_selection.expect("跨块选区应保留");
+            assert_eq!(selection.anchor.entity_id, first_id);
+            assert_eq!(selection.anchor.offset, 2, "锚点不应移动");
+            assert_eq!(selection.focus.entity_id, second_id);
+            assert_eq!(selection.focus.offset, 2, "焦点端点应向右扩一个字符");
+            assert_eq!(
+                visible[0].entity.read(cx).editor_selection_range,
+                Some(2..5)
+            );
+            assert_eq!(
+                visible[1].entity.read(cx).editor_selection_range,
+                Some(0..2)
+            );
+            assert_eq!(
+                visible[1].entity.read(cx).caret_offset(),
+                2,
+                "光标应跟随焦点端点"
+            );
+        });
+        cx.quit();
+    }
+
+    #[test]
+    fn shift_right_dispatched_from_anchor_block_moves_focus_endpoint() {
+        // 拖拽结束后键盘焦点通常仍在锚点块，按键由锚点块派发也要推动焦点端点。
+        let mut cx = TestAppContext::single();
+        init_editor_test_app(&mut cx);
+        let editor = cx.new(|cx| Editor::from_markdown(cx, "alpha\n\nbeta".to_string(), None));
+
+        editor.update(&mut cx, |editor, cx| {
+            let visible = editor.document.visible_blocks().to_vec();
+            let second_id = visible[1].entity.entity_id();
+            set_selection(editor, 0, 2, 1, 1, cx);
+
+            editor.extend_horizontal_selection(
+                &visible[0].entity,
+                HorizontalSelectMotion::CharRight,
+                0,
+                cx,
+            );
+
+            let selection = editor.cross_block_selection.expect("跨块选区应保留");
+            assert_eq!(selection.anchor.offset, 2);
+            assert_eq!(selection.focus.entity_id, second_id);
+            assert_eq!(selection.focus.offset, 2, "焦点端点仍应向右扩展");
+            assert_eq!(
+                visible[1].entity.read(cx).editor_selection_range,
+                Some(0..2)
+            );
+        });
+        cx.quit();
+    }
+
+    #[test]
+    fn shift_left_at_focus_block_start_crosses_to_previous_block_end() {
+        // 焦点端在块首继续左移：接入上一可见块末尾，锚点保持不变。
+        let mut cx = TestAppContext::single();
+        init_editor_test_app(&mut cx);
+        let editor =
+            cx.new(|cx| Editor::from_markdown(cx, "alpha\n\nbeta\n\ngamma".to_string(), None));
+
+        editor.update(&mut cx, |editor, cx| {
+            let visible = editor.document.visible_blocks().to_vec();
+            let first_id = visible[0].entity.entity_id();
+            let second_id = visible[1].entity.entity_id();
+            set_selection(editor, 0, 2, 2, 0, cx);
+
+            editor.extend_horizontal_selection(
+                &visible[2].entity,
+                HorizontalSelectMotion::CharLeft,
+                0,
+                cx,
+            );
+
+            let selection = editor.cross_block_selection.expect("跨块选区应保留");
+            assert_eq!(selection.anchor.entity_id, first_id);
+            assert_eq!(selection.anchor.offset, 2);
+            assert_eq!(selection.focus.entity_id, second_id);
+            let second_len = visible[1].entity.read(cx).plain_len();
+            assert_eq!(selection.focus.offset, second_len, "应落在上一块末尾");
+            assert_eq!(
+                visible[1].entity.read(cx).editor_selection_range,
+                Some(0..second_len)
+            );
+            assert_eq!(visible[2].entity.read(cx).editor_selection_range, None);
+            assert_eq!(editor.active_entity_id, Some(second_id));
+        });
+        cx.quit();
+    }
+
+    #[test]
+    fn empty_focus_endpoint_still_marked_as_cross_block_selected() {
+        // 焦点端落在块首时区间为空，但仍属于跨块选区：输入路径靠标记判定替换。
+        let mut cx = TestAppContext::single();
+        init_editor_test_app(&mut cx);
+        let editor = cx.new(|cx| Editor::from_markdown(cx, "alpha\n\nbeta".to_string(), None));
+
+        editor.update(&mut cx, |editor, cx| {
+            let visible = editor.document.visible_blocks().to_vec();
+            set_selection(editor, 0, 2, 1, 0, cx);
+
+            assert!(visible[0].entity.read(cx).cross_block_selected);
+            assert!(visible[1].entity.read(cx).cross_block_selected);
+            assert_eq!(
+                visible[1].entity.read(cx).editor_selection_range,
+                None,
+                "空区间不应进入绘制路径"
+            );
+
+            editor.clear_cross_block_selection(cx);
+            assert!(
+                visible
+                    .iter()
+                    .all(|visible| !visible.entity.read(cx).cross_block_selected),
+                "清除跨块选区后标记应复位"
+            );
+        });
+        cx.quit();
+    }
+
+    #[test]
+    fn navigation_collapses_cross_block_selection_to_matching_endpoint() {
+        // 方向键折叠：左/上落到选区起点，右/下落到终点。
+        let mut cx = TestAppContext::single();
+        init_editor_test_app(&mut cx);
+        let editor = cx.new(|cx| Editor::from_markdown(cx, "alpha\n\nbeta".to_string(), None));
+
+        editor.update(&mut cx, |editor, cx| {
+            let visible = editor.document.visible_blocks().to_vec();
+            let first_id = visible[0].entity.entity_id();
+            let second_id = visible[1].entity.entity_id();
+
+            set_selection(editor, 0, 2, 1, 3, cx);
+            editor.collapse_cross_block_selection_for_navigation(false, cx);
+            assert!(editor.cross_block_selection.is_none());
+            assert_eq!(visible[0].entity.read(cx).selected_range, 2..2);
+            assert_eq!(visible[0].entity.read(cx).caret_offset(), 2);
+            assert_eq!(editor.active_entity_id, Some(first_id));
+
+            set_selection(editor, 0, 2, 1, 3, cx);
+            editor.collapse_cross_block_selection_for_navigation(true, cx);
+            assert!(editor.cross_block_selection.is_none());
+            assert_eq!(visible[1].entity.read(cx).selected_range, 3..3);
+            assert_eq!(visible[1].entity.read(cx).caret_offset(), 3);
+            assert_eq!(editor.active_entity_id, Some(second_id));
+            assert!(
+                editor
+                    .document
+                    .visible_blocks()
+                    .iter()
+                    .all(|visible| !visible.entity.read(cx).cross_block_selected)
+            );
+        });
+        cx.quit();
+    }
+
+    #[test]
+    fn shift_left_into_anchor_block_collapses_cross_block_selection() {
+        // 焦点端退回锚点块：收敛为块内原生选区，跨块高亮全部清除。
+        let mut cx = TestAppContext::single();
+        init_editor_test_app(&mut cx);
+        let editor = cx.new(|cx| Editor::from_markdown(cx, "alpha\n\nbeta".to_string(), None));
+
+        editor.update(&mut cx, |editor, cx| {
+            let visible = editor.document.visible_blocks().to_vec();
+            let first_id = visible[0].entity.entity_id();
+            set_selection(editor, 0, 2, 1, 0, cx);
+
+            editor.extend_horizontal_selection(
+                &visible[1].entity,
+                HorizontalSelectMotion::CharLeft,
+                0,
+                cx,
+            );
+
+            assert!(
+                editor.cross_block_selection.is_none(),
+                "退回锚点块后不应保留跨块选区"
+            );
+            let first = visible[0].entity.read(cx);
+            assert_eq!(first.selected_range, 2..5);
+            assert_eq!(first.caret_offset(), 5);
+            assert_eq!(editor.active_entity_id, Some(first_id));
+            assert!(
+                editor
+                    .document
+                    .visible_blocks()
+                    .iter()
+                    .all(|visible| visible.entity.read(cx).editor_selection_range.is_none())
+            );
+        });
         cx.quit();
     }
 }

@@ -6,16 +6,16 @@ use rgpui::*;
 
 use super::CaretAffinity;
 use super::{
-    Block, BlockEvent, BlockKind, InlineFormat, InlineTextTree, PastedImageSource,
-    SelectExtendMode, UndoKind,
+    Block, BlockEvent, BlockKind, HorizontalSelectMotion, InlineFormat, InlineTextTree,
+    PastedImageSource, SelectExtendMode, UndoKind,
 };
 use crate::components::markdown::paste::should_split_plain_multiline_paste;
 use crate::components::{
     BlockDown, BlockUp, BoldSelection, CodeSelection, Copy, Cut, Delete, DeleteBack,
     DismissTransientUi, End, ExitCodeBlock, FocusNext, FocusPrev, Home, IndentBlock,
-    ItalicSelection, MoveLeft, MoveRight, Newline, OutdentBlock, Paste, SelectAll, SelectEnd,
-    SelectHome, SelectLeft, SelectRight, UnderlineSelection, WordDeleteBack, WordDeleteForward,
-    WordMoveLeft, WordMoveRight, WordSelectLeft, WordSelectRight,
+    ItalicSelection, MoveLeft, MoveRight, Newline, OutdentBlock, Paste, SelectAll, SelectDown,
+    SelectEnd, SelectHome, SelectLeft, SelectRight, SelectUp, UnderlineSelection, WordDeleteBack,
+    WordDeleteForward, WordMoveLeft, WordMoveRight, WordSelectLeft, WordSelectRight,
 };
 
 impl Block {
@@ -299,7 +299,7 @@ impl Block {
             return;
         }
 
-        if self.editor_selection_range.is_some() {
+        if self.cross_block_selected {
             cx.emit(BlockEvent::RequestReplaceCrossBlockSelection {
                 text: "\n".to_string(),
                 selected_range_relative: None,
@@ -775,11 +775,14 @@ impl Block {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some((target, _)) = self.projected_move_left_target(self.caret_offset()) {
-            self.select_to(target, cx);
-        } else {
-            self.select_to(self.previous_boundary(self.caret_offset()), cx);
-        }
+        let target = self
+            .projected_move_left_target(self.caret_offset())
+            .map(|(target, _)| target)
+            .unwrap_or_else(|| self.previous_boundary(self.caret_offset()));
+        cx.emit(BlockEvent::RequestSelectHorizontal {
+            motion: HorizontalSelectMotion::CharLeft,
+            target,
+        });
     }
 
     /// 向右扩展选区。
@@ -789,11 +792,40 @@ impl Block {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some((target, _)) = self.projected_move_right_target(self.caret_offset()) {
-            self.select_to(target, cx);
-        } else {
-            self.select_to(self.next_boundary(self.caret_offset()), cx);
-        }
+        let target = self
+            .projected_move_right_target(self.caret_offset())
+            .map(|(target, _)| target)
+            .unwrap_or_else(|| self.next_boundary(self.caret_offset()));
+        cx.emit(BlockEvent::RequestSelectHorizontal {
+            motion: HorizontalSelectMotion::CharRight,
+            target,
+        });
+    }
+
+    /// 向上扩展选区（块内与跨块统一由编辑器按视觉行处理）。
+    pub(crate) fn on_select_up(
+        &mut self,
+        _: &SelectUp,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.emit(BlockEvent::RequestSelectVertical {
+            delta: -1,
+            preferred_x: f32::from(self.vertical_anchor_x()),
+        });
+    }
+
+    /// 向下扩展选区（块内与跨块统一由编辑器按视觉行处理）。
+    pub(crate) fn on_select_down(
+        &mut self,
+        _: &SelectDown,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.emit(BlockEvent::RequestSelectVertical {
+            delta: 1,
+            preferred_x: f32::from(self.vertical_anchor_x()),
+        });
     }
 
     /// 按词左移。
@@ -823,7 +855,10 @@ impl Block {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.select_to(self.prev_word_boundary(self.caret_offset()), cx);
+        cx.emit(BlockEvent::RequestSelectHorizontal {
+            motion: HorizontalSelectMotion::WordLeft,
+            target: self.prev_word_boundary(self.caret_offset()),
+        });
     }
 
     /// 按词向右扩展选区。
@@ -833,7 +868,10 @@ impl Block {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.select_to(self.next_word_boundary(self.caret_offset()), cx);
+        cx.emit(BlockEvent::RequestSelectHorizontal {
+            motion: HorizontalSelectMotion::WordRight,
+            target: self.next_word_boundary(self.caret_offset()),
+        });
     }
 
     /// 上移一块。
@@ -883,7 +921,10 @@ impl Block {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.select_to(0, cx);
+        cx.emit(BlockEvent::RequestSelectHorizontal {
+            motion: HorizontalSelectMotion::Home,
+            target: 0,
+        });
     }
 
     /// 选中到行尾。
@@ -893,7 +934,10 @@ impl Block {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.select_to(self.plain_len(), cx);
+        cx.emit(BlockEvent::RequestSelectHorizontal {
+            motion: HorizontalSelectMotion::End,
+            target: self.plain_len(),
+        });
     }
 
     /// 处理复制。
@@ -947,7 +991,7 @@ impl Block {
             }
 
             // 仅渲染的富文本块做粘贴修正。纯文本/代码上下文保留字节，表格单元格拍平换行以免误拆表结构。
-            if self.editor_selection_range.is_some() {
+            if self.cross_block_selected {
                 cx.emit(BlockEvent::RequestReplaceCrossBlockSelection {
                     text,
                     selected_range_relative: None,
@@ -1444,7 +1488,9 @@ impl Block {
                 self.move_to(offset, cx);
             }
         } else {
-            self.is_selecting = false;
+            // 未聚焦的第一下也要能直接拖选：按下即开启指针会话，
+            // 否则用户必须先点一下、松开，再拖第二次才有选区。
+            self.is_selecting = true;
             self.select_extend_mode = SelectExtendMode::Char;
             self.move_to(offset, cx);
             cx.emit(BlockEvent::RequestFocus);
@@ -1590,13 +1636,27 @@ impl Block {
                 cx.notify();
                 return;
             }
-            let offset = self.index_at_mouse(event.position);
-            // 双击/三击后的拖拽按词/行吸附，单击拖拽按字符。
-            match self.select_extend_mode {
-                SelectExtendMode::Word => self.extend_word_selection_to(offset, cx),
-                SelectExtendMode::Line => self.extend_line_selection_to(offset, cx),
-                SelectExtendMode::Char => self.select_to(offset, cx),
-            }
+            self.extend_pointer_selection_at(event.position, cx);
+        }
+    }
+
+    /// 按指针位置扩展当前指针选区（双击/三击后的拖拽按词/行吸附）。
+    ///
+    /// 编辑器自动滚动时没有新的鼠标事件，也会用视口内探针位置调用这里，
+    /// 让拖选在指针停住时继续随内容滚动延伸。
+    pub(crate) fn extend_pointer_selection_at(
+        &mut self,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.is_selecting {
+            return;
+        }
+        let offset = self.index_at_mouse(position);
+        match self.select_extend_mode {
+            SelectExtendMode::Word => self.extend_word_selection_to(offset, cx),
+            SelectExtendMode::Line => self.extend_line_selection_to(offset, cx),
+            SelectExtendMode::Char => self.select_to(offset, cx),
         }
     }
 

@@ -864,6 +864,14 @@ pub enum BlockEvent {
     RequestFocusPrev { preferred_x: Option<f32> },
     /// 光标到达块底；把焦点移到下一可见块，并保留期望水平位置。
     RequestFocusNext { preferred_x: Option<f32> },
+    /// Shift+上/下：按视觉行扩展选区，越过块边界时由编辑器接续。
+    RequestSelectVertical { delta: i32, preferred_x: f32 },
+    /// Shift+左/右、Shift+Home/End：扩展选区；已有跨块选区时由编辑器接续焦点端点。
+    RequestSelectHorizontal {
+        motion: HorizontalSelectMotion,
+        /// 块内计算出的落点；没有跨块选区时按此就地扩选。
+        target: usize,
+    },
     /// 把焦点移到上一可见块开头。
     RequestBlockUp,
     /// 把焦点移到下一可见块开头。
@@ -872,6 +880,23 @@ pub enum BlockEvent {
     RequestDelete,
     /// 用户点击该块；通知兄弟块以展示模式重渲染。
     RequestFocus,
+}
+
+/// 块内横向扩选动作的语义，供编辑器区分越界方向与按词粒度。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HorizontalSelectMotion {
+    /// 按字符左移。
+    CharLeft,
+    /// 按字符右移。
+    CharRight,
+    /// 按词左移。
+    WordLeft,
+    /// 按词右移。
+    WordRight,
+    /// 到块首。
+    Home,
+    /// 到块尾。
+    End,
 }
 
 /// 变更前捕获的撤销合并类别。

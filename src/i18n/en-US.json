@@ -141,6 +141,8 @@
   "keys_jump_to_bottom": "Jump to Bottom",
   "keys_select_left": "Select Left",
   "keys_select_right": "Select Right",
+  "keys_select_up": "Select Up",
+  "keys_select_down": "Select Down",
   "keys_word_select_left": "Word Select Left",
   "keys_word_select_right": "Word Select Right",
   "keys_select_home": "Select to Line Start",

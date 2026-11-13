@@ -128,6 +128,10 @@ pub struct Editor {
     table_axis_selection: Option<AxisSelection>,
     cross_block_selection: Option<CrossBlockSelection>,
     cross_block_drag: Option<CrossBlockDrag>,
+    /// 拖拽选区的当前指针位置（窗口坐标），供越界自动滚动使用。
+    drag_pointer: Option<Point<Pixels>>,
+    /// 拖拽期间的自动滚动循环任务（拖拽结束后释放）。
+    drag_autoscroll_task: Option<Task<()>>,
     rendered_select_all_cycle: Option<SelectAllOverlayCycle>,
     scrollbar_hovered: bool,
     scrollbar_visible_until: Instant,
@@ -364,6 +368,8 @@ impl Editor {
             table_axis_selection: None,
             cross_block_selection: None,
             cross_block_drag: None,
+            drag_pointer: None,
+            drag_autoscroll_task: None,
             rendered_select_all_cycle: None,
             scrollbar_hovered: false,
             scrollbar_visible_until: Instant::now(),

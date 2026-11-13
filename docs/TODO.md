@@ -5,7 +5,7 @@
 
 ## 1. 工作区状态与改动分组
 
-本轮改动**已全部提交，工作区干净**（见 `git log --oneline -6`）：脚注族跨块映射、Typora 对比体验、图片请求与偏好/i18n/PDF 修复、落盘原子写，另有 `docs:`（本文件 + AGENTS.md）与 `test:`（`docs/render-sample.md` 夹具）两个小提交。
+上一轮改动**已全部提交，工作区干净**（见 `git log --oneline -6`）：内容选择体验优化（纵向/横向 Shift 扩选、跨块接续、方向键收起跨块选区、输入替换跨块选区）为最近一次提交，涉及 `src/components/actions.rs`、`src/config/preferences.rs`、`src/i18n/{zh-CN,en-US}.json`、`src/components/block/{model,render,interactions,input}.rs`、`src/components/block/editing/mod.rs`、`src/editor/{mod,events,render,selection,tests}.rs`；更早的提交为脚注族跨块映射、Typora 对比体验、图片请求与偏好/i18n/PDF 修复、落盘原子写，另有 `docs:`（本文件 + AGENTS.md）与 `test:`（`docs/render-sample.md` 夹具）两个小提交。
 
 `docs/render-sample.md` 被 `include_str!` 进多处测试（`components/markdown/inline/tests.rs`、`editor/document.rs`、`editor/tests.rs`、`export/{pdf,docx}.rs`），**改它就是改测试夹具**，改完必须跑全量 `cargo test -p rumark`。
 
@@ -116,7 +116,7 @@
 ```pwsh
 cargo fmt --check
 cargo clippy -p rumark --all-targets          # 期望 0 warning
-cargo test -p rumark                          # 当前基线 799 passed
+cargo test -p rumark                          # 当前基线 928 passed
 cargo check -p rumark --no-default-features   # 期望 5 个已知 warning
 git diff --check -- 'src/*.rs' 'AGENTS.md'    # 期望无输出
 ```
@@ -144,6 +144,7 @@ git diff --check -- 'src/*.rs' 'AGENTS.md'    # 期望无输出
 5. 表格是**唯一**没有自身 `SourceTargetMapping` 的块（只推单元格映射），整表复制走 `src/editor/selection.rs` 的回退分支，改动表格相关映射时两边都要看。
 6. `rgpui`/`rgpui-platform` 是 crates.io 的 `1.7`，版本号在 `Cargo.toml` 有**三处**（两个依赖 + `dev-dependencies` 的 `test-support`），升级要一起改。
 7. 行内强调：`has_closing_delimiter` 预扫描与 `parse_until` 的闭合判定**必须共用 `emphasis_close_at`**，且递归解析前要 `builder.checkpoint`、闭不上时 `builder.rollback`。两者任一失配都会让未闭合区间的正文被外层重放，产出重复文本并且**保存即把重复写进文件**（`__foo__bar` 曾写出三段）。口径对齐只挡住扁平场景，区间内还有更短的嵌套分隔符时预扫描必然偏乐观，回滚才是兜底。已知与规范的偏差逐条写在 `commonmark_emphasis_documented_deviations`（`*` 的简化侧翼判定、多字符起始符整体字面量、同标记相邻游程的贪心配对），新增偏差要写明原因。
+8. 实机脚本合成 Shift：`keybd_event` 送 Shift 时 `GetAsyncKeyState/GetKeyState` 偶发拿不到修饰键，Shift+方向键会退化成单键；改用 `System.Windows.Forms.SendKeys` 的 `"+{RIGHT}"`。键盘行为以 `cx.simulate_keystrokes` 的单测为准。
 
 ## 7. 参考
 

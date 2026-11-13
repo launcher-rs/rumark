@@ -1521,6 +1521,8 @@ impl PreferencesWindow {
             ShortcutCommand::JumpToBottom => i18n.t("keys_jump_to_bottom", &[]),
             ShortcutCommand::SelectLeft => i18n.t("keys_select_left", &[]),
             ShortcutCommand::SelectRight => i18n.t("keys_select_right", &[]),
+            ShortcutCommand::SelectUp => i18n.t("keys_select_up", &[]),
+            ShortcutCommand::SelectDown => i18n.t("keys_select_down", &[]),
             ShortcutCommand::WordSelectLeft => i18n.t("keys_word_select_left", &[]),
             ShortcutCommand::WordSelectRight => i18n.t("keys_word_select_right", &[]),
             ShortcutCommand::SelectHome => i18n.t("keys_select_home", &[]),

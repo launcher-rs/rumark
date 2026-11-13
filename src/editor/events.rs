@@ -1246,7 +1246,7 @@ impl Editor {
 
     /// 应用绝对纵向滚动偏移并夹取到可滚动范围。
     /// 偏移顶部为 0，底部为 `-max_offset`。
-    fn set_vertical_scroll_offset(&mut self, target_y: Pixels, cx: &mut Context<Self>) {
+    pub(super) fn set_vertical_scroll_offset(&mut self, target_y: Pixels, cx: &mut Context<Self>) {
         let max_offset_y = self.scroll_handle.max_offset().y.max(px(0.0));
         let mut offset = self.scroll_handle.offset();
         offset.y = target_y.min(px(0.0)).max(-max_offset_y);
@@ -2347,6 +2347,12 @@ impl Editor {
             }
             BlockEvent::RequestTableCellMoveHorizontal { .. }
             | BlockEvent::RequestTableCellMoveVertical { .. } => {}
+            BlockEvent::RequestSelectVertical { delta, preferred_x } => {
+                self.extend_vertical_selection(&block, *delta, *preferred_x, cx);
+            }
+            BlockEvent::RequestSelectHorizontal { motion, target } => {
+                self.extend_horizontal_selection(&block, *motion, *target, cx);
+            }
             BlockEvent::RequestFocusPrev { preferred_x } => {
                 if current_visible_index == 0 {
                     return;

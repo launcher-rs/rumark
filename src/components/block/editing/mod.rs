@@ -125,6 +125,9 @@ pub struct Block {
     pub selected_range: Range<usize>,
     pub selection_reversed: bool,
     pub(crate) editor_selection_range: Option<Range<usize>>,
+    /// 是否处于编辑器跨块选区范围内（含端点为空区间的块）。
+    /// 与 `editor_selection_range` 不同，空区间不会丢失该标记，供输入路径判断是否替换跨块选区。
+    pub(crate) cross_block_selected: bool,
     pub marked_range: Option<Range<usize>>,
     pub last_layout: Option<Vec<WrappedLine>>,
     pub last_bounds: Option<Bounds<Pixels>>,
@@ -236,6 +239,7 @@ impl Block {
             selected_range: 0..0,
             selection_reversed: false,
             editor_selection_range: None,
+            cross_block_selected: false,
             marked_range: None,
             last_layout: None,
             last_bounds: None,
@@ -2036,25 +2040,49 @@ impl Block {
         preferred_x: Pixels,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(lines) = self.last_layout.as_ref() else {
+        let Some(target) = self.vertical_move_target(direction, preferred_x) else {
             return false;
         };
+        self.move_to_with_preferred_x(target, Some(preferred_x), cx);
+        true
+    }
 
+    /// Shift+上/下：按视觉行扩展选区（焦点端移动、锚点端固定）。
+    /// 已在首末行时返回假，由编辑器接续到相邻块。
+    pub(crate) fn select_vertically(
+        &mut self,
+        direction: i32,
+        preferred_x: Pixels,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(target) = self.vertical_move_target(direction, preferred_x) else {
+            return false;
+        };
+        self.select_to(target, cx);
+        // `select_to` 会清掉纵向移动锚点，跨多行时按本行重新记下期望横坐标。
+        self.vertical_motion_x = Some(preferred_x);
+        cx.notify();
+        true
+    }
+
+    /// 计算上下移动一个视觉行后的落点偏移；已在首末行时返回空。
+    pub(crate) fn vertical_move_target(
+        &self,
+        direction: i32,
+        preferred_x: Pixels,
+    ) -> Option<usize> {
+        let lines = self.last_layout.as_ref()?;
         let text = self.rendered_text();
         let ranges = super::element::hard_line_ranges(text);
         let (current_line_idx, offset_in_line) =
             super::element::line_index_for_offset(&ranges, self.caret_offset());
-        let Some(current_layout) = lines.get(current_line_idx) else {
-            return false;
-        };
-        let Some(current_position) = super::element::position_for_offset(
+        let current_layout = lines.get(current_line_idx)?;
+        let current_position = super::element::position_for_offset(
             current_layout,
             offset_in_line,
             self.last_line_height,
             true,
-        ) else {
-            return false;
-        };
+        )?;
 
         let current_y =
             super::element::wrapped_line_top(lines, self.last_line_height, current_line_idx)
@@ -2065,31 +2093,25 @@ impl Block {
             current_y + self.last_line_height + self.last_line_height / 2.0
         };
         if target_y < px(0.0) {
-            return false;
+            return None;
         }
 
         let total_height = lines.iter().fold(px(0.0), |height, line| {
             height + super::element::wrapped_line_height(line, self.last_line_height)
         });
         if target_y >= total_height {
-            return false;
+            return None;
         }
 
-        let Some((target_line_idx, target_y_in_line)) =
-            super::element::wrapped_line_for_y(lines, self.last_line_height, target_y)
-        else {
-            return false;
-        };
+        let (target_line_idx, target_y_in_line) =
+            super::element::wrapped_line_for_y(lines, self.last_line_height, target_y)?;
         let target_layout = &lines[target_line_idx];
         let target_point = point(preferred_x, target_y_in_line);
         let target_offset_in_line =
             match target_layout.closest_index_for_position(target_point, self.last_line_height) {
                 Ok(idx) | Err(idx) => idx,
             };
-
-        let flat_offset = ranges[target_line_idx].start + target_offset_in_line;
-        self.move_to_with_preferred_x(flat_offset, Some(preferred_x), cx);
-        true
+        Some(ranges[target_line_idx].start + target_offset_in_line)
     }
 
     /// 计算焦点从上方或下方进入本块时光标落点，
@@ -2212,7 +2234,7 @@ impl Block {
     }
 
     /// 取选区锚点与焦点。
-    fn selection_anchor_focus(&self) -> (usize, usize) {
+    pub(crate) fn selection_anchor_focus(&self) -> (usize, usize) {
         if self.selection_reversed {
             (self.selected_range.end, self.selected_range.start)
         } else {
