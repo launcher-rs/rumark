@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use rgpui::list::ListItem;
 use rgpui::prelude::FluentBuilder as _;
 use rgpui::tabs::{Tabs, TabsItem};
@@ -24,6 +24,27 @@ pub(super) const WORKSPACE_PANEL_RESIZE_MIN_WIDTH: f32 = 180.0;
 pub(super) const WORKSPACE_PANEL_RESIZE_MAX_WIDTH: f32 = 560.0;
 const WORKSPACE_ROW_HEIGHT: f32 = 28.0;
 const WORKSPACE_ROW_INDENT: f32 = 18.0;
+/// 工作区扫描的最大递归深度：深层目录不再展开，避免卡住 UI。
+const WORKSPACE_SCAN_MAX_DEPTH: usize = 12;
+/// 单个目录最多读取的条目数，超大目录只取前一批。
+const WORKSPACE_SCAN_MAX_ENTRIES: usize = 2000;
+/// 版本控制 / 依赖 / 构建产物目录：文件树里没有 Markdown 内容价值，直接跳过。
+const WORKSPACE_IGNORED_DIRS: &[&str] = &[
+    ".git",
+    ".hg",
+    ".svn",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".idea",
+    ".vscode",
+    ".next",
+    ".cache",
+];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum WorkspaceTab {
@@ -842,17 +863,61 @@ fn is_markdown_file(path: &Path) -> bool {
         .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("md"))
 }
 
+/// 判断目录是否属于跳过名单（大小写不敏感，兼容 Windows）。
+fn is_ignored_workspace_dir(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    WORKSPACE_IGNORED_DIRS
+        .iter()
+        .any(|ignored| name.eq_ignore_ascii_case(ignored))
+}
+
 /// 扫描目录生成工作区文件树（仅目录与 Markdown 文件）。
 fn scan_workspace_dir(path: &Path) -> Result<WorkspaceTreeNode> {
+    scan_workspace_dir_at(path, 0, true)
+}
+
+/// 带深度与失败降级的目录扫描。
+///
+/// 根目录不可读仍是错误（交给 UI 提示）；子目录不可读或单条 entry 失败只
+/// 降级成空节点 / 跳过，不让整棵树消失。深度与条目上限防止大目录卡 UI。
+fn scan_workspace_dir_at(path: &Path, depth: usize, is_root: bool) -> Result<WorkspaceTreeNode> {
+    let empty_node = || WorkspaceTreeNode {
+        id: file_node_id(path),
+        label: file_label(path),
+        kind: WorkspaceTreeKind::Directory(path.to_path_buf()),
+        children: Vec::new(),
+    };
+
+    if depth >= WORKSPACE_SCAN_MAX_DEPTH {
+        return Ok(empty_node());
+    }
+
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(err) if is_root => {
+            return Err(
+                anyhow::Error::new(err).context(format!("failed to read '{}'", path.display()))
+            );
+        }
+        Err(_) => return Ok(empty_node()),
+    };
+
     let mut children = Vec::new();
-    for entry in
-        fs::read_dir(path).with_context(|| format!("failed to read '{}'", path.display()))?
-    {
-        let entry = entry?;
+    for entry in entries.take(WORKSPACE_SCAN_MAX_ENTRIES) {
+        let Ok(entry) = entry else { continue };
         let entry_path = entry.path();
-        let file_type = entry.file_type()?;
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
         if file_type.is_dir() {
-            children.push(scan_workspace_dir(&entry_path)?);
+            if is_ignored_workspace_dir(&entry_path) {
+                continue;
+            }
+            // 子目录内部已把失败降级为空节点，这里不会再拖垮整棵树。
+            children.push(scan_workspace_dir_at(&entry_path, depth + 1, false)?);
         } else if file_type.is_file() && is_markdown_file(&entry_path) {
             children.push(WorkspaceTreeNode {
                 id: file_node_id(&entry_path),
@@ -1040,10 +1105,11 @@ fn is_closing_fence(trimmed: &str, marker: char, len: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        WORKSPACE_PANEL_RESIZE_MAX_WIDTH, WORKSPACE_PANEL_RESIZE_MIN_WIDTH, WorkspaceSelection,
-        WorkspaceState, WorkspaceTreeKind, WorkspaceTreeNode, build_outline_tree,
-        clamp_workspace_panel_resize_width, collect_file_kinds, file_tree_item, find_outline_line,
-        outline_tree_item, prune_outline_state, scan_workspace_dir,
+        WORKSPACE_PANEL_RESIZE_MAX_WIDTH, WORKSPACE_PANEL_RESIZE_MIN_WIDTH,
+        WORKSPACE_SCAN_MAX_DEPTH, WorkspaceSelection, WorkspaceState, WorkspaceTreeKind,
+        WorkspaceTreeNode, build_outline_tree, clamp_workspace_panel_resize_width,
+        collect_file_kinds, file_tree_item, find_outline_line, outline_tree_item,
+        prune_outline_state, scan_workspace_dir, scan_workspace_dir_at,
         workspace_panel_width_for_viewport,
     };
     use std::collections::{BTreeMap, HashSet};
@@ -1080,6 +1146,71 @@ mod tests {
             tree.children[1].kind,
             WorkspaceTreeKind::MarkdownFile(_)
         ));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn workspace_scan_ignores_vcs_and_build_directories() {
+        let root =
+            std::env::temp_dir().join(format!("rumark-ignore-test-{}", uuid::Uuid::new_v4()));
+        for dir in [".git", "node_modules", "target", "dist", ".venv"] {
+            fs::create_dir_all(root.join(dir)).expect("create ignored dir");
+            fs::write(root.join(dir).join("hidden.md"), "x").expect("write hidden md");
+        }
+        fs::create_dir_all(root.join("docs")).expect("create docs");
+        fs::write(root.join("docs").join("keep.md"), "x").expect("write nested md");
+        fs::write(root.join("visible.md"), "x").expect("write root md");
+
+        let tree = scan_workspace_dir(&root).expect("scan tree");
+        let labels = tree
+            .children
+            .iter()
+            .map(|node| node.label.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(labels, vec!["docs", "visible.md"]);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn workspace_scan_stops_at_depth_limit() {
+        let root = std::env::temp_dir().join(format!("rumark-depth-test-{}", uuid::Uuid::new_v4()));
+        let mut deep = root.clone();
+        for level in 0..=WORKSPACE_SCAN_MAX_DEPTH + 2 {
+            deep.push(format!("d{level}"));
+        }
+        fs::create_dir_all(&deep).expect("create deep dirs");
+        fs::write(deep.join("too-deep.md"), "x").expect("write deep md");
+
+        let tree = scan_workspace_dir(&root).expect("scan tree");
+        let mut node = &tree;
+        let mut visited = 0;
+        while let Some(child) = node.children.first() {
+            node = child;
+            visited += 1;
+            assert!(visited <= WORKSPACE_SCAN_MAX_DEPTH, "扫描深度不应超过上限");
+        }
+        assert_eq!(visited, WORKSPACE_SCAN_MAX_DEPTH);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn workspace_scan_degrades_on_unreadable_child_dir() {
+        let root =
+            std::env::temp_dir().join(format!("rumark-degrade-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("create root");
+        let missing = root.join("gone");
+
+        let node = scan_workspace_dir_at(&missing, 1, false)
+            .expect("子目录不可读应降级为空节点，而不是整树失败");
+        assert!(node.children.is_empty());
+        assert!(matches!(node.kind, WorkspaceTreeKind::Directory(_)));
+        assert!(
+            scan_workspace_dir_at(&missing, 0, true).is_err(),
+            "根目录不可读仍应报错给 UI"
+        );
 
         let _ = fs::remove_dir_all(root);
     }

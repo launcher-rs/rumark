@@ -77,8 +77,9 @@ pub(crate) enum ImageResolvedSource {
     Local(PathBuf),
     /// 由 GPUI HTTP 客户端处理的 HTTP(S) 图片网址。
     Remote(SharedUri),
-    /// 内嵌的 `data:` URI 图片（base64 解码后的字节，渲染时直供图片组件）。
-    Embedded { format: ImageFormat, bytes: Vec<u8> },
+    /// 内嵌的 `data:` URI 图片：base64 解码与 `Image::from_bytes` 的全字节哈希
+    /// 只在图片运行时重建时做一次，渲染帧直接复用同一个 `Arc<Image>`。
+    Embedded { image: Arc<Image> },
 }
 
 /// 按 MIME 类型映射图片格式（内嵌 `data:` URI 解码与剪贴板图片复用）。
@@ -147,10 +148,13 @@ pub(crate) fn resolve_image_source(source: &str, base_dir: Option<&Path>) -> Ima
     }
 
     // 内嵌图片优先于路径解析：`data:` 不是合法文件路径，直接解码供渲染直用。
+    // 解码结果与 `Arc` 一并放进运行时，避免逐帧 base64 解码 + 全字节哈希。
     if source.starts_with("data:")
         && let Some((format, bytes)) = parse_embedded_data_uri(source)
     {
-        return ImageResolvedSource::Embedded { format, bytes };
+        return ImageResolvedSource::Embedded {
+            image: Arc::new(Image::from_bytes(format, bytes)),
+        };
     }
 
     let path = Path::new(source);
@@ -169,9 +173,7 @@ pub(crate) fn img_for_resolved_source(source: ImageResolvedSource) -> Img {
     match source {
         ImageResolvedSource::Local(path) => img(path),
         ImageResolvedSource::Remote(uri) => img(uri),
-        ImageResolvedSource::Embedded { format, bytes } => {
-            img(Arc::new(Image::from_bytes(format, bytes)))
-        }
+        ImageResolvedSource::Embedded { image } => img(image),
     }
 }
 
@@ -1151,9 +1153,15 @@ mod tests {
         assert_eq!(format, rgpui::ImageFormat::Png);
         assert!(!bytes.is_empty());
         match resolve_image_source(uri, None) {
-            ImageResolvedSource::Embedded { format, bytes } => {
-                assert_eq!(format, rgpui::ImageFormat::Png);
-                assert!(!bytes.is_empty());
+            ImageResolvedSource::Embedded { image } => {
+                assert_eq!(image.format, rgpui::ImageFormat::Png);
+                assert!(!image.bytes.is_empty());
+                // 同一来源重复解析应拿到内容一致的 Image，且 id 按内容稳定。
+                let again = resolve_image_source(uri, None);
+                let ImageResolvedSource::Embedded { image: second } = again else {
+                    panic!("expected embedded source");
+                };
+                assert_eq!(image.id, second.id);
             }
             other => panic!("expected embedded source, got {other:?}"),
         }

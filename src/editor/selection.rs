@@ -1931,6 +1931,33 @@ mod tests {
     }
 
     #[test]
+    fn cross_block_copy_keeps_literal_intraword_underscore() {
+        // 回归：单行复制走可见文本正常，跨块复制取序列化源码时曾把
+        // 字面 `_` 写成 `\_`，粘贴后多出一个反斜杠。
+        let mut cx = TestAppContext::single();
+        init_editor_test_app(&mut cx);
+        let source = "111111_22222222\n\n3333333";
+        let editor = cx.new(|cx| Editor::from_markdown(cx, source.to_string(), None));
+
+        editor.update(&mut cx, |editor, cx| {
+            let visible = editor.document.visible_blocks().to_vec();
+            assert_eq!(visible.len(), 2);
+            let end_len = visible[1].entity.read(cx).plain_len();
+            set_selection(editor, 0, 0, 1, end_len, cx);
+
+            let copied = editor
+                .cross_block_selected_markdown(cx)
+                .expect("应生成跨块复制文本");
+            assert!(
+                !copied.contains("\\_"),
+                "复制文本不应带冗余转义：{copied:?}"
+            );
+            assert_eq!(copied, source);
+        });
+        cx.quit();
+    }
+
+    #[test]
     fn cross_block_cut_writes_markdown_deletes_range_and_undo_restores() {
         let mut cx = TestAppContext::single();
         init_editor_test_app(&mut cx);

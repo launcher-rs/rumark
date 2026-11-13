@@ -1,12 +1,12 @@
 //! Mermaid 围栏块解析与 SVG 渲染辅助。
 
 use std::collections::hash_map::DefaultHasher;
-use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, anyhow};
-use directories::ProjectDirs;
+use anyhow::anyhow;
+
+use crate::components::svg_cache::{load_svg, svg_cache_dir};
 
 const MERMAID_SIMPLE_LINE_LIMIT: usize = 8;
 const MERMAID_COMPLEX_TARGET_WIDTH_RATIO: f32 = 0.9;
@@ -150,30 +150,11 @@ fn render_mermaid_svg_for_display_with(
 
     let display_key = mermaid_display_cache_key(&source.body, scale);
     let display_path = mermaid_display_cache_path(&display_key)?;
-    if display_path.exists() {
-        let svg = fs::read_to_string(&display_path).with_context(|| {
-            format!(
-                "failed to read Mermaid display SVG cache '{}'",
-                display_path.display()
-            )
-        })?;
-        let size = mermaid_svg_intrinsic_size(&svg)?;
-        return Ok(MermaidRender {
-            path: display_path,
-            svg,
-            display_width: size.width,
-            display_height: size.height,
-            display_scale: scale,
-        });
-    }
-
-    let (svg, size) = scale_mermaid_svg_for_display(&base_svg, scale)?;
-    crate::atomic_file::write_text(&display_path, &svg).with_context(|| {
-        format!(
-            "failed to write Mermaid display SVG cache '{}'",
-            display_path.display()
-        )
+    let svg = load_svg(&display_path, || {
+        let (scaled, _) = scale_mermaid_svg_for_display(&base_svg, scale)?;
+        Ok(scaled)
     })?;
+    let size = mermaid_svg_intrinsic_size(&svg)?;
     Ok(MermaidRender {
         path: display_path,
         svg,
@@ -191,20 +172,7 @@ fn render_mermaid_to_svg_cached_with(
     path: &Path,
     renderer: MermaidRenderer,
 ) -> anyhow::Result<String> {
-    if path.exists() {
-        return fs::read_to_string(path).with_context(|| {
-            format!("failed to read Mermaid base SVG cache '{}'", path.display())
-        });
-    }
-
-    let svg = renderer(source)?;
-    crate::atomic_file::write_text(path, &svg).with_context(|| {
-        format!(
-            "failed to write Mermaid base SVG cache '{}'",
-            path.display()
-        )
-    })?;
-    Ok(svg)
+    load_svg(path, || renderer(source))
 }
 
 /// 调用底层渲染器渲染原始 SVG。
@@ -230,7 +198,9 @@ pub(crate) fn mermaid_cache_key(source: &str) -> String {
 pub(crate) fn mermaid_display_cache_key(source: &str, scale: f32) -> String {
     let mut hasher = DefaultHasher::new();
     mermaid_cache_key(source).hash(&mut hasher);
-    scale.max(0.1).to_bits().hash(&mut hasher);
+    // 量化到 0.01：连续 resize 的亚像素抖动不应无限生成缓存文件。
+    let quantized_scale = (scale.max(0.1) * 100.0).round() as u64;
+    quantized_scale.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
 
@@ -502,17 +472,6 @@ fn svg_root_attrs(root_tag: &str) -> Vec<SvgRootAttr> {
     attrs
 }
 
-/// 取 Mermaid SVG 缓存目录。
-fn mermaid_cache_dir() -> anyhow::Result<PathBuf> {
-    let root = ProjectDirs::from("rs", "launcher", "Rumark")
-        .map(|dirs| dirs.cache_dir().to_path_buf())
-        .unwrap_or_else(|| std::env::temp_dir().join("Rumark"));
-    let dir = root.join("mermaid-svg");
-    fs::create_dir_all(&dir)
-        .with_context(|| format!("failed to create Mermaid SVG cache '{}'", dir.display()))?;
-    Ok(dir)
-}
-
 /// 取基础缓存文件路径。
 fn mermaid_base_cache_path(key: &str) -> anyhow::Result<PathBuf> {
     mermaid_cache_file_path("base", key)
@@ -525,13 +484,7 @@ fn mermaid_display_cache_path(key: &str) -> anyhow::Result<PathBuf> {
 
 /// 拼接缓存文件路径。
 fn mermaid_cache_file_path(kind: &str, key: &str) -> anyhow::Result<PathBuf> {
-    let dir = mermaid_cache_dir()?.join(kind);
-    fs::create_dir_all(&dir).with_context(|| {
-        format!(
-            "failed to create Mermaid {kind} SVG cache '{}'",
-            dir.display()
-        )
-    })?;
+    let dir = svg_cache_dir(&format!("mermaid-svg/{kind}"))?;
     Ok(dir.join(format!("{key}.svg")))
 }
 
@@ -588,6 +541,7 @@ fn looks_like_supported_mermaid_source(source: &str) -> bool {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::fs;
     use std::sync::{Mutex, OnceLock};
 
     static TEST_RENDERER_CALLS: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
@@ -719,6 +673,20 @@ mod tests {
     }
 
     #[test]
+    fn display_cache_key_is_stable_for_subpixel_scale_differences() {
+        let source = "flowchart LR\nA --> B";
+        assert_eq!(
+            mermaid_display_cache_key(source, 1.25),
+            mermaid_display_cache_key(source, 1.2501),
+            "亚像素缩放不应生成新缓存文件"
+        );
+        assert_ne!(
+            mermaid_display_cache_key(source, 1.25),
+            mermaid_display_cache_key(source, 1.5)
+        );
+    }
+
+    #[test]
     fn display_svg_scaling_rewrites_root_dimensions() {
         let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50" viewBox="0 0 100 50"><rect width="100" height="50"/></svg>"#;
         let (scaled, size) = scale_mermaid_svg_for_display(svg, 2.0).expect("scaled svg");
@@ -835,6 +803,29 @@ mod tests {
         assert!(second.path.exists());
         assert_eq!(second.display_width, first.display_width);
         assert_eq!(second.display_height, first.display_height);
+
+        remove_cache_file(&second.path);
+        remove_cache_file(&base_path);
+    }
+
+    /// 磁盘文件被外部清理时，内存副本要能补写回来且不重新渲染。
+    #[test]
+    fn memory_cache_restores_deleted_display_file_without_rerendering() {
+        let source = unique_mermaid_source("memory-cache-restores-deleted-display-file");
+        let base_key = mermaid_cache_key(&source.body);
+        let base_path = mermaid_base_cache_path(&base_key).expect("base path");
+        remove_cache_file(&base_path);
+
+        reset_renderer_calls(&source.body);
+        let first = render_mermaid_svg_for_display_with(&source, 720.0, 960.0, test_renderer)
+            .expect("first render");
+        assert_eq!(renderer_calls(&source.body), 1);
+        remove_cache_file(&first.path);
+
+        let second = render_mermaid_svg_for_display_with(&source, 720.0, 960.0, test_renderer)
+            .expect("cached render");
+        assert_eq!(renderer_calls(&source.body), 1, "不应重新渲染底层图表");
+        assert!(second.path.exists(), "内存副本应补写回磁盘");
 
         remove_cache_file(&second.path);
         remove_cache_file(&base_path);

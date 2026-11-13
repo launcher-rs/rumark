@@ -1024,6 +1024,55 @@ async fn dirty_drop_saves_existing_document_before_replace(cx: &mut TestAppConte
 }
 
 #[rgpui::test]
+async fn save_as_writes_latest_text_edited_during_dialog(cx: &mut TestAppContext) {
+    init_editor_test_app(cx);
+
+    let path = temp_markdown_path("save-as-live");
+    let cleanup = path.clone();
+    cx.on_quit(move || {
+        let _ = fs::remove_file(&cleanup);
+    });
+
+    let (editor, cx) =
+        cx.add_window_view(|_window, cx| Editor::from_markdown(cx, "original".to_string(), None));
+    redraw(cx);
+
+    // 打开另存为对话框：旧实现会在此刻先序列化 "original" 快照。
+    cx.update(|window, cx| {
+        editor.update(cx, |editor, cx| editor.save_document(window, cx));
+    });
+    redraw(cx);
+
+    // 对话框仍开着时继续编辑文档。
+    editor.update(cx, |editor, cx| {
+        let first = editor.document.first_root().expect("root").clone();
+        first.update(cx, |block, _cx| {
+            block
+                .record
+                .set_title(InlineTextTree::plain("edited".to_string()));
+            block.refresh_render_cache();
+        });
+        editor.mark_dirty(cx);
+    });
+
+    cx.simulate_new_path_selection(|_| Some(path.clone()));
+    redraw(cx);
+    cx.run_until_parked();
+
+    assert_eq!(
+        fs::read_to_string(&path).expect("read saved markdown"),
+        "edited",
+        "应保存编辑后的当前文本，而不是弹框前的旧快照"
+    );
+    editor.read_with(cx, |editor, cx| {
+        assert_eq!(editor.file_path.as_ref(), Some(&path));
+        assert_eq!(editor.current_document_source(cx), "edited");
+        assert!(!editor.document_dirty);
+    });
+    cx.quit();
+}
+
+#[rgpui::test]
 async fn close_window_menu_action_closes_only_active_editor_window(cx: &mut TestAppContext) {
     init_editor_test_app(cx);
 

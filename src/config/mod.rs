@@ -1,5 +1,6 @@
 //! 应用偏好与导入配置包共用的用户配置工具。
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, bail};
@@ -17,6 +18,17 @@ pub(crate) use preferences::{
 };
 
 pub(crate) const RECENT_LIMIT: usize = 20;
+
+// 测试用：按线程统计 `recent_path_key` 调用次数，防止去重退回 O(N²) 的 canonicalize。
+#[cfg(test)]
+thread_local! {
+    static RECENT_PATH_KEY_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn take_recent_path_key_calls() -> usize {
+    RECENT_PATH_KEY_CALLS.with(|count| count.replace(0))
+}
 
 /// 拾墨拥有的跨平台配置目录。
 #[derive(Debug, Clone)]
@@ -151,7 +163,8 @@ pub(crate) fn record_recent_file_with_dirs(
 
     let mut paths = read_recent_files_with_dirs(dirs)?;
     let path = path.to_path_buf();
-    paths.retain(|existing| !same_recent_path(existing, &path));
+    let target_key = recent_path_key(&path);
+    paths.retain(|existing| recent_path_key(existing) != target_key);
     paths.insert(0, path);
     paths.truncate(RECENT_LIMIT);
     write_recent_files_with_dirs(&paths, dirs)?;
@@ -164,7 +177,8 @@ pub(crate) fn remove_recent_file_with_dirs(
     dirs: &RumarkConfigDirs,
 ) -> anyhow::Result<Vec<PathBuf>> {
     let mut paths = read_recent_files_with_dirs(dirs)?;
-    paths.retain(|existing| !same_recent_path(existing, path));
+    let target_key = recent_path_key(path);
+    paths.retain(|existing| recent_path_key(existing) != target_key);
     write_recent_files_with_dirs(&paths, dirs)?;
     Ok(paths)
 }
@@ -202,6 +216,9 @@ fn write_recent_files_with_dirs(paths: &[PathBuf], dirs: &RumarkConfigDirs) -> a
 /// 规范化最近文件列表（去空去重并截断）。
 fn normalize_recent_files(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
     let mut normalized: Vec<PathBuf> = Vec::new();
+    // 每条路径只算一次比较键：原来与已保留项两两比对会让 canonicalize
+    // 变成 O(N²) 次系统调用，打开文件时逐条卡在磁盘 IO 上。
+    let mut seen: HashSet<String> = HashSet::new();
     for path in paths {
         let text = path.to_string_lossy();
         let trimmed = text.trim();
@@ -212,10 +229,7 @@ fn normalize_recent_files(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathB
         if !is_recordable_recent_file_path(&path) {
             continue;
         }
-        if normalized
-            .iter()
-            .any(|existing| same_recent_path(existing, &path))
-        {
+        if !seen.insert(recent_path_key(&path)) {
             continue;
         }
         normalized.push(path);
@@ -270,17 +284,14 @@ fn has_rumark_temp_fixture_name(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// 比较两条最近文件路径是否指向同一文件。
-fn same_recent_path(left: &Path, right: &Path) -> bool {
-    recent_path_key(left) == recent_path_key(right)
-}
-
 /// 计算用于去重的路径比较键。
 ///
 /// 同一文件可能以不同写法被记录（相对/绝对、`.`/`..` 段、Windows 的 `/` 与 `\`、
 /// 长路径前缀 `\\?\`、大小写等），逐字比较字符串会留下重复项。已存在的路径先做
 /// 规范化解析，失败时退回原路径；仅在比较时使用，不改写历史文件里保存的原始写法。
 fn recent_path_key(path: &Path) -> String {
+    #[cfg(test)]
+    RECENT_PATH_KEY_CALLS.with(|count| count.set(count.get() + 1));
     let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if cfg!(windows) {
         let text = resolved.to_string_lossy().replace('\\', "/");
@@ -446,8 +457,9 @@ pub(crate) fn object_without_empty_values(mut object: Map<String, Value>) -> Map
 mod tests {
     use super::{
         RECENT_LIMIT, RumarkConfigDirs, clear_recent_files_with_dirs, drop_empty_json_values,
-        parse_jsonc, read_recent_files_with_dirs, record_recent_file_with_dirs,
-        remove_jsonc_comments, remove_recent_file_with_dirs, sanitize_config_stem,
+        normalize_recent_files, parse_jsonc, read_recent_files_with_dirs,
+        record_recent_file_with_dirs, remove_jsonc_comments, remove_recent_file_with_dirs,
+        sanitize_config_stem, take_recent_path_key_calls,
     };
     use serde_json::json;
     use std::path::{Path, PathBuf};
@@ -599,6 +611,19 @@ mod tests {
         assert!(dirs.history_file().exists());
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn normalizing_recent_files_canonicalizes_each_path_once() {
+        // 旧实现与已保留项两两比对，N 条路径要做 O(N²) 次 canonicalize。
+        let paths: Vec<PathBuf> = (0..RECENT_LIMIT * 2)
+            .map(|index| PathBuf::from(format!("D:/docs/note-{index}.md")))
+            .collect();
+        let _ = take_recent_path_key_calls();
+        let normalized = normalize_recent_files(paths);
+        let calls = take_recent_path_key_calls();
+        assert_eq!(normalized.len(), RECENT_LIMIT);
+        assert_eq!(calls, RECENT_LIMIT, "每条候选路径只应解析一次比较键");
     }
 
     #[test]

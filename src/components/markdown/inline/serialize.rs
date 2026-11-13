@@ -156,6 +156,27 @@ fn escape_html_attr(value: &str) -> String {
     escaped
 }
 
+/// 判断 `index` 处的 `_` 是否夹在同一片段的词字符之间。
+///
+/// 前后均为非空白、非 ASCII 标点时，`delimiter_flanking` 会同时给出
+/// `left = right = true`，`can_open_emphasis` / `can_close_emphasis` 对 `_`
+/// 都会返回假。这里只放宽「同一片段内」的情形，跨片段边界仍按可能紧邻
+/// 样式标记处理，保持转义。
+fn is_intraword_underscore(text: &str, index: usize) -> bool {
+    let before = text[..index].chars().next_back();
+    let after = text[index + 1..].chars().next();
+    matches!(
+        (before, after),
+        (Some(before), Some(after))
+            if is_word_char(before) && is_word_char(after)
+    )
+}
+
+/// 词字符：字母数字与下划线本身（`foo__bar` 的连续下划线同样安全）。
+fn is_word_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
+}
+
 /// 转义普通文本并建映射。
 fn escape_literal_text_with_offset_map(text: &str) -> MarkdownOffsetMap {
     let mut escaped = String::new();
@@ -259,7 +280,10 @@ fn escape_literal_text_with_offset_map(text: &str) -> MarkdownOffsetMap {
             continue;
         }
 
-        if text[index..].starts_with('_') {
+        // 词内 `_` 按 CommonMark 侧翼规则既不能开启也不能闭合强调，
+        // 保留字面量即可；否则保存/跨块复制会凭空多出 `\_`。
+        // 片段边界仍保守转义：相邻片段的样式标记会把 `_` 变成侧翼分隔符。
+        if text[index..].starts_with('_') && !is_intraword_underscore(text, index) {
             let start = escaped.len();
             escaped.push_str("\\_");
             markdown_to_visible.resize(escaped.len() + 1, index);

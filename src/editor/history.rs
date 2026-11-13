@@ -34,11 +34,12 @@ impl Editor {
         let Some(target) = self.current_edit_target_from_state(cx) else {
             return self.last_selection_snapshot.clone();
         };
-        let Some(mapping) = self
-            .build_source_target_mappings(cx)
-            .into_iter()
-            .find(|mapping| mapping.entity.entity_id() == target.entity_id())
-        else {
+        // 借用派生缓存并按实体标识索引，避免每帧为取一个光标偏移就克隆整份映射。
+        let derived = self.derived_document(cx);
+        let Some(&index) = derived.mapping_index_by_entity.get(&target.entity_id()) else {
+            return self.last_selection_snapshot.clone();
+        };
+        let Some(mapping) = derived.mappings.get(index) else {
             return self.last_selection_snapshot.clone();
         };
 
@@ -61,7 +62,7 @@ impl Editor {
     /// 捕获当前文档的历史记录条目（含源码与选区）。
     pub(super) fn capture_history_entry(&self, kind: UndoKind, cx: &App) -> UndoEntry {
         UndoEntry {
-            source_text: self.current_document_source(cx),
+            source_text: self.current_document_source_arc(cx),
             selection: self.capture_source_selection_snapshot(cx),
             timestamp: Instant::now(),
             kind,
@@ -101,7 +102,7 @@ impl Editor {
     /// 刷新稳定的文档快照（源码文本与选区）。
     pub(super) fn refresh_stable_document_snapshot(&mut self, cx: &App) {
         self.last_selection_snapshot = self.capture_source_selection_snapshot(cx);
-        self.last_stable_source_text = self.current_document_source(cx);
+        self.last_stable_source_text = self.current_document_source_arc(cx);
     }
 
     /// 收尾挂起的撤销捕获：无变化丢弃，相邻输入按时间窗合并。
@@ -116,8 +117,9 @@ impl Editor {
             return;
         };
 
-        let current_source = self.current_document_source(cx);
-        if current_source == pending.snapshot.source_text {
+        // 直接复用派生缓存的共享文本做比较，避免为「有无变化」再拷贝整篇源码。
+        let current_source = self.current_document_source_arc(cx);
+        if *current_source == *pending.snapshot.source_text {
             self.refresh_stable_document_snapshot(cx);
             return;
         }
@@ -136,12 +138,38 @@ impl Editor {
             });
         if !should_merge {
             self.undo_history.push(pending.snapshot);
-            if self.undo_history.len() > Self::UNDO_LIMIT {
-                let overflow = self.undo_history.len() - Self::UNDO_LIMIT;
-                self.undo_history.drain(0..overflow);
-            }
+            Self::trim_history(
+                &mut self.undo_history,
+                Self::UNDO_LIMIT,
+                Self::HISTORY_BYTES_LIMIT,
+            );
         }
         self.refresh_stable_document_snapshot(cx);
+    }
+
+    /// 从最旧的条目开始裁剪历史：先限条数，再限源码字节总量。
+    ///
+    /// 撤销/重做回压也会推入条目，只限制 `finalize_pending_undo_capture`
+    /// 会让这两条路径无限增长；这里给两个栈统一套用。
+    fn trim_history(history: &mut Vec<UndoEntry>, max_entries: usize, max_bytes: usize) {
+        if history.len() > max_entries {
+            let overflow = history.len() - max_entries;
+            history.drain(0..overflow);
+        }
+
+        let mut total: usize = history.iter().map(|entry| entry.source_text.len()).sum();
+        if total <= max_bytes {
+            return;
+        }
+        let mut remove = 0;
+        for entry in history.iter() {
+            if total <= max_bytes {
+                break;
+            }
+            total = total.saturating_sub(entry.source_text.len());
+            remove += 1;
+        }
+        history.drain(0..remove);
     }
 
     /// 在当前视图模式下应用选区快照。
@@ -287,7 +315,8 @@ impl Editor {
     pub(super) fn restore_history_entry(&mut self, entry: &UndoEntry, cx: &mut Context<Self>) {
         match self.view_mode {
             ViewMode::Rendered => {
-                let mut roots = Self::build_root_blocks_from_markdown(cx, &entry.source_text);
+                let mut roots =
+                    Self::build_root_blocks_from_markdown(cx, entry.source_text.as_ref());
                 if roots.is_empty() {
                     roots.push(Self::new_block(cx, BlockRecord::paragraph(String::new())));
                 }
@@ -296,7 +325,8 @@ impl Editor {
                 self.rebuild_image_runtimes(cx);
             }
             ViewMode::Source => {
-                let block = Self::new_block(cx, BlockRecord::paragraph(entry.source_text.clone()));
+                let block =
+                    Self::new_block(cx, BlockRecord::paragraph(entry.source_text.to_string()));
                 block.update(cx, |block, _cx| block.enable_source_document_mode());
                 self.document.replace_roots(vec![block], cx);
                 self.table_cells.clear();
@@ -345,6 +375,11 @@ impl Editor {
         self.restore_history_entry(&entry, cx);
         self.history_restore_in_progress = false;
         self.redo_history.push(current);
+        Self::trim_history(
+            &mut self.redo_history,
+            Self::UNDO_LIMIT,
+            Self::HISTORY_BYTES_LIMIT,
+        );
         self.mark_dirty(cx);
         self.sync_table_axis_visuals(cx);
         self.dismiss_contextual_overlays(cx);
@@ -365,6 +400,11 @@ impl Editor {
         self.restore_history_entry(&entry, cx);
         self.history_restore_in_progress = false;
         self.undo_history.push(current);
+        Self::trim_history(
+            &mut self.undo_history,
+            Self::UNDO_LIMIT,
+            Self::HISTORY_BYTES_LIMIT,
+        );
         self.mark_dirty(cx);
         self.sync_table_axis_visuals(cx);
         self.dismiss_contextual_overlays(cx);
@@ -374,7 +414,11 @@ impl Editor {
 
 #[cfg(test)]
 mod tests {
-    use super::Editor;
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    // 不能用 `use super::*`：会把 `rgpui::*` 的 `test` 属性宏带进来遮蔽内置 `#[test]`。
+    use super::{Editor, UndoEntry, UndoKind};
 
     /// 构造源码区间（测试辅助）。
     fn range(start: usize, end: usize) -> std::ops::Range<usize> {
@@ -413,5 +457,70 @@ mod tests {
         let snapshot = Editor::empty_selection_snapshot();
         assert_eq!(snapshot.range, 0..0);
         assert!(!snapshot.reversed);
+    }
+
+    /// 构造一条历史记录（测试辅助）。
+    fn history_entry(text: &str) -> UndoEntry {
+        UndoEntry {
+            source_text: Arc::from(text),
+            selection: Editor::empty_selection_snapshot(),
+            timestamp: Instant::now(),
+            kind: UndoKind::NonCoalescible,
+        }
+    }
+
+    /// 收集历史栈中的源码文本，便于断言裁剪结果。
+    fn history_texts(history: &[UndoEntry]) -> Vec<&str> {
+        history
+            .iter()
+            .map(|entry| entry.source_text.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn trim_history_enforces_entry_limit_and_keeps_newest() {
+        let mut history: Vec<UndoEntry> = ["a", "b", "c", "d", "e"]
+            .into_iter()
+            .map(history_entry)
+            .collect();
+
+        Editor::trim_history(&mut history, 3, usize::MAX);
+
+        assert_eq!(history_texts(&history), vec!["c", "d", "e"]);
+    }
+
+    #[test]
+    fn trim_history_enforces_byte_limit_and_keeps_newest() {
+        // 5 条 × 10 字节 = 50，上限 25 时须从最旧开始丢弃 3 条。
+        let mut history: Vec<UndoEntry> = (0..5)
+            .map(|index| history_entry(&format!("{:0>10}", index)))
+            .collect();
+
+        Editor::trim_history(&mut history, usize::MAX, 25);
+
+        assert_eq!(history_texts(&history), vec!["0000000003", "0000000004"]);
+        assert!(history.iter().map(|e| e.source_text.len()).sum::<usize>() <= 25);
+    }
+
+    #[test]
+    fn trim_history_applies_both_limits_in_order() {
+        // 先按条数裁剪，再按字节裁剪，两个约束都要满足。
+        let mut history: Vec<UndoEntry> = (0..6)
+            .map(|index| history_entry(&format!("{:0>10}", index)))
+            .collect();
+
+        Editor::trim_history(&mut history, 4, 25);
+
+        assert!(history.len() <= 4);
+        assert!(history.iter().map(|e| e.source_text.len()).sum::<usize>() <= 25);
+        assert_eq!(history_texts(&history), vec!["0000000004", "0000000005"]);
+    }
+
+    #[test]
+    fn cloned_history_entries_share_source_text_allocation() {
+        let entry = history_entry("# 共享的整篇源码快照");
+        let cloned = entry.clone();
+
+        assert!(Arc::ptr_eq(&entry.source_text, &cloned.source_text));
     }
 }

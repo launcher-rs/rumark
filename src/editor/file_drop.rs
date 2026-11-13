@@ -1,6 +1,7 @@
 //! 外部 Markdown 文件拖放：替换当前编辑器窗口的文档。
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Result;
 use rgpui::*;
@@ -156,7 +157,7 @@ impl Editor {
         self.redo_history.clear();
         self.pending_undo_capture = None;
         self.last_selection_snapshot = Self::empty_selection_snapshot();
-        self.last_stable_source_text = normalized;
+        self.last_stable_source_text = Arc::from(normalized);
         self.history_restore_in_progress = false;
         self.refresh_stable_document_snapshot(cx);
         self.sync_workspace_after_document_path_change(cx);

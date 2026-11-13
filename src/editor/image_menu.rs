@@ -80,7 +80,7 @@ impl ImageMenuData {
                     .unwrap_or(ImageFormat::Png);
                 Ok((format, bytes))
             }
-            ImageResolvedSource::Embedded { format, bytes } => Ok((*format, bytes.clone())),
+            ImageResolvedSource::Embedded { image } => Ok((image.format, image.bytes.clone())),
             ImageResolvedSource::Remote(_) => {
                 anyhow::bail!("远端图片需先下载，暂不读取本地字节")
             }
@@ -756,8 +756,10 @@ mod tests {
 
         let embedded = ImageMenuData {
             resolved: ImageResolvedSource::Embedded {
-                format: rgpui::ImageFormat::Png,
-                bytes: vec![1, 2, 3, 4],
+                image: std::sync::Arc::new(rgpui::Image::from_bytes(
+                    rgpui::ImageFormat::Png,
+                    vec![1, 2, 3, 4],
+                )),
             },
             ..base.clone()
         };

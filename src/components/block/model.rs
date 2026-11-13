@@ -591,10 +591,14 @@ impl BlockRecord {
     }
 
     /// 设置块标题。
+    ///
+    /// 所有内容变更都必须经这三个 setter：它们同时递增块版本号与全局纪元，
+    /// 否则派生数据缓存会读到旧内容（见 `editor/derive.rs`）。
     pub fn set_title(&mut self, title: InlineTextTree) {
         self.title = title;
         self.sync_raw_fallback();
         self.content_version = self.content_version.wrapping_add(1);
+        crate::components::bump_document_content_epoch();
     }
 
     /// 设置块类型，并同步原始回退文本与 HTML 解析结果。
@@ -602,12 +606,14 @@ impl BlockRecord {
         self.kind = kind;
         self.sync_raw_fallback();
         self.content_version = self.content_version.wrapping_add(1);
+        crate::components::bump_document_content_epoch();
     }
 
     /// 设置表格模型。
     pub fn set_table(&mut self, table: Option<TableModel>) {
         self.table = table;
         self.content_version = self.content_version.wrapping_add(1);
+        crate::components::bump_document_content_epoch();
     }
 
     /// 把块标题导出为 Markdown：片段样式标记经 [`InlineTextTree::serialize_markdown`] 序列化回分隔符。

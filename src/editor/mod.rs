@@ -5,7 +5,7 @@
 //! [`DocumentTree`] 中，由它集中处理结构变更并缓存可见
 //! 顺序元数据。
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -35,6 +35,7 @@ mod events;
 mod file_drop;
 mod find;
 mod history;
+mod image_cache;
 mod image_menu;
 mod persistence;
 /// 文档读取入口：启动、菜单打开与拖放打开共用同一套 BOM / 编码处理。
@@ -146,15 +147,19 @@ pub struct Editor {
     redo_history: Vec<UndoEntry>,
     pending_undo_capture: Option<UndoCapture>,
     last_selection_snapshot: SelectionUndoSnapshot,
-    last_stable_source_text: String,
+    last_stable_source_text: Arc<str>,
     history_restore_in_progress: bool,
     image_reference_definitions: Arc<ImageReferenceDefinitions>,
     link_reference_definitions: Arc<LinkReferenceDefinitions>,
     footnote_registry: Arc<FootnoteRegistry>,
     /// 序列化文本/源码映射/引用定义的派生缓存，按内容指纹失效。
     derive_cache: RefCell<Option<derive::DerivedDocument>>,
+    /// 内容指纹快路：缓存 (全局内容纪元, 树修订号, 指纹)，二者未变时无需逐块扫描。
+    fingerprint_cache: Cell<Option<(u64, u64, u64)>>,
     /// 状态栏统计缓存：字数按内容指纹、行列按光标偏移、选中字数按选区指纹失效。
     status_stats_cache: RefCell<Option<status_bar::StatusStats>>,
+    /// 本窗口的图片缓存：成功结果按 LRU 限量，失败结果到期后自动重试。
+    image_cache: Entity<image_cache::BoundedImageCache>,
 }
 
 /// 表格块与某个单元格编辑器之间的运行时绑定。
@@ -230,7 +235,8 @@ struct SelectionUndoSnapshot {
 /// 单条撤销历史：源码文本与选区状态。
 #[derive(Clone, Debug)]
 struct UndoEntry {
-    source_text: String,
+    /// 整篇源码快照，内容未变时与派生缓存及其他快照共享同一份内存。
+    source_text: Arc<str>,
     selection: SelectionUndoSnapshot,
     timestamp: Instant,
     kind: UndoKind,
@@ -291,6 +297,8 @@ pub enum ViewMode {
 
 impl Editor {
     const UNDO_LIMIT: usize = 200;
+    /// 单条历史栈（撤销/重做各自）最多保留的源码字节总量。
+    const HISTORY_BYTES_LIMIT: usize = 64 * 1024 * 1024;
     const UNDO_COALESCE_WINDOW: Duration = Duration::from_millis(1_000);
     const SELECT_ALL_CYCLE_WINDOW: Duration = Duration::from_millis(750);
 
@@ -325,6 +333,7 @@ impl Editor {
 
         let file_tree_state = cx.new(|cx| TreeState::new(cx));
         let outline_tree_state = cx.new(|cx| TreeState::new(cx));
+        let image_cache = cx.new(|_cx| image_cache::BoundedImageCache::new());
 
         let mut document = DocumentTree::new(roots);
         document.rebuild_metadata_and_snapshot(cx);
@@ -387,13 +396,15 @@ impl Editor {
             redo_history: Vec::new(),
             pending_undo_capture: None,
             last_selection_snapshot: Self::empty_selection_snapshot(),
-            last_stable_source_text: normalized,
+            last_stable_source_text: Arc::from(normalized),
             history_restore_in_progress: false,
             image_reference_definitions: Arc::default(),
             link_reference_definitions: Arc::default(),
             footnote_registry: Arc::default(),
             derive_cache: RefCell::new(None),
+            fingerprint_cache: Cell::new(None),
             status_stats_cache: RefCell::new(None),
+            image_cache,
         };
         editor.rebuild_table_runtimes(cx);
         editor.rebuild_image_runtimes(cx);

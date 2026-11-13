@@ -5,6 +5,11 @@
 //! OFL 的 Noto Sans SC 优先）→ 各平台系统字体目录 → 纯英文文档回退内置
 //! Helvetica。含中文但找不到中文字体时返回可操作错误，而非输出乱码方框。
 
+use std::sync::{
+    Arc, OnceLock,
+    atomic::{AtomicUsize, Ordering},
+};
+
 use anyhow::{Context as _, anyhow};
 use printpdf::{
     BuiltinFont, Color, Line, LinePoint, Mm, Op, PaintMode, ParsedFont, PdfDocument, PdfFontHandle,
@@ -68,40 +73,67 @@ pub(crate) fn is_missing_cjk_font(error: &anyhow::Error) -> bool {
 
 /// 渲染用字体：中文外嵌字体缺席且文档含中文时直接报错。
 struct Fonts {
-    parsed: Option<ParsedFont>,
+    parsed: Option<Arc<ParsedFont>>,
     units_per_em: f32,
     space_width_units: f32,
 }
 
+/// 进程内共享的已解析字体。CJK 字体动辄数十 MB，每次导出重新读盘并解析
+/// 会把「点一次导出」变成数百毫秒的纯 CPU 开销；解析结果只读，可安全复用。
+struct CachedCjkFont {
+    parsed: Arc<ParsedFont>,
+    units_per_em: f32,
+    space_width_units: f32,
+}
+
+/// `Ok(None)` 表示机器上确实没有可用的中文字体；`Err` 保存解析失败的完整上下文。
+static CJK_FONT_CACHE: OnceLock<Result<Option<CachedCjkFont>, String>> = OnceLock::new();
+/// 字体解析次数（测试用：连续多次导出只允许解析一次）。
+static CJK_FONT_PARSES: AtomicUsize = AtomicUsize::new(0);
+
+fn cached_cjk_font() -> &'static Result<Option<CachedCjkFont>, String> {
+    CJK_FONT_CACHE.get_or_init(|| {
+        CJK_FONT_PARSES.fetch_add(1, Ordering::Relaxed);
+        let Some((bytes, index, origin)) = bundled_cjk_font().or_else(system_cjk_font) else {
+            return Ok(None);
+        };
+        let mut warnings = Vec::new();
+        let parsed = ParsedFont::from_bytes(&bytes, index, &mut warnings)
+            .with_context(|| format!("中文字体解析失败：{origin}"))
+            .map_err(|err| format!("{err:#}"))?;
+        let metrics = parsed.get_font_metrics();
+        let units_per_em = metrics.units_per_em.max(1) as f32;
+        let space_width_units = parsed
+            .lookup_glyph_index(' ' as u32)
+            .and_then(|gid| parsed.get_glyph_width_internal(gid))
+            .map(|width| width as f32)
+            .unwrap_or(units_per_em / 4.0);
+        Ok(Some(CachedCjkFont {
+            parsed: Arc::new(parsed),
+            units_per_em,
+            space_width_units,
+        }))
+    })
+}
+
 impl Fonts {
-    /// 按内嵌 → 系统 → 内置的顺序加载字体。
+    /// 按内嵌 → 系统 → 内置的顺序加载字体，命中进程级缓存时零解析。
     fn load(markdown: &str) -> anyhow::Result<Self> {
-        let need_cjk = contains_cjk(markdown);
-        if let Some((bytes, index, origin)) = bundled_cjk_font().or_else(system_cjk_font) {
-            let mut warnings = Vec::new();
-            let parsed = ParsedFont::from_bytes(&bytes, index, &mut warnings)
-                .with_context(|| format!("中文字体解析失败：{origin}"))?;
-            let metrics = parsed.get_font_metrics();
-            let units_per_em = metrics.units_per_em.max(1) as f32;
-            let space_width_units = parsed
-                .lookup_glyph_index(' ' as u32)
-                .and_then(|gid| parsed.get_glyph_width_internal(gid))
-                .map(|width| width as f32)
-                .unwrap_or(units_per_em / 4.0);
-            return Ok(Self {
-                parsed: Some(parsed),
-                units_per_em,
-                space_width_units,
-            });
+        match cached_cjk_font() {
+            Ok(Some(font)) => Ok(Self {
+                parsed: Some(font.parsed.clone()),
+                units_per_em: font.units_per_em,
+                space_width_units: font.space_width_units,
+            }),
+            Ok(None) if contains_cjk(markdown) => Err(MissingCjkFont.into()),
+            // 纯英文文档回退内置 Helvetica 的既有度量。
+            Ok(None) => Ok(Self {
+                parsed: None,
+                units_per_em: 1000.0,
+                space_width_units: 278.0,
+            }),
+            Err(message) => Err(anyhow!("{message}")),
         }
-        if need_cjk {
-            return Err(MissingCjkFont.into());
-        }
-        Ok(Self {
-            parsed: None,
-            units_per_em: 1000.0,
-            space_width_units: 278.0,
-        })
     }
 
     /// 字符串排印宽度（pt），按字形 advance 累加，缺字按半角空格回退。
@@ -940,11 +972,12 @@ fn is_cjk_boundary(piece: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        Fonts, Layout, MM_PER_PT, PT_PER_MM, contains_cjk, is_cjk_char, list_marker,
-        render_pdf_bytes, split_wrap_units,
+        CJK_FONT_PARSES, Fonts, Layout, MM_PER_PT, PT_PER_MM, contains_cjk, is_cjk_char,
+        list_marker, render_pdf_bytes, split_wrap_units,
     };
     use crate::export::{ExportOptions, parse_blocks};
     use printpdf::{BuiltinFont, PdfFontHandle};
+    use std::sync::Arc;
 
     /// 测试选项构造。
     fn test_options() -> ExportOptions {
@@ -959,6 +992,25 @@ mod tests {
         let bytes = render_pdf_bytes("# 你好\n\n世界 Hello\n", &test_options()).expect("渲染成功");
         assert!(bytes.starts_with(b"%PDF"), "前八字节：{:?}", &bytes[..8]);
         assert!(bytes.len() > 1000, "含子集字体应大于 1KB：{}", bytes.len());
+    }
+
+    #[test]
+    fn cjk_font_is_parsed_once_across_exports() {
+        use std::sync::atomic::Ordering;
+
+        // 并行测试可能已预热进程级缓存，故只断言「本次没有新增解析」。
+        let before = CJK_FONT_PARSES.load(Ordering::Relaxed);
+        render_pdf_bytes("# 第一次\n\n中文段落。\n", &test_options()).expect("首次导出成功");
+        render_pdf_bytes("# 第二次\n\n中文段落。\n", &test_options()).expect("再次导出成功");
+        let parses = CJK_FONT_PARSES.load(Ordering::Relaxed) - before;
+        assert!(parses <= 1, "连续导出不应重复解析字体：新增 {parses} 次");
+
+        // 两次导出拿到同一份解析结果（Arc 指向同一分配）。
+        let first = Fonts::load("中文").expect("字体可用");
+        let second = Fonts::load("中文").expect("字体可用");
+        if let (Some(a), Some(b)) = (first.parsed, second.parsed) {
+            assert!(Arc::ptr_eq(&a, &b), "应共享同一份字体解析结果");
+        }
     }
 
     #[test]

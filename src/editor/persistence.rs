@@ -165,8 +165,10 @@ impl Editor {
     }
 
     /// 弹框让用户选择路径后异步保存文档。
+    ///
+    /// 不在弹框前序列化：对话框期间文档可能继续被编辑，写盘前重新取当前
+    /// 文本才能避免「保存旧内容却清掉脏标记」的静默丢数据。
     fn save_document_via_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let markdown = self.serialized_document_text(cx);
         let (default_dir, suggested_name) = self.save_dialog_defaults();
         let prompt = cx.prompt_for_new_path(&default_dir, suggested_name.as_deref());
         let weak_editor = cx.entity().downgrade();
@@ -221,6 +223,12 @@ impl Editor {
                 path.set_extension("md");
             }
 
+            // 对话框结束后取「此刻」的文档，而不是弹框前的快照。
+            let Ok(markdown) = weak_editor.update(cx, |this, cx| this.serialized_document_text(cx))
+            else {
+                return;
+            };
+
             if let Err(err) = crate::atomic_file::write_text(&path, &markdown) {
                 if should_close_after_save {
                     let _ = weak_editor_for_write_error
@@ -252,8 +260,14 @@ impl Editor {
             }
 
             let path_for_state = path.clone();
+            let written = markdown.clone();
             let _ = weak_editor.update(cx, move |this, cx| {
                 this.apply_successful_save(path_for_state, cx);
+                // 写盘期间若又发生编辑，保留脏标记，让下一次保存覆盖新内容。
+                if this.serialized_document_text(cx) != written {
+                    this.document_dirty = true;
+                    this.pending_window_edited = true;
+                }
             });
             let _ = cx.update_window(
                 window_handle,

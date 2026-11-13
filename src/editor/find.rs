@@ -4,17 +4,23 @@
 //! 渲染/源码双模式复用同一跳转路径。匹配上限截断，避免大文档卡顿。
 
 use std::ops::Range;
+use std::time::Duration;
 
 use rgpui::input_ui::{Input, InputEvent, InputState};
 use rgpui::*;
 
 use super::Editor;
-use crate::components::FindInDocument;
+use crate::components::{FindInDocument, update_entity_forgiving};
 use crate::i18n::I18nManager;
 use crate::theme::{ThemeDimensions, ThemeTypography};
 
 /// 单次查找返回的最大匹配数（超出截断，计数按实际返回量显示）。
 const MAX_FIND_MATCHES: usize = 2000;
+/// 输入后延迟重搜的时长：连续逐字输入只算最后一次，避免每键全量扫描。
+const FIND_DEBOUNCE: Duration = Duration::from_millis(120);
+
+/// 上次重搜使用的键：文档未变、查询与选项未变时直接复用命中。
+type FindSearchKey = (u64, bool, String, bool, bool);
 
 /// 查找栏状态：查询/替换输入框、匹配选项与当前匹配序号。
 pub(super) struct FindBarState {
@@ -24,6 +30,10 @@ pub(super) struct FindBarState {
     pub whole_word: bool,
     pub matches: Vec<Range<usize>>,
     pub index: usize,
+    /// 未执行的延迟重搜任务；新输入会取消上一条。
+    debounce_task: Option<Task<()>>,
+    /// 上次重搜的键，用于跳过文档/查询都未变时的全量扫描。
+    search_key: Option<FindSearchKey>,
 }
 
 impl Editor {
@@ -76,6 +86,8 @@ impl Editor {
             whole_word: false,
             matches: Vec::new(),
             index: 0,
+            debounce_task: None,
+            search_key: None,
         });
         self.refresh_find_matches(cx);
         query.update(cx, |state, cx| {
@@ -130,7 +142,7 @@ impl Editor {
                 }
             }
             InputEvent::Change if is_query => {
-                self.refresh_find_matches(cx);
+                self.schedule_find_matches_refresh(cx);
             }
             _ => {}
         }
@@ -147,19 +159,67 @@ impl Editor {
         })
     }
 
+    /// 输入变化后安排一次延迟重搜：连续逐字输入只执行最后一次。
+    fn schedule_find_matches_refresh(&mut self, cx: &mut Context<Self>) {
+        let Some(bar) = self.find_bar.as_mut() else {
+            return;
+        };
+        // Task 被 drop 即取消，保证只有最后一次输入会触发重搜。
+        bar.debounce_task = None;
+        let weak = cx.entity().downgrade();
+        bar.debounce_task = Some(cx.spawn(
+            async move |_this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                cx.background_executor().timer(FIND_DEBOUNCE).await;
+                let _ = update_entity_forgiving(&weak, cx, |editor, cx| {
+                    editor.refresh_find_matches(cx);
+                });
+            },
+        ));
+        cx.notify();
+    }
+
     /// 按当前查询与文档重算匹配，定位到光标处首个匹配并跳转。
+    ///
+    /// 文档指纹、查询与选项都未变时直接复用上次命中：光标移动或重复的输入
+    /// 事件不再触发全量扫描。源码视图与渲染视图文本不同，键里带上模式。
     fn refresh_find_matches(&mut self, cx: &mut Context<Self>) {
-        let (query, match_case, whole_word, cursor) = match self.find_bar.as_ref() {
-            Some(bar) => (
-                bar.query.read(cx).value().to_string(),
-                bar.match_case,
-                bar.whole_word,
-                self.capture_source_selection_snapshot(cx).range.start,
-            ),
+        let (query, match_case, whole_word, cursor, key) = match self.find_bar.as_ref() {
+            Some(bar) => {
+                let query = bar.query.read(cx).value().to_string();
+                let is_source = self.view_mode == super::ViewMode::Source;
+                let key = (
+                    self.derived_document(cx).fingerprint(),
+                    is_source,
+                    query.clone(),
+                    bar.match_case,
+                    bar.whole_word,
+                );
+                (
+                    query,
+                    bar.match_case,
+                    bar.whole_word,
+                    self.capture_source_selection_snapshot(cx).range.start,
+                    key,
+                )
+            }
             None => return,
         };
-        let source = self.serialized_document_text(cx);
-        let matches = Self::compute_find_matches(&source, &query, match_case, whole_word);
+        if self
+            .find_bar
+            .as_ref()
+            .and_then(|bar| bar.search_key.as_ref())
+            == Some(&key)
+        {
+            // 即使复用命中，也要收掉已经执行完的防抖任务。
+            if let Some(bar) = self.find_bar.as_mut() {
+                bar.debounce_task = None;
+            }
+            return;
+        }
+
+        // 复用派生缓存的共享文本，少一次整篇源码拷贝。
+        let source = self.current_document_source_arc(cx);
+        let matches = Self::compute_find_matches(source.as_ref(), &query, match_case, whole_word);
         let index = matches
             .iter()
             .position(|range| range.start >= cursor)
@@ -167,6 +227,8 @@ impl Editor {
         if let Some(bar) = self.find_bar.as_mut() {
             bar.matches = matches;
             bar.index = index;
+            bar.search_key = Some(key);
+            bar.debounce_task = None;
         }
         self.jump_to_find_index(cx);
     }
@@ -526,9 +588,12 @@ impl Editor {
         }
         let first = query_cmp.chars().next().expect("query non-empty");
         let mut matches = Vec::new();
+        // 候选窗口复用同一缓冲区；`str::to_lowercase` 等价于逐字符
+        // `char::to_lowercase` 展开，逐字符比较可再省掉一次 String 分配。
+        let mut window = String::new();
         let mut index = 0;
         while index + query_chars.len() <= src_chars.len() && matches.len() < MAX_FIND_MATCHES {
-            // 首字符快速过滤，避免每个位置都分配窗口字符串。
+            // 首字符快速过滤，避免每个位置都构造窗口。
             let head_matches = if match_case {
                 src_chars[index] == query_chars[0]
             } else {
@@ -536,14 +601,18 @@ impl Editor {
                     || src_chars[index].to_lowercase().next() == Some(first)
             };
             if head_matches {
-                let window: String = src_chars[index..index + query_chars.len()].iter().collect();
-                // 字符边界来自 `char_indices` 推导，必为有效边界，直接切片。
-                let window_cmp = if match_case {
-                    window
+                window.clear();
+                window.extend(src_chars[index..index + query_chars.len()].iter());
+                // 字符边界来自 `char_indices` 推导，必为有效边界。
+                let matched = if match_case {
+                    window == query_cmp
                 } else {
-                    window.to_lowercase()
+                    window
+                        .chars()
+                        .flat_map(char::to_lowercase)
+                        .eq(query_cmp.chars())
                 };
-                if window_cmp == query_cmp
+                if matched
                     && (!whole_word
                         || Self::find_match_has_word_boundaries(
                             &src_chars,
@@ -617,6 +686,80 @@ fn is_find_word_char(ch: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::Editor;
+    use rgpui::{AppContext as _, TestAppContext};
+
+    /// 与 `editor::tests` 一致的测试应用初始化。
+    fn init(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            crate::i18n::I18nManager::init_with_language_id(cx, "en-US");
+            rgpui::theme::init(cx);
+            crate::components::init(cx);
+        });
+    }
+
+    #[test]
+    fn find_matches_keep_unicode_case_folding_semantics() {
+        // 逐字符 lowercase 比较应与旧的 `String::to_lowercase` 完全一致。
+        let matches = Editor::compute_find_matches("Straße STRASSE", "straße", false, false);
+        assert_eq!(matches, vec![0..7]);
+    }
+
+    #[rgpui::test]
+    async fn find_input_is_debounced_and_reuses_matches(cx: &mut TestAppContext) {
+        init(cx);
+        let (editor, cx) = cx.add_window_view(|window, cx| {
+            let mut editor = Editor::from_markdown(cx, "alpha beta alpha".to_string(), None);
+            let query = cx.new(|cx| {
+                rgpui::input_ui::InputState::new(window, cx)
+                    .default_value("alpha")
+                    .submit_on_enter(true)
+            });
+            let replace = cx.new(|cx| rgpui::input_ui::InputState::new(window, cx));
+            editor.find_bar = Some(super::FindBarState {
+                query,
+                replace,
+                match_case: false,
+                whole_word: false,
+                matches: Vec::new(),
+                index: 0,
+                debounce_task: None,
+                search_key: None,
+            });
+            editor
+        });
+
+        // 模拟 `InputEvent::Change`：只排队，不立即全量重搜。
+        editor.update(cx, |editor, cx| {
+            editor.schedule_find_matches_refresh(cx);
+            let bar = editor.find_bar.as_ref().expect("查找栏应已打开");
+            assert!(bar.debounce_task.is_some(), "应存在未执行的防抖任务");
+            assert!(bar.matches.is_empty(), "防抖期内不应更新命中");
+        });
+        // 连续输入再排一次，旧任务应被取消而不是叠加。
+        editor.update(cx, |editor, cx| {
+            editor.schedule_find_matches_refresh(cx);
+            assert!(editor.find_bar.as_ref().unwrap().debounce_task.is_some());
+        });
+
+        // 时钟推进后执行最后一次重搜。
+        cx.executor().advance_clock(super::FIND_DEBOUNCE);
+        cx.run_until_parked();
+        editor.update(cx, |editor, _cx| {
+            let bar = editor.find_bar.as_ref().expect("查找栏应仍打开");
+            assert_eq!(bar.matches.len(), 2, "应命中两处 alpha");
+            assert!(bar.debounce_task.is_none(), "重搜完成后任务应被清空");
+            assert!(bar.search_key.is_some(), "应记录本次重搜的键");
+        });
+
+        // 文档、查询、选项都未变时直接复用命中，不再触发全量扫描。
+        editor.update(cx, |editor, cx| {
+            let before = editor.find_bar.as_ref().unwrap().matches.clone();
+            editor.refresh_find_matches(cx);
+            assert_eq!(editor.find_bar.as_ref().unwrap().matches, before);
+        });
+
+        cx.quit();
+    }
 
     #[test]
     fn find_matches_are_case_insensitive_and_bounded() {

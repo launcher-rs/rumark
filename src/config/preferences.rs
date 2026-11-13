@@ -1,7 +1,10 @@
 //! 持久化应用偏好与偏好设置窗口。
 
-use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
 
 use anyhow::Context as _;
 use rgpui::components::Select;
@@ -406,6 +409,48 @@ impl From<&AppPreferences> for PreferencesFile {
     }
 }
 
+/// 偏好文件签名：`None` 表示文件不存在；`(修改时间, 长度)` 用于感知外部改动。
+type PreferencesSignature = Option<(SystemTime, u64)>;
+
+#[derive(Clone)]
+struct CachedPreferences {
+    signature: PreferencesSignature,
+    value: AppPreferences,
+}
+
+/// 进程内偏好缓存，按配置文件路径隔离：多窗口共享同一份，测试临时目录互不干扰。
+static PREFERENCES_CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedPreferences>>> = OnceLock::new();
+/// 缓存命中次数（测试观测点，用于验证重复读取不再解析磁盘）。
+static PREFERENCES_CACHE_HITS: AtomicUsize = AtomicUsize::new(0);
+
+fn preferences_cache() -> &'static Mutex<HashMap<PathBuf, CachedPreferences>> {
+    PREFERENCES_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn preferences_signature(path: &Path) -> PreferencesSignature {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some((metadata.modified().ok()?, metadata.len()))
+}
+
+fn cache_preferences(path: &Path, signature: PreferencesSignature, value: &AppPreferences) {
+    if let Ok(mut cache) = preferences_cache().lock() {
+        cache.insert(
+            path.to_path_buf(),
+            CachedPreferences {
+                signature,
+                value: value.clone(),
+            },
+        );
+    }
+}
+
+/// 写盘后让缓存失效：避免同秒内 mtime 粒度相同导致读到旧值。
+fn invalidate_preferences_cache(path: &Path) {
+    if let Ok(mut cache) = preferences_cache().lock() {
+        cache.remove(path);
+    }
+}
+
 /// 读取应用偏好。
 pub(crate) fn read_app_preferences() -> anyhow::Result<AppPreferences> {
     read_app_preferences_with_dirs(&RumarkConfigDirs::from_system()?)
@@ -414,14 +459,26 @@ pub(crate) fn read_app_preferences() -> anyhow::Result<AppPreferences> {
 /// 用指定目录集读取应用偏好。
 ///
 /// 纯读取：配置文件损坏时返回错误而不改写文件，由调用方决定如何处理。
+/// 签名未变时复用内存缓存，省掉每次读盘 + TOML 解析；写盘与外部改动都会失效。
 pub(crate) fn read_app_preferences_with_dirs(
     dirs: &RumarkConfigDirs,
 ) -> anyhow::Result<AppPreferences> {
     let path = dirs.app_config_file();
+    let signature = preferences_signature(&path);
+    if let Ok(cache) = preferences_cache().lock()
+        && let Some(cached) = cache.get(&path)
+        && cached.signature == signature
+    {
+        PREFERENCES_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+        return Ok(cached.value.clone());
+    }
+
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(AppPreferences::default());
+            let value = AppPreferences::default();
+            cache_preferences(&path, signature, &value);
+            return Ok(value);
         }
         Err(err) => {
             return Err(err).with_context(|| format!("failed to read '{}'", path.display()));
@@ -430,10 +487,9 @@ pub(crate) fn read_app_preferences_with_dirs(
     let value = toml::from_str::<toml::Value>(&text)
         .with_context(|| format!("failed to parse '{}'", path.display()))?;
     ensure_supported_version(&path, &value)?;
-    Ok(app_preferences_from_toml_value(
-        &value,
-        FALLBACK_LANGUAGE_ID,
-    ))
+    let preferences = app_preferences_from_toml_value(&value, FALLBACK_LANGUAGE_ID);
+    cache_preferences(&path, signature, &preferences);
+    Ok(preferences)
 }
 
 /// 校验配置文件版本高于当前程序时立即报错，避免回写默认值抹掉新版本字段。
@@ -644,14 +700,20 @@ where
         default_language_id: detected_language_id.into(),
         ..AppPreferences::default()
     };
+    // 启动路径原本无条件写一次配置（原子写含 sync_all），但绝大多数启动只是
+    // 原样读取。只在「文件不存在 / 损坏重建 / 规范化后内容真的变化」时落盘。
+    let mut needs_write = true;
     let (preferences, recovery) = match std::fs::read_to_string(&path) {
         Ok(text) => match toml::from_str::<toml::Value>(&text) {
             Ok(value) => {
                 ensure_supported_version(&path, &value)?;
-                (
-                    app_preferences_from_toml_value(&value, detected_language_id),
-                    None,
-                )
+                let preferences = app_preferences_from_toml_value(&value, detected_language_id);
+                // 比较 TOML 值而非文本：注释、键顺序、行尾差异不该触发写盘，
+                // 但缺字段需要补默认值、旧格式需要规范化时仍然要写。
+                let canonical = toml::Value::try_from(PreferencesFile::from(&preferences))
+                    .context("failed to serialize canonical preferences")?;
+                needs_write = canonical != value;
+                (preferences, None)
             }
             Err(_) => {
                 let backup_path = backup_damaged_preferences(&path)?;
@@ -669,7 +731,9 @@ where
             return Err(err).with_context(|| format!("failed to read '{}'", path.display()));
         }
     };
-    save_app_preferences_with_dirs(&preferences, dirs)?;
+    if needs_write {
+        save_app_preferences_with_dirs(&preferences, dirs)?;
+    }
     Ok((preferences, recovery))
 }
 
@@ -685,7 +749,10 @@ pub(crate) fn save_app_preferences_with_dirs(
 ) -> anyhow::Result<()> {
     let path = dirs.app_config_file();
     let text = toml::to_string_pretty(&PreferencesFile::from(preferences))?;
-    write_text(&path, &text).with_context(|| format!("failed to write '{}'", path.display()))
+    write_text(&path, &text).with_context(|| format!("failed to write '{}'", path.display()))?;
+    // 本进程写入后立即失效，下一次读取会重新校验签名并拿到新值。
+    invalidate_preferences_cache(&path);
+    Ok(())
 }
 
 /// 返回首个仍存在的最近 Markdown 文件。
@@ -2122,9 +2189,9 @@ pub(crate) fn open_preferences_window(cx: &mut App) -> WindowHandle<PreferencesW
 #[cfg(test)]
 mod tests {
     use super::{
-        AppPreferences, EditorSettings, ExportThemeMode, ImagePasteBehavior, PendingConfigRecovery,
-        PreferencesRecovery, StartupOpenPreference, StatusBarButton, StatusBarPreferences,
-        hotkey_keys_from_values, hotkey_values_from_keys,
+        AppPreferences, EditorSettings, ExportThemeMode, ImagePasteBehavior,
+        PREFERENCES_CACHE_HITS, PendingConfigRecovery, PreferencesRecovery, StartupOpenPreference,
+        StatusBarButton, StatusBarPreferences, hotkey_keys_from_values, hotkey_values_from_keys,
         load_or_create_app_preferences_with_dirs_and_locales, open_preferences_window_with_state,
         read_app_preferences_with_dirs, save_app_preferences_with_dirs,
         save_preferences_from_window_with_dirs,
@@ -2190,6 +2257,96 @@ mod tests {
         assert_eq!(preferences, AppPreferences::default());
         // 新用户默认使用白色主题。
         assert_eq!(preferences.default_theme_id, "rumark-light");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn repeated_preference_reads_reuse_memory_cache() {
+        let root =
+            std::env::temp_dir().join(format!("rumark-preferences-cache-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("temp root should exist");
+        let dirs = RumarkConfigDirs::from_root(&root);
+        let first = read_app_preferences_with_dirs(&dirs).expect("first read");
+
+        let before = PREFERENCES_CACHE_HITS.load(std::sync::atomic::Ordering::Relaxed);
+        let second = read_app_preferences_with_dirs(&dirs).expect("second read");
+        assert_eq!(second, first);
+        assert!(
+            PREFERENCES_CACHE_HITS.load(std::sync::atomic::Ordering::Relaxed) > before,
+            "签名未变时第二次读取应命中内存缓存"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn startup_does_not_rewrite_unchanged_config() {
+        let root = std::env::temp_dir().join(format!(
+            "rumark-preferences-no-rewrite-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("temp root should exist");
+        let dirs = RumarkConfigDirs::from_root(&root);
+        // 先跑一次启动路径，把可能存在的规范化/补默认值动作做完。
+        load_or_create_app_preferences_with_dirs_and_locales(&dirs, ["zh-CN"])
+            .expect("首次启动应成功");
+
+        let path = dirs.app_config_file();
+        let mut text = std::fs::read_to_string(&path).expect("config should exist");
+        text.push_str("\n# 用户手写注释：启动流程不应抹掉\n");
+        std::fs::write(&path, &text).expect("追加注释");
+
+        let (preferences, recovery) =
+            load_or_create_app_preferences_with_dirs_and_locales(&dirs, ["zh-CN"])
+                .expect("再次启动应成功");
+        assert!(recovery.is_none());
+        assert_eq!(preferences.default_language_id, "zh-CN");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("读回配置"),
+            text,
+            "内容未变时不应触发原子写（注释也不该丢）"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn saving_preferences_invalidates_cache_for_other_windows() {
+        let root = std::env::temp_dir().join(format!(
+            "rumark-preferences-invalidate-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("temp root should exist");
+        let dirs = RumarkConfigDirs::from_root(&root);
+
+        let mut preferences = read_app_preferences_with_dirs(&dirs).expect("first read");
+        preferences.default_theme_id = "rumark-dark".to_string();
+        save_app_preferences_with_dirs(&preferences, &dirs).expect("save preferences");
+
+        let reloaded = read_app_preferences_with_dirs(&dirs).expect("read after save");
+        assert_eq!(reloaded.default_theme_id, "rumark-dark");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn external_preferences_edit_is_detected() {
+        let root = std::env::temp_dir().join(format!(
+            "rumark-preferences-external-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("temp root should exist");
+        let dirs = RumarkConfigDirs::from_root(&root);
+        let _ = read_app_preferences_with_dirs(&dirs).expect("seed defaults");
+
+        std::fs::write(
+            dirs.app_config_file(),
+            "[theme]\ndefault_theme_id = \"rumark-dark\"\n",
+        )
+        .expect("external write");
+        let reloaded = read_app_preferences_with_dirs(&dirs).expect("read after external edit");
+        assert_eq!(reloaded.default_theme_id, "rumark-dark");
+
         let _ = std::fs::remove_dir_all(root);
     }
 

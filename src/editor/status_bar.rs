@@ -93,7 +93,9 @@ impl Editor {
     /// 变化时重算，选中字数只在指纹或选区状态变化时重算。空闲帧（仅光标
     /// 闪烁）命中缓存后不做任何全文扫描。
     pub(super) fn status_stats(&self, cx: &App) -> StatusStats {
-        let fingerprint = self.document_fingerprint(cx);
+        // 派生数据一次取用即拿到内容指纹与两种视图文本，避免同帧重复计算指纹。
+        let derived = self.derived_document(cx);
+        let fingerprint = derived.fingerprint();
         let caret_offset = self.capture_source_selection_snapshot(cx).range.end;
         let selection_key = self.selection_fingerprint(cx);
 
@@ -104,7 +106,6 @@ impl Editor {
         if reusable {
             let stats = cached.as_mut().expect("reusable 蕴含 Some");
             if stats.cursor_offset != caret_offset {
-                let derived = self.derived_document(cx);
                 stats.cursor_offset = caret_offset;
                 stats.cursor_position = cursor_position_in(self.view_text(&derived), caret_offset);
             }
@@ -113,7 +114,6 @@ impl Editor {
                 stats.selection_words = self.selected_markdown_text(cx).as_deref().map(word_count);
             }
         } else {
-            let derived = self.derived_document(cx);
             let text = self.view_text(&derived);
             count_total_word_count_run();
             cached = Some(StatusStats {

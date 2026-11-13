@@ -113,6 +113,8 @@ pub struct Block {
     pub record: BlockRecord,
     pub(crate) render_cache: InlineRenderCache,
     code_highlight: Option<HighlightResult>,
+    /// 当前高亮结果对应的失效键（语言 + 块内容版本号），未变时直接复用。
+    code_highlight_key: Option<(Option<SharedString>, u64)>,
     pub children: Vec<Entity<Block>>,
     pub focus_handle: FocusHandle,
     pub(crate) code_language_focus_handle: FocusHandle,
@@ -227,6 +229,7 @@ impl Block {
             record,
             render_cache,
             code_highlight: None,
+            code_highlight_key: None,
             children: Vec::new(),
             focus_handle: cx.focus_handle(),
             code_language_focus_handle: cx.focus_handle(),

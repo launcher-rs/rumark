@@ -17,13 +17,28 @@ impl Block {
     }
 
     /// 同步代码高亮。
+    ///
+    /// 高亮只由语言与块内容决定；内容版本号未变时（光标移动、滚动、同一次
+    /// 交互里的重复刷新）直接复用上次结果，避免 tree-sitter 全量重解析。
+    /// 内容变更必须走 `set_title`/`set_kind`，否则版本号不递增、高亮会陈旧。
     pub(super) fn sync_code_highlight(&mut self) {
-        self.code_highlight = match &self.record.kind {
-            BlockKind::CodeBlock { language } => {
-                highlight_code_block(language.as_deref(), self.render_cache.plain_text())
-            }
+        let Some(language) = (match &self.record.kind {
+            BlockKind::CodeBlock { language } => Some(language.clone()),
             _ => None,
+        }) else {
+            self.code_highlight = None;
+            self.code_highlight_key = None;
+            return;
         };
+
+        let key = (language.clone(), self.record.content_version());
+        if self.code_highlight_key.as_ref() == Some(&key) {
+            return;
+        }
+        count_highlight_recompute();
+        self.code_highlight =
+            highlight_code_block(language.as_deref(), self.render_cache.plain_text());
+        self.code_highlight_key = Some(key);
     }
 
     /// 取代码语言文本。
@@ -222,4 +237,24 @@ impl Block {
         self.code_language_last_bounds = None;
         self.code_language_is_selecting = false;
     }
+}
+
+// 测试观测点：实际执行高亮重算的次数（生产构建不编译）。
+#[cfg(test)]
+thread_local! {
+    static HIGHLIGHT_RECOMPUTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn count_highlight_recompute() {
+    HIGHLIGHT_RECOMPUTES.with(|runs| runs.set(runs.get() + 1));
+}
+
+#[cfg(not(test))]
+fn count_highlight_recompute() {}
+
+/// 读取并清零高亮重算计数（测试辅助）。
+#[cfg(test)]
+pub(super) fn take_highlight_recomputes() -> usize {
+    HIGHLIGHT_RECOMPUTES.with(|runs| runs.replace(0))
 }

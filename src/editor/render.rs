@@ -1246,6 +1246,9 @@ impl Render for Editor {
             .flex_col()
             .relative()
             .bg(theme.background)
+            // 挂在根元素上：所有块内 img 共用本窗口的有界缓存，
+            // 远端图失败不再被框架永久缓存，条目数也不会无限增长。
+            .image_cache(self.image_cache.clone())
             .font(editor_text_font())
             .on_modifiers_changed(move |event, window, _| {
                 if event.modifiers.secondary() != follow_modifier_active {

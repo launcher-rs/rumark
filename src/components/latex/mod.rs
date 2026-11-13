@@ -1,13 +1,13 @@
 //! LaTeX 展示公式解析与 RaTeX SVG 渲染辅助。
 
 use std::collections::hash_map::DefaultHasher;
-use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
-use anyhow::{Context as _, anyhow};
-use directories::ProjectDirs;
+use anyhow::anyhow;
 use rgpui::{Hsla, Rgba};
+
+use crate::components::svg_cache::{load_svg, svg_cache_dir};
 
 const DISPLAY_MATH_SCALE: f32 = 1.25;
 const INLINE_MATH_SCALE: f32 = 1.12;
@@ -84,19 +84,17 @@ pub(crate) fn render_inline_math_svg(
     render_latex_svg_to_cache(latex, text_color, font_size)
 }
 
-/// 渲染 LaTeX 并写入 SVG 缓存。
+/// 取 LaTeX 的缓存 SVG：先算键查内存/磁盘缓存，全 miss 才真正渲染。
+///
+/// 绘制路径（滚动、光标闪烁）每帧都会调用，命中时不再做公式解析与布局。
 fn render_latex_svg_to_cache(
     latex: &str,
     text_color: Hsla,
     font_size: f32,
 ) -> anyhow::Result<LatexRender> {
-    let svg = render_latex_to_svg(latex, text_color, font_size)?;
     let key = latex_cache_key(latex, text_color, font_size);
-    let path = latex_cache_dir()?.join(format!("{key}.svg"));
-    if !path.exists() {
-        crate::atomic_file::write_text(&path, &svg)
-            .with_context(|| format!("failed to write LaTeX SVG cache '{}'", path.display()))?;
-    }
+    let path = svg_cache_dir("latex-svg")?.join(format!("{key}.svg"));
+    let svg = load_svg(&path, || render_latex_to_svg(latex, text_color, font_size))?;
     Ok(LatexRender { path, svg })
 }
 
@@ -127,7 +125,9 @@ pub(crate) fn latex_cache_key(latex: &str, text_color: Hsla, font_size: f32) -> 
     let mut hasher = DefaultHasher::new();
     latex.hash(&mut hasher);
     svg_color(text_color).hash(&mut hasher);
-    font_size.to_bits().hash(&mut hasher);
+    // 量化到 0.01px：直接用 f32 位模式会让亚像素抖动各生成一份缓存文件。
+    let quantized_size = (font_size.max(1.0) * 100.0).round() as u64;
+    quantized_size.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
 
@@ -135,17 +135,6 @@ pub(crate) fn latex_cache_key(latex: &str, text_color: Hsla, font_size: f32) -> 
 fn strip_display_indent(line: &str) -> Option<&str> {
     let indent = line.bytes().take_while(|byte| *byte == b' ').count();
     (indent <= 3).then_some(&line[indent..])
-}
-
-/// 取 LaTeX SVG 缓存目录。
-fn latex_cache_dir() -> anyhow::Result<PathBuf> {
-    let root = ProjectDirs::from("rs", "launcher", "Rumark")
-        .map(|dirs| dirs.cache_dir().to_path_buf())
-        .unwrap_or_else(|| std::env::temp_dir().join("Rumark"));
-    let dir = root.join("latex-svg");
-    fs::create_dir_all(&dir)
-        .with_context(|| format!("failed to create LaTeX SVG cache '{}'", dir.display()))?;
-    Ok(dir)
 }
 
 /// 把主题颜色转为 SVG 颜色串。
@@ -208,6 +197,20 @@ mod tests {
         let first = latex_cache_key("\\frac{1}{2}", Hsla::from(rgba(0xffffffff)), 18.0);
         let second = latex_cache_key("\\frac{1}{2}", Hsla::from(rgba(0x000000ff)), 18.0);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn cache_key_is_stable_for_subpixel_font_size_differences() {
+        let color = Hsla::from(rgba(0xffffffff));
+        assert_eq!(
+            latex_cache_key("x^2", color, 18.0),
+            latex_cache_key("x^2", color, 18.001),
+            "亚像素差异不应生成新缓存文件"
+        );
+        assert_ne!(
+            latex_cache_key("x^2", color, 18.0),
+            latex_cache_key("x^2", color, 20.0)
+        );
     }
 
     #[test]

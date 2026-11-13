@@ -45,6 +45,44 @@ fn intraword_underscore_does_not_emphasize() {
     );
 }
 
+#[test]
+fn intraword_underscore_serializes_without_redundant_escape() {
+    for source in ["111111_22222222", "foo_bar_baz", "中文_下划线", "a__b"] {
+        let tree = InlineTextTree::from_markdown(source);
+        let serialized = tree.serialize_markdown();
+
+        assert_eq!(
+            serialized, source,
+            "词内下划线不应被转义：{source:?} -> {serialized:?}"
+        );
+        let reparsed = InlineTextTree::from_markdown(&serialized);
+        assert_eq!(reparsed.plain_text(), tree.plain_text());
+        assert!(
+            reparsed
+                .render_cache()
+                .spans()
+                .iter()
+                .all(|span| !span.style.italic && !span.style.bold),
+            "去掉转义后不能变成强调：{source:?}"
+        );
+    }
+}
+
+#[test]
+fn delimiter_like_underscores_still_escape() {
+    // 独立/空格包围的下划线仍可能被解析成强调分隔符，必须保留转义。
+    let tree = InlineTextTree::from_markdown("* a * _ b _");
+    assert_eq!(tree.serialize_markdown(), "\\* a \\* \\_ b \\_");
+
+    // 片段边界处的下划线：后面紧跟样式标记，仍按侧翼分隔符处理。
+    let boundary = InlineTextTree::from_markdown("a_**bold**");
+    assert!(
+        boundary.serialize_markdown().starts_with("a\\_**"),
+        "片段边界的下划线应保守转义：{:?}",
+        boundary.serialize_markdown()
+    );
+}
+
 /// 概括一段 Markdown 解析后的加粗/斜体分布，样式标记紧跟其作用的文本：
 /// `foo[I] bar` 表示 `foo` 斜体、` bar` 纯文本，`ab[BI]` 表示既粗又斜。
 ///

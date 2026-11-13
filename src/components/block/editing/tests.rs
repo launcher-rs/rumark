@@ -2743,6 +2743,39 @@ async fn broken_rendered_image_syntax_blurs_back_to_plain_text(cx: &mut TestAppC
     });
 }
 
+/// 内容不变时重复刷新不得重新解析；改字后恰好重算一次。
+#[rgpui::test]
+async fn code_highlight_reuses_result_until_content_changes(cx: &mut TestAppContext) {
+    use super::code::take_highlight_recomputes;
+
+    let block = cx.new(|cx| {
+        Block::with_record(
+            cx,
+            BlockRecord::new(
+                BlockKind::CodeBlock {
+                    language: Some("rust".into()),
+                },
+                InlineTextTree::plain("fn main() {}\n"),
+            ),
+        )
+    });
+
+    block.update(cx, |block, _cx| {
+        take_highlight_recomputes();
+        block.refresh_render_cache();
+        block.refresh_render_cache();
+        assert_eq!(take_highlight_recomputes(), 0, "内容未变不应重复解析");
+
+        block
+            .record
+            .set_title(InlineTextTree::plain("fn main() { let x = 1; }\n"));
+        block.refresh_render_cache();
+        assert_eq!(take_highlight_recomputes(), 1, "改字后应重解析一次");
+        block.refresh_render_cache();
+        assert_eq!(take_highlight_recomputes(), 0, "重算结果应被后续刷新复用");
+    });
+}
+
 #[rgpui::test]
 async fn code_block_cache_builds_rust_highlight_spans(cx: &mut TestAppContext) {
     let block = cx.new(|cx| {

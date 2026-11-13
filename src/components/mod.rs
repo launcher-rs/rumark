@@ -2,14 +2,29 @@
 
 use std::any::Any;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rgpui::{AsyncApp, Context, WeakEntity};
+
+/// 全局块内容纪元：任何 `BlockRecord` 内容变更都经 setter 递增。
+///
+/// 派生缓存用它做 O(1) 的空闲帧短路；多窗口共用只会带来「别的窗口改字，
+/// 本窗口白算一次指纹」的保守重算，不会让缓存陈旧（内容变更必然递增，
+/// 且逐块版本号仍参与指纹计算）。
+pub(crate) static DOCUMENT_CONTENT_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// 记录一次块内容变更，使各窗口的派生缓存下一帧重新校验。
+#[inline]
+pub(crate) fn bump_document_content_epoch() {
+    DOCUMENT_CONTENT_EPOCH.fetch_add(1, Ordering::Relaxed);
+}
 
 mod actions;
 mod block;
 pub(crate) mod latex;
 pub(crate) mod markdown;
 pub(crate) mod mermaid;
+mod svg_cache;
 
 pub use crate::editor::Editor;
 pub use actions::*;

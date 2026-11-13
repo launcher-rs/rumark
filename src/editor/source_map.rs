@@ -7,10 +7,15 @@ use super::*;
 impl Editor {
     /// 按当前视图模式读取文档源码文本。
     pub(super) fn current_document_source(&self, cx: &App) -> String {
+        self.current_document_source_arc(cx).to_string()
+    }
+
+    /// 取当前源码文本的共享副本：撤销快照直接复用派生缓存，省一次全文拷贝。
+    pub(super) fn current_document_source_arc(&self, cx: &App) -> Arc<str> {
         let derived = self.derived_document(cx);
         match self.view_mode {
-            ViewMode::Rendered => derived.markdown.to_string(),
-            ViewMode::Source => derived.raw_source.to_string(),
+            ViewMode::Rendered => derived.markdown.clone(),
+            ViewMode::Source => derived.raw_source.clone(),
         }
     }
 

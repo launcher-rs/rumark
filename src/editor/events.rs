@@ -2281,7 +2281,11 @@ impl Editor {
                         BlockKind::TaskListItem { checked } => checked,
                         _ => return,
                     };
-                    block.record.kind = BlockKind::TaskListItem { checked: !checked };
+                    // 必须走 setter：直接赋值不会递增 content_version，
+                    // 派生数据缓存会一直读到旧的勾选状态。
+                    block
+                        .record
+                        .set_kind(BlockKind::TaskListItem { checked: !checked });
                     block.sync_edit_mode_from_kind();
                     block.refresh_render_cache();
                     block.cursor_blink_epoch = Instant::now();
@@ -2531,6 +2535,29 @@ mod tests {
         ExitCodeBlock, InlineTextTree, Newline,
     };
     use rgpui::{App, AppContext, Entity, TestAppContext};
+
+    /// 切换勾选必须经 set_kind，否则内容版本号不递增、派生缓存读到旧文本。
+    #[rgpui::test]
+    async fn toggling_task_checkbox_invalidates_derived_document(cx: &mut TestAppContext) {
+        let editor = cx.new(|cx| Editor::from_markdown(cx, "- [ ] todo".to_string(), None));
+
+        editor.update(cx, |editor, cx| {
+            let task = editor.document.first_root().expect("根任务项").clone();
+            let before_version = task.read(cx).record.content_version();
+            assert!(editor.serialized_document_text(cx).contains("[ ]"));
+
+            editor.on_block_event(task.clone(), &BlockEvent::ToggleTaskChecked, cx);
+
+            assert!(
+                task.read(cx).record.content_version() > before_version,
+                "切换勾选应递增内容版本号"
+            );
+            assert!(
+                editor.serialized_document_text(cx).contains("[x]"),
+                "派生文本应反映新的勾选状态"
+            );
+        });
+    }
 
     #[rgpui::test]
     async fn request_quote_break_creates_new_root_leaf_quote_group(cx: &mut TestAppContext) {
