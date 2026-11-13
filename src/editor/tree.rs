@@ -82,6 +82,8 @@ impl InheritedBlockContext {
 pub(super) struct DocumentTree {
     roots: Vec<Entity<Block>>,
     snapshot: VisibleTreeSnapshot,
+    /// 结构修订号：每次重建元数据与可见快照时递增，供派生缓存判定失效。
+    revision: u64,
 }
 
 impl DocumentTree {
@@ -90,7 +92,13 @@ impl DocumentTree {
         Self {
             roots,
             snapshot: VisibleTreeSnapshot::default(),
+            revision: 0,
         }
+    }
+
+    /// 当前结构修订号。
+    pub(super) fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// 获取首个根块。
@@ -232,6 +240,7 @@ impl DocumentTree {
     /// 先把叶子块上不可能存在的运行时子块上提归位，再做一次深度遍历，
     /// 更新父标识、子标识列表、渲染深度、编号列表序号与可见快照。
     pub(super) fn rebuild_metadata_and_snapshot(&mut self, cx: &mut Context<Editor>) {
+        self.revision = self.revision.wrapping_add(1);
         Self::normalize_block_list(&mut self.roots, cx);
         self.snapshot.clear();
         Self::sync_block_list(

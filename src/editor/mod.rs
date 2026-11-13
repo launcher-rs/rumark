@@ -5,6 +5,7 @@
 //! [`DocumentTree`] 中，由它集中处理结构变更并缓存可见
 //! 顺序元数据。
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -23,10 +24,11 @@ use crate::components::{
 use crate::components::{
     Block, BlockKind, BlockRecord, FootnoteDefinitionBinding, FootnoteReferenceLocation,
     FootnoteRegistry, FootnoteResolvedOccurrence, ImageReferenceDefinitions, InlineTextTree,
-    LinkReferenceDefinitions, parse_image_reference_definitions, parse_link_reference_definitions,
+    LinkReferenceDefinitions,
 };
 mod close;
 mod context_menu;
+mod derive;
 mod document;
 mod editor_context;
 mod events;
@@ -149,6 +151,10 @@ pub struct Editor {
     image_reference_definitions: Arc<ImageReferenceDefinitions>,
     link_reference_definitions: Arc<LinkReferenceDefinitions>,
     footnote_registry: Arc<FootnoteRegistry>,
+    /// 序列化文本/源码映射/引用定义的派生缓存，按内容指纹失效。
+    derive_cache: RefCell<Option<derive::DerivedDocument>>,
+    /// 状态栏统计缓存：字数按内容指纹、行列按光标偏移、选中字数按选区指纹失效。
+    status_stats_cache: RefCell<Option<status_bar::StatusStats>>,
 }
 
 /// 表格块与某个单元格编辑器之间的运行时绑定。
@@ -265,12 +271,13 @@ pub(super) struct SelectAllOverlayCycle {
 }
 
 /// 单个可见块文本区间到规范 Markdown 偏移的映射。
+/// 逐字符偏移表用 `Arc` 共享，使整份映射可以廉价克隆进缓存。
 #[derive(Clone)]
 pub(super) struct SourceMapEntry {
     entity: Entity<Block>,
     full_source_range: std::ops::Range<usize>,
-    content_to_source: Vec<usize>,
-    source_to_content: Vec<usize>,
+    content_to_source: Arc<Vec<usize>>,
+    source_to_content: Arc<Vec<usize>>,
 }
 
 /// 编辑器可呈现的两种编辑视图。
@@ -385,6 +392,8 @@ impl Editor {
             image_reference_definitions: Arc::default(),
             link_reference_definitions: Arc::default(),
             footnote_registry: Arc::default(),
+            derive_cache: RefCell::new(None),
+            status_stats_cache: RefCell::new(None),
         };
         editor.rebuild_table_runtimes(cx);
         editor.rebuild_image_runtimes(cx);

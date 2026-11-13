@@ -62,22 +62,24 @@ impl Editor {
         }
 
         let mut right_items = Vec::new();
-        if prefs.show_cursor_position {
-            let (line, col) = self.compute_cursor_position(cx);
-            right_items.push(StatusBarItem::new(format!("{line} : {col}")).id("cursor-position"));
-        }
+        if prefs.show_cursor_position || prefs.show_word_count {
+            let stats = self.status_stats(cx);
+            if prefs.show_cursor_position {
+                let (line, col) = stats.cursor_position;
+                right_items
+                    .push(StatusBarItem::new(format!("{line} : {col}")).id("cursor-position"));
+            }
 
-        if prefs.show_word_count {
-            let text = self.serialized_document_text(cx);
-            let total_count = word_count(&text);
-            let suffix = i18n.t("status_word_count_suffix", &[]);
-            let label = match self.selected_markdown_text(cx).as_deref().map(word_count) {
-                Some(selection_count) => {
-                    format!("{selection_count} / {total_count} {suffix}")
-                }
-                None => format!("{total_count} {suffix}"),
-            };
-            right_items.push(StatusBarItem::new(label).id("word-count").muted(true));
+            if prefs.show_word_count {
+                let suffix = i18n.t("status_word_count_suffix", &[]);
+                let label = match stats.selection_words {
+                    Some(selection_count) => {
+                        format!("{selection_count} / {} {suffix}", stats.total_words)
+                    }
+                    None => format!("{} {suffix}", stats.total_words),
+                };
+                right_items.push(StatusBarItem::new(label).id("word-count").muted(true));
+            }
         }
 
         for button in &prefs.custom_buttons {
@@ -87,25 +89,127 @@ impl Editor {
         StatusBar::new().left(left_items).right(right_items)
     }
 
-    /// 返回当前光标的行列号（均为从 1 起）：源码模式读原始缓冲区，
-    /// 渲染模式经选区快照换算为源码偏移后同样按源码行列展示。
-    fn compute_cursor_position(&self, cx: &App) -> (usize, usize) {
-        use unicode_segmentation::UnicodeSegmentation;
+    /// 取状态栏统计：字数只在内容指纹变化时重算，行列只在指纹或光标偏移
+    /// 变化时重算，选中字数只在指纹或选区状态变化时重算。空闲帧（仅光标
+    /// 闪烁）命中缓存后不做任何全文扫描。
+    pub(super) fn status_stats(&self, cx: &App) -> StatusStats {
+        let fingerprint = self.document_fingerprint(cx);
+        let caret_offset = self.capture_source_selection_snapshot(cx).range.end;
+        let selection_key = self.selection_fingerprint(cx);
 
-        let (text, caret_offset) = if self.view_mode == super::ViewMode::Source {
-            let snapshot = self.capture_source_selection_snapshot(cx);
-            (self.document.raw_source_text(cx), snapshot.range.end)
+        let mut cached = self.status_stats_cache.borrow().clone();
+        let reusable = cached.as_ref().is_some_and(|stats| {
+            stats.fingerprint == fingerprint && stats.view_mode == self.view_mode
+        });
+        if reusable {
+            let stats = cached.as_mut().expect("reusable 蕴含 Some");
+            if stats.cursor_offset != caret_offset {
+                let derived = self.derived_document(cx);
+                stats.cursor_offset = caret_offset;
+                stats.cursor_position = cursor_position_in(self.view_text(&derived), caret_offset);
+            }
+            if stats.selection_key != selection_key {
+                stats.selection_key = selection_key;
+                stats.selection_words = self.selected_markdown_text(cx).as_deref().map(word_count);
+            }
         } else {
-            let snapshot = self.capture_source_selection_snapshot(cx);
-            (self.serialized_document_text(cx), snapshot.range.end)
-        };
-        let clamped = floor_char_boundary(&text, caret_offset);
+            let derived = self.derived_document(cx);
+            let text = self.view_text(&derived);
+            count_total_word_count_run();
+            cached = Some(StatusStats {
+                fingerprint,
+                view_mode: self.view_mode,
+                total_words: word_count(text),
+                cursor_offset: caret_offset,
+                cursor_position: cursor_position_in(text, caret_offset),
+                selection_key,
+                selection_words: self.selected_markdown_text(cx).as_deref().map(word_count),
+            });
+        }
 
-        let line = text[..clamped].matches('\n').count() + 1;
-        let last_newline = text[..clamped].rfind('\n').map(|i| i + 1).unwrap_or(0);
-        let col = text[last_newline..clamped].graphemes(true).count() + 1;
-        (line, col)
+        let stats = cached.expect("两条分支都会写入缓存值");
+        *self.status_stats_cache.borrow_mut() = Some(stats.clone());
+        stats
     }
+
+    /// 当前视图模式对应的派生文本（源码模式读原始缓冲区）。
+    fn view_text<'a>(&self, derived: &'a super::derive::DerivedDocument) -> &'a str {
+        match self.view_mode {
+            super::ViewMode::Source => &derived.raw_source,
+            super::ViewMode::Rendered => &derived.markdown,
+        }
+    }
+
+    /// 选区状态指纹：覆盖 `selected_markdown_text` 的全部输入（跨块选区
+    /// 端点或各块非空选区），供选中字数缓存失效；与内容指纹相互独立。
+    fn selection_fingerprint(&self, cx: &App) -> u64 {
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        if let Some(selection) = &self.cross_block_selection {
+            true.hash(&mut hasher);
+            for endpoint in [&selection.anchor, &selection.focus] {
+                endpoint.entity_id.hash(&mut hasher);
+                endpoint.offset.hash(&mut hasher);
+            }
+        } else {
+            false.hash(&mut hasher);
+            for visible in self.document.visible_blocks() {
+                let block = visible.entity.read(cx);
+                if block.selected_range.is_empty() {
+                    continue;
+                }
+                visible.entity.entity_id().hash(&mut hasher);
+                block.selected_range.start.hash(&mut hasher);
+                block.selected_range.end.hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
+}
+
+/// 状态栏统计缓存值。三个失效键相互独立：内容指纹管字数，光标偏移管行列，
+/// 选区指纹管选中字数，避免仅移动光标时重算全文字数。
+#[derive(Clone)]
+pub(super) struct StatusStats {
+    fingerprint: u64,
+    view_mode: super::ViewMode,
+    pub(super) total_words: usize,
+    cursor_offset: usize,
+    pub(super) cursor_position: (usize, usize),
+    selection_key: u64,
+    pub(super) selection_words: Option<usize>,
+}
+
+/// 按源码文本与光标偏移计算行列号（均从 1 起）。
+fn cursor_position_in(text: &str, caret_offset: usize) -> (usize, usize) {
+    use unicode_segmentation::UnicodeSegmentation;
+
+    let clamped = floor_char_boundary(text, caret_offset);
+    let line = text[..clamped].matches('\n').count() + 1;
+    let last_newline = text[..clamped].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let col = text[last_newline..clamped].graphemes(true).count() + 1;
+    (line, col)
+}
+
+// 测试观测点：全文字数重算次数（生产构建不编译）。
+#[cfg(test)]
+thread_local! {
+    static TOTAL_WORD_COUNT_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn count_total_word_count_run() {
+    TOTAL_WORD_COUNT_RUNS.with(|runs| runs.set(runs.get() + 1));
+}
+
+#[cfg(not(test))]
+fn count_total_word_count_run() {}
+
+/// 读取并清零全文字数重算计数（测试辅助）。
+#[cfg(test)]
+pub(super) fn take_total_word_count_runs() -> usize {
+    TOTAL_WORD_COUNT_RUNS.with(|runs| runs.replace(0))
 }
 
 /// 把字节下标收缩到不超过文本长度、且落在字符边界上的安全下标。
@@ -174,7 +278,21 @@ fn is_cjk_char(ch: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{floor_char_boundary, word_count};
+    use super::{floor_char_boundary, take_total_word_count_runs, word_count};
+    use rgpui::{AppContext, TestAppContext};
+
+    use super::super::{CrossBlockSelection, CrossBlockSelectionEndpoint, Editor};
+    use crate::components::InlineTextTree;
+    use crate::i18n::I18nManager;
+
+    /// 初始化状态栏测试应用（测试辅助）。
+    fn init_editor_test_app(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            I18nManager::init_with_language_id(cx, "en-US");
+            rgpui::theme::init(cx);
+            crate::components::init(cx);
+        });
+    }
 
     #[test]
     fn empty_text_has_zero_words() {
@@ -217,5 +335,92 @@ mod tests {
         // 超出长度时收缩到末尾边界。
         assert_eq!(floor_char_boundary(text, 999), text.len());
         assert_eq!(floor_char_boundary("", 5), 0);
+    }
+
+    #[test]
+    fn status_stats_word_count_updates_after_edit() {
+        let mut cx = TestAppContext::single();
+        init_editor_test_app(&mut cx);
+        let editor = cx.new(|cx| Editor::from_markdown(cx, "alpha\n\nbeta".to_string(), None));
+
+        editor.update(&mut cx, |editor, cx| {
+            let before = editor.status_stats(cx);
+            assert_eq!(before.total_words, 2);
+            assert_eq!(before.selection_words, None);
+
+            let first = editor.document.visible_blocks()[0].entity.clone();
+            first.update(cx, |block, _cx| {
+                block
+                    .record
+                    .set_title(InlineTextTree::plain("changed gamma"));
+            });
+            let after = editor.status_stats(cx);
+            assert_eq!(after.total_words, 3, "输入后字数统计应更新");
+        });
+        cx.quit();
+    }
+
+    #[test]
+    fn status_stats_caret_move_skips_word_count() {
+        let mut cx = TestAppContext::single();
+        init_editor_test_app(&mut cx);
+        let editor = cx.new(|cx| Editor::from_markdown(cx, "alpha\n\nbeta".to_string(), None));
+
+        editor.update(&mut cx, |editor, cx| {
+            // 源码模式的光标直接落在原始缓冲区上，便于精确移动。
+            editor.toggle_view_mode(cx);
+            let root = editor.document.first_root().expect("源码模式应有根块");
+            root.update(cx, |block, _cx| {
+                block.selected_range = 2..2;
+                block.selection_reversed = false;
+            });
+            take_total_word_count_runs();
+            let first = editor.status_stats(cx);
+            assert_eq!(take_total_word_count_runs(), 1);
+            assert_eq!(first.cursor_position, (1, 3));
+
+            root.update(cx, |block, _cx| {
+                block.selected_range = 4..4;
+            });
+            let second = editor.status_stats(cx);
+            assert_eq!(
+                take_total_word_count_runs(),
+                0,
+                "仅移动光标不应重算全文字数"
+            );
+            assert_eq!(second.cursor_position, (1, 5), "行列应跟随光标");
+            assert_eq!(second.total_words, first.total_words);
+        });
+        cx.quit();
+    }
+
+    #[test]
+    fn status_stats_selection_words_follow_selection_only() {
+        let mut cx = TestAppContext::single();
+        init_editor_test_app(&mut cx);
+        let editor = cx.new(|cx| Editor::from_markdown(cx, "alpha\n\nbeta".to_string(), None));
+
+        editor.update(&mut cx, |editor, cx| {
+            let visible = editor.document.visible_blocks().to_vec();
+            let anchor = CrossBlockSelectionEndpoint {
+                entity_id: visible[0].entity.entity_id(),
+                offset: 0,
+            };
+            let focus = CrossBlockSelectionEndpoint {
+                entity_id: visible[1].entity.entity_id(),
+                offset: 2,
+            };
+            editor.cross_block_selection = Some(CrossBlockSelection { anchor, focus });
+            take_total_word_count_runs();
+            let selected = editor.status_stats(cx);
+            assert_eq!(selected.selection_words, Some(2), "选中 alpha 与 be 共两词");
+            assert_eq!(take_total_word_count_runs(), 1);
+
+            editor.cross_block_selection = None;
+            let cleared = editor.status_stats(cx);
+            assert_eq!(cleared.selection_words, None);
+            assert_eq!(take_total_word_count_runs(), 0, "选区变化不应重算全文字数");
+        });
+        cx.quit();
     }
 }

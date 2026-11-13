@@ -7,9 +7,10 @@ use super::*;
 impl Editor {
     /// 按当前视图模式读取文档源码文本。
     pub(super) fn current_document_source(&self, cx: &App) -> String {
+        let derived = self.derived_document(cx);
         match self.view_mode {
-            ViewMode::Rendered => self.document.markdown_text(cx),
-            ViewMode::Source => self.document.raw_source_text(cx),
+            ViewMode::Rendered => derived.markdown.to_string(),
+            ViewMode::Source => derived.raw_source.to_string(),
         }
     }
 
@@ -155,8 +156,8 @@ impl Editor {
         mappings.push(SourceMapEntry {
             entity: block.clone(),
             full_source_range: absolute_start..absolute_start + full_text.len(),
-            content_to_source,
-            source_to_content,
+            content_to_source: Arc::new(content_to_source),
+            source_to_content: Arc::new(source_to_content),
         });
         full_text.len()
     }
@@ -213,8 +214,8 @@ impl Editor {
         mappings.push(SourceMapEntry {
             entity: block.clone(),
             full_source_range: absolute_start..absolute_start + full_text.len(),
-            content_to_source,
-            source_to_content,
+            content_to_source: Arc::new(content_to_source),
+            source_to_content: Arc::new(source_to_content),
         });
         full_text.len()
     }
@@ -251,8 +252,8 @@ impl Editor {
         mappings.push(SourceMapEntry {
             entity: block.clone(),
             full_source_range: absolute_start..absolute_start + full_text.len(),
-            content_to_source,
-            source_to_content,
+            content_to_source: Arc::new(content_to_source),
+            source_to_content: Arc::new(source_to_content),
         });
         full_text.len()
     }
@@ -290,8 +291,8 @@ impl Editor {
         mappings.push(SourceMapEntry {
             entity: block.clone(),
             full_source_range: absolute_start..absolute_start + full_text.len(),
-            content_to_source,
-            source_to_content,
+            content_to_source: Arc::new(content_to_source),
+            source_to_content: Arc::new(source_to_content),
         });
         full_text.len()
     }
@@ -361,8 +362,8 @@ impl Editor {
                 mappings.push(SourceMapEntry {
                     entity: cell.clone(),
                     full_source_range: start..start + len,
-                    content_to_source: (0..=len).collect(),
-                    source_to_content: (0..=len).collect(),
+                    content_to_source: Arc::new((0..=len).collect()),
+                    source_to_content: Arc::new((0..=len).collect()),
                 });
                 line_cursor += len + 3;
             }
@@ -392,8 +393,8 @@ impl Editor {
                 mappings.push(SourceMapEntry {
                     entity: cell.clone(),
                     full_source_range: start..start + len,
-                    content_to_source: (0..=len).collect(),
-                    source_to_content: (0..=len).collect(),
+                    content_to_source: Arc::new((0..=len).collect()),
+                    source_to_content: Arc::new((0..=len).collect()),
                 });
                 line_cursor += len + 3;
             }
@@ -572,8 +573,8 @@ impl Editor {
                     mappings.push(SourceMapEntry {
                         entity: block.clone(),
                         full_source_range: absolute_start..absolute_start + full_text.len(),
-                        content_to_source: vec![full_text.len()],
-                        source_to_content: vec![0; full_text.len() + 1],
+                        content_to_source: Arc::new(vec![full_text.len()]),
+                        source_to_content: Arc::new(vec![0; full_text.len() + 1]),
                     });
                     full_text.len()
                 } else {
@@ -713,14 +714,26 @@ impl Editor {
         total_len
     }
 
-    /// 构建全文档的源码与渲染块双向映射。
+    /// 构建全文档的源码与渲染块双向映射（按内容指纹缓存）。
     pub(super) fn build_source_target_mappings(&self, cx: &App) -> Vec<SourceMapEntry> {
-        self.build_source_target_mappings_with_block_ranges(cx).0
+        self.derived_document(cx).mappings.as_ref().clone()
     }
 
     /// 与 [`Self::build_source_target_mappings`] 相同，额外返回每块按实体标识索引的源码区间。
     /// 原子块（如表格）没有逐字符文本映射，只能通过该区间恢复其完整源码范围，供选区与删除使用。
     pub(super) fn build_source_target_mappings_with_block_ranges(
+        &self,
+        cx: &App,
+    ) -> (Vec<SourceMapEntry>, HashMap<EntityId, Range<usize>>) {
+        let derived = self.derived_document(cx);
+        (
+            derived.mappings.as_ref().clone(),
+            derived.block_ranges.as_ref().clone(),
+        )
+    }
+
+    /// 全量重算源码映射与块区间，只由派生缓存调用。
+    pub(super) fn compute_source_target_mappings_with_block_ranges(
         &self,
         cx: &App,
     ) -> (Vec<SourceMapEntry>, HashMap<EntityId, Range<usize>>) {

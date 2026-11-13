@@ -490,6 +490,9 @@ pub struct BlockRecord {
     pub raw_fallback: Option<String>,
     /// 是否为链接/图片引用定义块（`[label]: url`）。渲染视图隐藏，源码视图保留。
     pub reference_definition: bool,
+    /// 内容修订号：任何影响序列化结果的变更都递增，供编辑器派生缓存判定失效。
+    /// 红线：内容变更必须走 `set_title`/`set_kind`/`set_table`，直接赋值字段会让缓存陈旧。
+    content_version: u64,
 }
 
 impl BlockRecord {
@@ -505,9 +508,15 @@ impl BlockRecord {
             content: Vec::new(),
             raw_fallback: None,
             reference_definition: false,
+            content_version: 0,
         };
         record.sync_raw_fallback();
         record
+    }
+
+    /// 当前内容修订号。
+    pub fn content_version(&self) -> u64 {
+        self.content_version
     }
 
     /// 用纯文本创建块记录。
@@ -585,6 +594,20 @@ impl BlockRecord {
     pub fn set_title(&mut self, title: InlineTextTree) {
         self.title = title;
         self.sync_raw_fallback();
+        self.content_version = self.content_version.wrapping_add(1);
+    }
+
+    /// 设置块类型，并同步原始回退文本与 HTML 解析结果。
+    pub fn set_kind(&mut self, kind: BlockKind) {
+        self.kind = kind;
+        self.sync_raw_fallback();
+        self.content_version = self.content_version.wrapping_add(1);
+    }
+
+    /// 设置表格模型。
+    pub fn set_table(&mut self, table: Option<TableModel>) {
+        self.table = table;
+        self.content_version = self.content_version.wrapping_add(1);
     }
 
     /// 把块标题导出为 Markdown：片段样式标记经 [`InlineTextTree::serialize_markdown`] 序列化回分隔符。

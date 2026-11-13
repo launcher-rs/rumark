@@ -867,7 +867,7 @@ impl Editor {
     ) {
         let (kind, title, cursor) = Self::apply_paragraph_shortcuts(kind, title, cursor);
         block.update(cx, move |block, cx| {
-            block.record.kind = kind;
+            block.record.set_kind(kind);
             block.record.set_title(title.clone());
             block.sync_edit_mode_from_kind();
             block.refresh_render_cache();
@@ -1056,7 +1056,7 @@ impl Editor {
         self.prepare_undo_capture(crate::components::UndoKind::NonCoalescible, cx);
         table.rows.push(row);
         table_block.update(cx, |block, cx| {
-            block.record.table = Some(table);
+            block.record.set_table(Some(table));
             cx.notify();
         });
 
@@ -1692,7 +1692,7 @@ impl Editor {
             crate::components::CalloutVariant::parse_heading(&title_to_markdown)?;
 
         block.update(cx, |block, cx| {
-            block.record.kind = BlockKind::Callout(variant);
+            block.record.set_kind(BlockKind::Callout(variant));
             block
                 .record
                 .set_title(InlineTextTree::from_markdown(&title));
@@ -1740,7 +1740,7 @@ impl Editor {
         self.document.with_structure_mutation(cx, |document, cx| {
             let _ = document.remove_block_by_id_raw(block.entity_id(), cx);
             parent.update(cx, |parent, cx| {
-                parent.record.kind = BlockKind::Quote;
+                parent.record.set_kind(BlockKind::Quote);
                 parent
                     .record
                     .set_title(InlineTextTree::from_markdown(&heading_markdown));
@@ -2249,8 +2249,7 @@ impl Editor {
                     let (moved, removed_location) =
                         document.remove_block_by_id_raw(block.entity_id(), cx)?;
                     moved.update(cx, |block, cx| {
-                        block.record.kind = BlockKind::Paragraph;
-                        block.record.raw_fallback = None;
+                        block.record.set_kind(BlockKind::Paragraph);
                         block.sync_edit_mode_from_kind();
                         block.refresh_render_cache();
                         block.cursor_blink_epoch = Instant::now();

@@ -138,11 +138,11 @@ impl Editor {
             })
             .collect::<Vec<_>>();
         table_block.update(cx, move |block, _cx| {
-            block.record.table = Some(TableModel {
+            block.record.set_table(Some(TableModel {
                 header,
                 rows,
                 alignments,
-            });
+            }));
         });
     }
 
@@ -171,7 +171,7 @@ impl Editor {
         table.add_column(alignment);
 
         table_block.update(cx, move |block, _cx| {
-            block.record.table = Some(table.clone());
+            block.record.set_table(Some(table.clone()));
         });
         self.rebuild_table_runtimes(cx);
         if let Some(cell) = table_block
@@ -206,7 +206,7 @@ impl Editor {
         table.add_row();
 
         table_block.update(cx, move |block, _cx| {
-            block.record.table = Some(table.clone());
+            block.record.set_table(Some(table.clone()));
         });
         self.rebuild_table_runtimes(cx);
         if let Some(cell) = table_block
@@ -246,7 +246,7 @@ impl Editor {
         };
         table.insert_row_at_visual(visual_row);
         table_block.update(cx, move |block, _cx| {
-            block.record.table = Some(table.clone());
+            block.record.set_table(Some(table.clone()));
         });
         self.rebuild_table_runtimes(cx);
         self.focus_table_cell_position(
@@ -290,7 +290,7 @@ impl Editor {
         };
         table.insert_column_at(column, alignment);
         table_block.update(cx, move |block, _cx| {
-            block.record.table = Some(table.clone());
+            block.record.set_table(Some(table.clone()));
         });
         self.rebuild_table_runtimes(cx);
         self.focus_table_cell_position(
@@ -639,7 +639,7 @@ impl Editor {
         };
         table.assign_column_alignment(column, alignment);
         table_block.update(cx, move |block, _cx| {
-            block.record.table = Some(table.clone());
+            block.record.set_table(Some(table.clone()));
         });
         self.rebuild_table_runtimes(cx);
         let selection = AxisSelection {
@@ -689,7 +689,7 @@ impl Editor {
         };
         table.exchange_visual_rows(visual_row, next_row);
         table_block.update(cx, move |block, _cx| {
-            block.record.table = Some(table.clone());
+            block.record.set_table(Some(table.clone()));
         });
         self.rebuild_table_runtimes(cx);
         let selection = AxisSelection {
@@ -745,7 +745,7 @@ impl Editor {
         };
         table.exchange_columns(column, next_column);
         table_block.update(cx, move |block, _cx| {
-            block.record.table = Some(table.clone());
+            block.record.set_table(Some(table.clone()));
         });
         self.rebuild_table_runtimes(cx);
         let selection = AxisSelection {
@@ -793,7 +793,7 @@ impl Editor {
         table.delete_body_row(row_index);
         let remaining_body_rows = table.rows.len();
         table_block.update(cx, move |block, _cx| {
-            block.record.table = Some(table.clone());
+            block.record.set_table(Some(table.clone()));
         });
         self.rebuild_table_runtimes(cx);
         // 行选区按可视下标寻址：首个正文行为 1（表头为 0）。无正文行时
@@ -853,7 +853,7 @@ impl Editor {
         };
         table.delete_header_row();
         table_block.update(cx, move |block, _cx| {
-            block.record.table = Some(table.clone());
+            block.record.set_table(Some(table.clone()));
         });
         self.rebuild_table_runtimes(cx);
         self.clear_table_axis_selection(cx);
@@ -889,7 +889,7 @@ impl Editor {
         table.remove_column(column);
         let focus_column = column.min(table.column_count().saturating_sub(1));
         table_block.update(cx, move |block, _cx| {
-            block.record.table = Some(table.clone());
+            block.record.set_table(Some(table.clone()));
         });
         self.rebuild_table_runtimes(cx);
         let selection = AxisSelection {

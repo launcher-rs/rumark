@@ -2779,9 +2779,9 @@ async fn code_block_cache_updates_when_language_changes(cx: &mut TestAppContext)
     });
 
     block.update(cx, |block, _cx| {
-        block.record.kind = BlockKind::CodeBlock {
+        block.record.set_kind(BlockKind::CodeBlock {
             language: Some("text".into()),
-        };
+        });
         block.refresh_render_cache();
     });
 

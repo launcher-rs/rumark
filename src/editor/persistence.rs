@@ -93,10 +93,11 @@ pub(crate) fn read_error_detail(err: &anyhow::Error, path: &Path, i18n: &I18nSna
 impl Editor {
     /// 按当前视图模式序列化文档文本。
     pub(super) fn serialized_document_text(&self, cx: &App) -> String {
+        let derived = self.derived_document(cx);
         if self.view_mode == super::ViewMode::Source {
-            self.document.raw_source_text(cx)
+            derived.raw_source.to_string()
         } else {
-            self.document.markdown_text(cx)
+            derived.markdown.to_string()
         }
     }
 

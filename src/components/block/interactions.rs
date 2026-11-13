@@ -114,7 +114,7 @@ impl Block {
             return false;
         };
         let heading_markdown = variant.heading_markdown(&self.record.title.serialize_markdown());
-        self.record.kind = BlockKind::Quote;
+        self.record.set_kind(BlockKind::Quote);
         self.record
             .set_title(InlineTextTree::from_markdown(&heading_markdown));
         self.sync_edit_mode_from_kind();
@@ -1976,7 +1976,7 @@ mod tests {
         let block = cx.new(|cx| Block::with_record(cx, BlockRecord::paragraph(String::new())));
 
         block.update(cx, |block, cx| {
-            block.record.kind = BlockKind::Quote;
+            block.record.set_kind(BlockKind::Quote);
             block.record.set_title(InlineTextTree::plain("first\n"));
             block.sync_edit_mode_from_kind();
             block.refresh_render_cache();

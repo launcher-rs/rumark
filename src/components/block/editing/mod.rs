@@ -1654,7 +1654,7 @@ impl Block {
             .map(|range| Self::adjust_range_for_shortcut(range, shortcut_removed_len))
             .unwrap_or_else(|| adjusted_cursor..adjusted_cursor);
 
-        self.record.kind = next_kind;
+        self.record.set_kind(next_kind);
         self.record.set_title(normalized_title);
         self.numbered_list_restart_requested = should_restart_numbered_list;
         self.sync_edit_mode_from_kind();
@@ -1854,8 +1854,7 @@ impl Block {
     /// 转为段落。
     pub(crate) fn make_paragraph(&mut self, cx: &mut Context<Self>) {
         self.prepare_undo_capture(UndoKind::NonCoalescible, cx);
-        self.record.kind = BlockKind::Paragraph;
-        self.record.raw_fallback = None;
+        self.record.set_kind(BlockKind::Paragraph);
         self.quote_reparse_requested = false;
         self.mark_changed(cx);
     }
@@ -1864,8 +1863,7 @@ impl Block {
     pub(crate) fn convert_to_heading(&mut self, level: u8, cx: &mut Context<Self>) {
         let level = level.clamp(1, 6);
         self.prepare_undo_capture(UndoKind::NonCoalescible, cx);
-        self.record.kind = BlockKind::Heading { level };
-        self.record.raw_fallback = None;
+        self.record.set_kind(BlockKind::Heading { level });
         self.quote_reparse_requested = false;
         self.mark_changed(cx);
     }
@@ -1881,8 +1879,7 @@ impl Block {
     /// 原地把本块转为分隔线，不发事件也不捕获撤销，供已管理这些的上层流程复用。
     pub(crate) fn make_separator(&mut self) {
         self.reset_inline_projection();
-        self.record.kind = BlockKind::Separator;
-        self.record.raw_fallback = None;
+        self.record.set_kind(BlockKind::Separator);
         self.record.set_title(InlineTextTree::plain(String::new()));
         self.quote_reparse_requested = false;
         self.sync_edit_mode_from_kind();
@@ -1901,8 +1898,7 @@ impl Block {
     ) {
         self.prepare_undo_capture(UndoKind::NonCoalescible, cx);
         self.reset_inline_projection();
-        self.record.kind = BlockKind::CodeBlock { language };
-        self.record.raw_fallback = None;
+        self.record.set_kind(BlockKind::CodeBlock { language });
         self.record.set_title(InlineTextTree::plain(String::new()));
         self.quote_reparse_requested = false;
         self.sync_edit_mode_from_kind();
@@ -1922,7 +1918,7 @@ impl Block {
 
         self.prepare_undo_capture(UndoKind::NonCoalescible, cx);
         self.reset_inline_projection();
-        self.record.kind = BlockKind::MathBlock;
+        self.record.set_kind(BlockKind::MathBlock);
         self.record.set_title(InlineTextTree::plain(source));
         self.quote_reparse_requested = false;
         self.sync_edit_mode_from_kind();

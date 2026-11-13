@@ -169,9 +169,9 @@ impl Block {
             BlockKind::CodeBlock { language } => language.clone(),
             _ => None,
         };
-        self.record.kind = BlockKind::CodeBlock {
+        self.record.set_kind(BlockKind::CodeBlock {
             language: (!normalized.is_empty()).then(|| SharedString::from(normalized)),
-        };
+        });
         self.code_language_selected_range =
             crate::text_offsets::normalize_utf8_range(self.code_language_text(), next_selection);
         self.code_language_selection_reversed = selection_reversed;

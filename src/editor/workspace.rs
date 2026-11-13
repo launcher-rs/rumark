@@ -63,7 +63,8 @@ pub(super) struct WorkspaceState {
     /// 文件节点标识到种类的映射（框架树行渲染时查图标与点击行为）。
     file_kind_map: Rc<BTreeMap<String, WorkspaceTreeKind>>,
     outline_tree: Vec<WorkspaceTreeNode>,
-    outline_source: Option<String>,
+    /// 大纲对应的（内容指纹, 是否源码模式），未变时跳过重建。
+    outline_key: Option<(u64, bool)>,
     expanded: HashSet<String>,
     selected: Option<WorkspaceSelection>,
     /// 用户拖拽后的侧边栏宽度（`None` 表示跟随视口自动计算）。
@@ -109,7 +110,7 @@ impl Editor {
         self.workspace.root = None;
         self.workspace.file_tree = None;
         self.workspace.file_error = None;
-        self.workspace.outline_source = None;
+        self.workspace.outline_key = None;
         if self.workspace.is_open {
             self.sync_workspace_models(cx);
         }
@@ -253,17 +254,24 @@ impl Editor {
         }
     }
 
-    /// 按当前文档源码同步大纲树（源码未变时跳过）。
+    /// 按当前文档源码同步大纲树（内容指纹与视图模式未变时跳过）。
     fn sync_workspace_outline(&mut self, cx: &mut Context<Self>) {
-        let source = self.serialized_document_text(cx);
-        if self.workspace.outline_source.as_deref() == Some(source.as_str()) {
+        let derived = self.derived_document(cx);
+        let is_source = self.view_mode == super::ViewMode::Source;
+        let key = (derived.fingerprint(), is_source);
+        if self.workspace.outline_key == Some(key) {
             return;
         }
 
-        let outline = build_outline_tree(&source);
+        let source = if is_source {
+            &derived.raw_source
+        } else {
+            &derived.markdown
+        };
+        let outline = build_outline_tree(source);
         prune_outline_state(&mut self.workspace, &outline);
         self.workspace.outline_tree = outline;
-        self.workspace.outline_source = Some(source);
+        self.workspace.outline_key = Some(key);
         self.sync_outline_tree_state(cx);
     }
 
@@ -1042,6 +1050,12 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    use rgpui::{AppContext, TestAppContext};
+
+    use super::super::Editor;
+    use crate::components::InlineTextTree;
+    use crate::i18n::I18nManager;
+
     #[test]
     fn workspace_scan_keeps_dirs_and_md_files_only() {
         let root =
@@ -1225,5 +1239,40 @@ mod tests {
             kinds["file:/docs/a.md"],
             WorkspaceTreeKind::MarkdownFile(_)
         ));
+    }
+
+    #[test]
+    fn outline_sync_rebuilds_only_on_content_change() {
+        let mut cx = TestAppContext::single();
+        cx.update(|cx| {
+            I18nManager::init_with_language_id(cx, "en-US");
+            rgpui::theme::init(cx);
+            crate::components::init(cx);
+        });
+        let editor = cx.new(|cx| Editor::from_markdown(cx, "# Root\n\ntext".to_string(), None));
+
+        editor.update(&mut cx, |editor, cx| {
+            editor.sync_workspace_outline(cx);
+            assert_eq!(editor.workspace.outline_tree.len(), 1);
+
+            // 手动清空大纲树：内容未变时跳过重建，则应保持为空。
+            editor.workspace.outline_tree.clear();
+            editor.sync_workspace_outline(cx);
+            assert!(
+                editor.workspace.outline_tree.is_empty(),
+                "内容未变应跳过大纲重建"
+            );
+
+            let first = editor.document.visible_blocks()[0].entity.clone();
+            first.update(cx, |block, _cx| {
+                block
+                    .record
+                    .set_title(InlineTextTree::plain("Root changed"));
+            });
+            editor.sync_workspace_outline(cx);
+            assert_eq!(editor.workspace.outline_tree.len(), 1, "内容变更应重建大纲");
+            assert_eq!(editor.workspace.outline_tree[0].label, "Root changed");
+        });
+        cx.quit();
     }
 }

@@ -67,12 +67,75 @@
 
 用根目录 `docs/render-sample.md` 打开逐项目视检查（覆盖 CommonMark + GFM 扩展、嵌套、边界）。本轮尤其看：引用内空行（`> `）、脚注内空行缩进、列表组之间的空段落折叠、H1/H2 细灰下划线、H6 发灰、表格整块选中（点表格框/非单元格处）、图片与 Mermaid/公式的「渲染 + 源码同屏」。
 
-### 3.3 源码映射与表格列宽的缓存（暂缓，缺前置条件）
+### 3.3 性能与体验审查 backlog（2026-11-13 全面审查，按序执行）
 
-- 现状：`build_source_target_mappings`（`src/editor/source_map.rs`）每次调用都遍历全部根块重算映射，`selection.rs` 与 `history.rs` 的一次交互里会调用多次；`ColumnLayout::measure`（`src/components/markdown/table.rs`）每帧为表格每个单元格重建 `render_cache` 并 `shape_text`。
-- 为什么暂缓：两处都没有可用的失效信号。文档树里**不存在版本号/修订号**（`grep revision|version` 在 `src/editor/*.rs` 无命中），靠「块数 + 末块标识」之类的指纹必然会出现陈旧缓存，代价是全选复制/删除/撤销的越界或错位，比省下的那点 CPU 贵得多。
-- 前置做法：先在 `DocumentTree` 的**所有**变更入口（root 增删、块文本改写、表格结构操作、撤销重做、导入替换）统一递增一个 `revision: u64`，再让缓存以 `(revision, table_width)` 为键。测试要覆盖「改一个字即失效」。
-- 已完成的同类优化：渲染改为「先分组、后建元素」两趟，元素只为视口内的行构建，且每帧不再克隆与块数等长的实体句柄（`src/editor/render.rs`）；光标闪烁在前半秒直接睡到边界，不再 33ms 空转（`src/components/block/editing/mod.rs`）。
+> 根因：文档树没有修订号，派生数据（序列化文本、源码映射、引用定义、大纲、状态栏统计、表格布局、代码高亮、公式 SVG）在**每帧或每键**全量重算。
+> 下面按杠杆排序，**做完一项删一项**。每条都带实读证据行号（行号会随改动漂移，以函数名为准）。
+> 框架侧问题可改 rgpui 源码：`D:\code\rgpui`（用户已授权切 path 依赖并改框架；本仓 AGENTS.md 的「不要改回 path 依赖」在此任务下由用户口头覆盖，改完要在本节记录结论）。
+
+**步骤 1（已完成 2026-11-13）：文档修订号 + 派生数据缓存层**
+
+- 落地：`BlockRecord.content_version` 仅由 `set_title`/`set_kind`/`set_table` 递增，散落的直接赋值已全部改走 setter；`DocumentTree.revision` 在 `rebuild_metadata_and_snapshot` 递增；新增 `src/editor/derive.rs`：指纹 = revision + 逐可见块 `(entity_id, content_version)` 哈希，缓存 `Arc` 化的 markdown / raw_source / 源码映射+块区间 / 图片与链接引用定义；`serialized_document_text`、`current_document_source`、`build_source_target_mappings*`、`rebuild_image_runtimes` 的解析部分改读缓存；`SourceMapEntry` 偏移表改 `Arc<Vec<usize>>` 使整份映射可廉价克隆。
+- 红线：任何内容变更必须走 setter，否则缓存陈旧（`model.rs` 有注释）。
+- 验证：新增 4 个回归测试（setter 递增、不改内容复用同一 `Arc`、改字失效、改 kind/结构失效）；全量 932 passed，clippy / fmt / 最小构建全绿；实机（仅调试构建）打字、跨块 Shift 连选（166/3081 字）、跨块删除、undo 恢复内容与选区、源码视图序列化与选区映射均正确。
+- 尾巴：状态栏/大纲仍每帧自算（现已读缓存文本，但扫描本身未省），交步骤 2。
+
+**步骤 2：状态栏与大纲改「变更才算」**
+
+- 证据：`status_bar.rs:92`（`compute_cursor_position` 每次全文 `matches('\n')` + grapheme 计数）、`status_bar.rs:71`（`word_count` 全文扫描）、`workspace.rs:257`（`sync_workspace_outline` 每次全量序列化后比对，侧栏开着每帧一次，调用点 `workspace.rs:487`）。
+- 做法：字数/行数统计按步骤 1 的指纹缓存；光标行列只在「指纹或光标偏移变化」时重算；大纲复用缓存文本，不要自己再序列化。
+- 验收：空闲（仅光标闪烁）时状态栏与大纲零全文扫描；测试覆盖「输入后统计更新、仅移动光标不重算字数」。
+
+**步骤 3：代码高亮增量/防抖**
+
+- 证据：`editing/mod.rs:567`（`refresh_render_cache` → `sync_code_highlight`）、`editing/code.rs:23`、`highlight.rs:636`（`Highlighter::new` + `highlight(..., None)`，无 old tree、无缓存，每次输入全量重解析）。
+- 做法：按 `(language, content_version)` 缓存高亮结果；进一步传 old tree 做增量解析，或防抖 + 后台线程（注意 `code-highlight-*` feature 门控要一致）。
+- 验收：千行代码块连续输入不再每键全量重解析；最小构建 `cargo check -p rumark --no-default-features` 仍通过。
+
+**步骤 4：公式先查缓存、Mermaid 缓存键量化 + 内存缓存**
+
+- 证据：`latex/mod.rs:93`（**先渲染后查缓存**，缓存只省写盘；调用点 `block/render.rs:620/1054` 在绘制路径）、`mermaid/mod.rs:194`（命中仍 `fs::read_to_string`）、`mermaid/mod.rs:230`（`scale.to_bits()` 入键 → 连续 resize 无限生成缓存文件）、`mermaid/mod.rs:200/215`（miss 时 UI 线程同步渲染）。
+- 做法：LaTeX 先按 key 查内存 + 磁盘缓存再渲染；Mermaid 把 scale 量化（如保留 2 位小数）入键、加内存缓存、miss 时后台渲染 + 占位；两者缓存目录加淘汰上限。
+- 验收：含公式/Mermaid 的文档滚动与光标闪烁不再触发重渲染；resize 不再生成新缓存文件。
+
+**步骤 5：撤销快照瘦身 + 上限**
+
+- 证据：`history.rs:64`（`source_text` 存整篇 String）、`history.rs:139`（`UNDO_LIMIT=200` 只限 undo）、`history.rs:347/367`（redo/undo 回压**无上限**）。1MB 文档 ≈ 200–400MB。
+- 做法：改块级或 diff 快照（或至少 `Arc<str>` 共享 + 字节总量上限），redo 同样限长。
+- 验收：长文档连续输入的内存增长有上限；撤销/重做行为与现有测试一致。
+
+**步骤 6：查找防抖 + 工作区异步扫描**
+
+- 证据：`find.rs:132`（`InputEvent::Change` 直接 refresh，无防抖）、`find.rs:517`（`Vec<char>` + 每候选 `String` 分配 + `to_lowercase`，O(N·M)，2000 上限只截断结果不省扫描）、`workspace.rs:838`（同步递归扫描，无深度/忽略/异步/监听，任一子目录不可读 `entry?` **整树失败**）。
+- 做法：查找加防抖 + 复用上次命中做增量；工作区扫描移后台 + 忽略规则（`.git`/`node_modules`/`target` 等）+ 深度上限 + 单目录失败降级为占位而非整树失败。
+- 验收：大目录打开侧栏不卡 UI；逐字输入查找不阻塞。
+
+**步骤 7：另存为陈旧快照 + 保存/导出后台化**
+
+- 证据：`persistence.rs:168`（弹框**前**序列化）→ `:223` 写盘 → `:254` `apply_successful_save` 清脏标记（`:123`）。对话框期间若可编辑，保存旧内容却标记已保存 → **静默丢数据**（对话框模态性待确认）。`persistence.rs:141` 保存到已有路径在 UI 线程同步序列化 + 原子写（`sync_all` + rename 重试 sleep）。
+- 做法：写盘前重新序列化（或写后比对当前文本再决定清脏）；保存/HTML 导出移后台 + 进度提示；PDF 字体缓存（`pdf.rs:78` 每次解析 ~20MB CJK 字体）。
+- 验收：构造「另存为对话框期间继续编辑」场景不丢数据；大文档保存不卡 UI。
+
+**步骤 8：配置内存缓存**
+
+- 证据：`preferences.rs:410`（每次调用读盘 + TOML 解析，无内存缓存；粘贴图片等热路径也读，`events.rs:319`）。
+- 做法：进程内缓存 + 变更才写；注意多窗口共享与外部改动的失效策略。
+- 验收：一次交互内重复读偏好零磁盘 IO；偏好窗口保存后其他窗口能读到新值。
+
+**步骤 9：rgpui 资产缓存淘汰与失败不缓存（框架侧）**
+
+- 证据：rgpui `app.rs` `fetch_asset`（约 2962–2985）`loading_assets` 只在显式 `remove_asset` 时清除，`Err` 同样被缓存 → 瞬时网络失败整会话占位图、内存无限增长。
+- 做法：在 `D:\code\rgpui` 改框架（失败结果不缓存或短 TTL、加 LRU 上限），或先在 rumark 侧失败时调 `remove_asset` 重试。改框架要记录分支/提交与回归范围。
+- 验收：断网后恢复网络，图片能重新加载；长时间浏览大量图片内存有上限。
+
+**步骤 10：粘贴图片与启动路径（较低优先）**
+
+- 证据（代理报告，动手前先复核）：`events.rs:551-578` 粘贴图片 UI 线程同步 base64（≤5MB）+ 落盘，内嵌 data URI 放大每键序列化；`main.rs:197` 启动全同步才出窗；`app_menu.rs:185` 每开一个文件读 history + 原子写 fsync + `config/mod.rs:283` 逐条 canonicalize；`markdown/image.rs:172` 嵌入图每渲染新建 Arc + 全字节 hash。
+- 做法：后台编码/落盘、内嵌改引用；启动先出窗再并行加载；最近文件防抖合并；图片按内容 hash 缓存。
+
+**已确认无问题（别误改）**：光标闪烁已睡到边界（`editing/mod.rs:2184`）、滚动条淡出是一次性定时器（`events.rs:1145`）、拖拽自动滚动仅拖拽期 16ms 运行（`selection.rs:547`）、右键/图片菜单轻量（`context_menu.rs:253`、`image_menu.rs:181`）、PDF `wrap_text` 为 O(n)、DOCX 不加载字体文件。
+
+**已完成的同类优化**：渲染「先分组、后建元素」两趟 + 只为视口内行建元素 + 每帧不再克隆与块数等长的实体句柄（`render.rs`）；光标闪烁前半秒睡到边界（`editing/mod.rs`）。
 
 ## 4. 计划中的功能：一个窗口内多文档 tab
 
@@ -116,7 +179,7 @@
 ```pwsh
 cargo fmt --check
 cargo clippy -p rumark --all-targets          # 期望 0 warning
-cargo test -p rumark                          # 当前基线 928 passed
+cargo test -p rumark                          # 当前基线 932 passed
 cargo check -p rumark --no-default-features   # 期望 5 个已知 warning
 git diff --check -- 'src/*.rs' 'AGENTS.md'    # 期望无输出
 ```

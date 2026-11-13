@@ -207,9 +207,9 @@ impl Editor {
     /// 重建图片/链接引用定义并同步所有可见块的运行时上下文。
     pub(super) fn rebuild_image_runtimes(&mut self, cx: &mut Context<Self>) {
         let base_dir = self.image_base_dir();
-        let markdown = self.document.markdown_text(cx);
-        self.image_reference_definitions = Arc::new(parse_image_reference_definitions(&markdown));
-        self.link_reference_definitions = Arc::new(parse_link_reference_definitions(&markdown));
+        let derived = self.derived_document(cx);
+        self.image_reference_definitions = derived.image_references.clone();
+        self.link_reference_definitions = derived.link_references.clone();
         self.rebuild_footnote_registry(cx);
         let visible = self.document.visible_blocks().to_vec();
         for visible_block in visible {
