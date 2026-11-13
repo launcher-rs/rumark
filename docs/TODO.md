@@ -5,26 +5,11 @@
 
 ## 1. 工作区状态与改动分组
 
-上一轮改动**已全部提交，工作区干净**（见 `git log --oneline -6`）：内容选择体验优化（纵向/横向 Shift 扩选、跨块接续、方向键收起跨块选区、输入替换跨块选区）为最近一次提交，涉及 `src/components/actions.rs`、`src/config/preferences.rs`、`src/i18n/{zh-CN,en-US}.json`、`src/components/block/{model,render,interactions,input}.rs`、`src/components/block/editing/mod.rs`、`src/editor/{mod,events,render,selection,tests}.rs`；更早的提交为脚注族跨块映射、Typora 对比体验、图片请求与偏好/i18n/PDF 修复、落盘原子写，另有 `docs:`（本文件 + AGENTS.md）与 `test:`（`docs/render-sample.md` 夹具）两个小提交。
+2026-11-13 的**性能与体验审查 backlog（第 3.3 节）已收口并提交**，工作区干净（见 `git log --oneline -3`）。首个提交 `0abf8f4` 是派生数据缓存层；后续提交覆盖步骤 1～9 的余下优化、两个正确性修复（任务复选框绕过 setter、跨块复制把词内 `_` 误转义成 `\_`）与步骤 9 的应用层图片缓存。步骤 7/10 中的异步化子集未做，理由见 3.3 节「剩余」。
 
 `docs/render-sample.md` 被 `include_str!` 进多处测试（`components/markdown/inline/tests.rs`、`editor/document.rs`、`editor/tests.rs`、`export/{pdf,docx}.rs`），**改它就是改测试夹具**，改完必须跑全量 `cargo test -p rumark`。
 
-若后续又有未提交改动，按下面四个主题归组提交（多主题文件按「主主题」归组；要严格按主题落提交就用 `git add -p` 分块暂存）。提交信息风格 `type: 中文描述`（`fix:` / `test:` / `chore:` / `docs:`）：
-
-| 主题 | 文件 |
-| --- | --- |
-| A 跨块复制/删除与脚注源码映射 | `src/editor/selection.rs`、`src/editor/source_mapping.rs`、`src/editor/tree.rs`、`src/editor/document.rs`（仅新增测试） |
-| B Typora 对比体验 | `src/components/block/render.rs`、`src/components/block/runtime/{mod,image,tests}.rs`、`src/components/mod.rs`、`src/components/actions.rs`、`src/editor/{events,tests}.rs` |
-| C 其他修复 | `src/net/mod.rs`、`src/config/preferences.rs`、`src/i18n/mod.rs`、`src/export/pdf.rs`、`src/app_menu.rs` |
-| D 落盘统一原子写 | `src/atomic_file.rs`（新）、`src/config/{mod,preferences}.rs`、`src/i18n/mod.rs`、`src/theme/mod.rs`、`src/editor/{persistence,file_drop,events}.rs`、`src/components/{latex,mermaid}/mod.rs`、`src/main.rs`、`AGENTS.md` |
-| 单独 | `docs/render-sample.md`（回归夹具，已单独提交） |
-
-各文件改动要点（分组内按文件）：
-
-- **A**：`selection.rs` 的 `cross_block_selected_markdown` 重做拼接记账（`cross_block_separator_newlines` 改语义为「换行数」、新增 `container_blank_line_prefix` 补容器内空行前缀、空片段块与 `pending_empty` 处理；回归测试 `cross_block_copy_and_delete_match_source_for_footnote_definitions`，21 个 fixture 断言「复制 == 序列化文本」且「整篇删除后文档为空」）；`source_mapping.rs` 脚注定义头行/首段/子块映射与容器空行记账（`push_footnote_definition_head_mapping` 带缩进、首段不再重复覆盖 `[^id]: `、子块层级 `list_depth + 2`）；`tree.rs` 的 Quote/Callout 子级 `list_depth` 从 0 起算。
-- **B**：`render.rs` H1/H2 细灰下划线、H6 发灰（`theme.muted_foreground`）、图片/Mermaid/MathBlock「渲染保留 + 聚焦叠加源码行」、列表组间空段落折叠、表格与分隔线整块选中；`runtime/mod.rs` 的 `collapses_as_list_group_separator(focused)`、`is_source_raw_mode` 同时排除 `MathBlock | MermaidBlock`；`runtime/image.rs` 的 `showing_image_source_with_render()`；`components/mod.rs` 的 `is_refcell_reborrow_panic`（只吞 RefCell 重借冲突）；`actions.rs` 给 `ToggleViewMode` 补默认键 `ctrl-/`；`events.rs` 表格内部交互前清跨块选区。
-- **C**：`net/mod.rs` 图片请求连接/请求超时（10s/30s）+ 固定 4 线程池 `ImageWorkerPool`（原来每个请求新建裸线程）；`preferences.rs` 偏好窗口保存时保留磁盘上的自定义状态栏按钮；`i18n/mod.rs` `I18nSnapshot` 改为共享 map 而非深拷贝；`export/pdf.rs` 毫米↔点换算改为 `MM_PER_PT = 0.3528` / `PT_PER_MM = 2.8346`（原先误用屏幕像素的 0.2646，版心宽度偏差约 1.33 倍）；`app_menu.rs` 打开文件优先复用空白窗口（`try_load_into_active_blank_window` / `open_file_preferring_blank_window`）、`show_window_prompt_with_level` 支持指定对话框级别。
-- **D**：新增 `src/atomic_file.rs`（`write_text`/`write_bytes`/`copy_file` + 私有 `write_with`：同目录临时文件 → `sync_all` → `rename`，失败清理临时文件），全部落盘点改走它（配置、主题/语言包、文档保存与另存、HTML/PDF-DOCX 导出、粘贴图片、LaTeX/Mermaid SVG 缓存、旧配置目录迁移）；`theme/mod.rs` 另补了 `h1_border_width` 的注释；`AGENTS.md` 模块清单加 `atomic_file.rs` 并新增「不要再用裸 `std::fs::write`/`fs::copy`」红线。
+后续改动按主题归组提交（多主题文件按「主主题」归组；要严格按主题落提交就用 `git add -p` 分块暂存）。提交信息风格 `type: 中文描述`（`fix:` / `perf:` / `test:` / `chore:` / `docs:`）。
 
 ## 2. 待决事项（需要拍板）
 
@@ -71,67 +56,35 @@
 
 > 根因：文档树没有修订号，派生数据（序列化文本、源码映射、引用定义、大纲、状态栏统计、表格布局、代码高亮、公式 SVG）在**每帧或每键**全量重算。
 > 下面按杠杆排序，**做完一项删一项**。每条都带实读证据行号（行号会随改动漂移，以函数名为准）。
-> 框架侧问题可改 rgpui 源码：`D:\code\rgpui`（用户已授权切 path 依赖并改框架；本仓 AGENTS.md 的「不要改回 path 依赖」在此任务下由用户口头覆盖，改完要在本节记录结论）。
+> 框架侧问题可改 rgpui 源码：`D:\code\rgpui`（用户已授权切 path 依赖并改框架）。**实际结论：未切、未改**，理由与验收记录见下方「rgpui 框架侧结论」。
 
 **步骤 1（已完成 2026-11-13）：文档修订号 + 派生数据缓存层**
 
 - 落地：`BlockRecord.content_version` 仅由 `set_title`/`set_kind`/`set_table` 递增，散落的直接赋值已全部改走 setter；`DocumentTree.revision` 在 `rebuild_metadata_and_snapshot` 递增；新增 `src/editor/derive.rs`：指纹 = revision + 逐可见块 `(entity_id, content_version)` 哈希，缓存 `Arc` 化的 markdown / raw_source / 源码映射+块区间 / 图片与链接引用定义；`serialized_document_text`、`current_document_source`、`build_source_target_mappings*`、`rebuild_image_runtimes` 的解析部分改读缓存；`SourceMapEntry` 偏移表改 `Arc<Vec<usize>>` 使整份映射可廉价克隆。
 - 红线：任何内容变更必须走 setter，否则缓存陈旧（`model.rs` 有注释）。
-- 验证：新增 4 个回归测试（setter 递增、不改内容复用同一 `Arc`、改字失效、改 kind/结构失效）；全量 932 passed，clippy / fmt / 最小构建全绿；实机（仅调试构建）打字、跨块 Shift 连选（166/3081 字）、跨块删除、undo 恢复内容与选区、源码视图序列化与选区映射均正确。
-- 尾巴：状态栏/大纲仍每帧自算（现已读缓存文本，但扫描本身未省），交步骤 2。
+- 验证：新增 4 个回归测试（setter 递增、不改内容复用同一 `Arc`、改字失效、改 kind/结构失效）；当时全量 932 passed，clippy / fmt / 最小构建全绿；实机（仅调试构建）打字、跨块 Shift 连选（166/3081 字）、跨块删除、undo 恢复内容与选区、源码视图序列化与选区映射均正确。
+- 尾巴：状态栏/大纲当时仍每帧自算，已由步骤 2 收口。
 
-**步骤 2：状态栏与大纲改「变更才算」**
+**rgpui 框架侧结论（步骤 9 要求在此记录）**：只读核对了 `D:\code\rgpui`（分支 `feat/diff`，HEAD `4ddd9345`，工作区干净）。`crates/rgpui/src/app.rs:2994` 的 `fetch_asset` 确实把 `Err` 也永久留在 `loading_assets`，且无 LRU/TTL；`StatusBar` 是纯值 `RenderOnce`、每帧重建元素树，但**它不是「每帧全量文档计算」的根因**，根因在应用层（已由步骤 1/2 解决）。**未切 path 依赖、未改框架源码**：本仓改用 `Div::image_cache` 挂自定义 `ImageCache`（`src/editor/image_cache.rs`）覆盖整棵编辑器元素树，已满足「失败可重试 + 内存有上限」的验收；`Cargo.toml` 三处 `1.7` 版本依赖保持不变，符合 AGENTS.md「不要改回 path 依赖」红线。若将来启用框架其他 `Asset`，再评估上游修复。
 
-- 证据：`status_bar.rs:92`（`compute_cursor_position` 每次全文 `matches('\n')` + grapheme 计数）、`status_bar.rs:71`（`word_count` 全文扫描）、`workspace.rs:257`（`sync_workspace_outline` 每次全量序列化后比对，侧栏开着每帧一次，调用点 `workspace.rs:487`）。
-- 做法：字数/行数统计按步骤 1 的指纹缓存；光标行列只在「指纹或光标偏移变化」时重算；大纲复用缓存文本，不要自己再序列化。
-- 验收：空闲（仅光标闪烁）时状态栏与大纲零全文扫描；测试覆盖「输入后统计更新、仅移动光标不重算字数」。
+**已完成（2026-11-13）**
 
-**步骤 3：代码高亮增量/防抖**
+2. **状态栏与大纲按变更重算**：`status_stats` 复用 `DerivedDocument` 的文本 + 指纹，一次取用同时拿到两种视图文本；`capture_source_selection_snapshot` 改走 `mapping_index_by_entity`，不再克隆整份映射 Vec；`document_fingerprint` 引入 `DOCUMENT_CONTENT_EPOCH` + `(epoch, revision, fingerprint)` 快路，空闲帧零逐块哈希；大纲用 `(fingerprint, is_source)` 短路。验证：空闲帧复用、输入后统计更新两个回归测试。
+3. **代码高亮按内容版本缓存**：`Block.code_highlight_key: Option<(Option<SharedString>, u64)>`，`sync_code_highlight` 键相同直接 return，不再每次 `refresh_render_cache` 全量 tree-sitter 重解析。验证：`code_highlight_reuses_result_until_content_changes` 计数 hook。
+4. **公式/Mermaid 缓存修正**：新增 `src/components/svg_cache.rs`（内存命中 → 磁盘命中 → 才渲染；磁盘淘汰上限 512、内存 256；内存命中可恢复被删的缓存文件）；LaTeX 改为先查缓存再渲染；Mermaid display SVG 与导出路径都走 `load_svg`；`font_size` / `scale` 的 `f32::to_bits()` 入键改为量化到 0.01，止住 resize 时无限生成缓存文件。验证：重复加载不重渲染、删除缓存文件可恢复、亚像素变化键稳定三个测试。
+5. **撤销快照瘦身 + 上限**：`UndoEntry.source_text` 与 `last_stable_source_text` 改 `Arc<str>`，直接复用派生缓存；新增 `HISTORY_BYTES_LIMIT = 64 MiB` 与统一 `trim_history`，undo/redo 都受「200 条 + 字节总量」双重限制。验证：条数上限、字节上限、两者叠加顺序、快照共享分配四个测试。
+6. **查找防抖 + 工作区扫描健壮化**：`FIND_DEBOUNCE = 120ms`，用 `Task` drop 取消旧任务；`FindSearchKey = (fingerprint, is_source, query, match_case, whole_word)` 短路重搜；`compute_find_matches` 复用 `String` 窗口 buffer，大小写不敏感比较改 `chars().flat_map(char::to_lowercase).eq(...)`，不再每候选分配。工作区扫描加忽略目录、深度上限 12、单目录 2000 条上限，子目录不可读降级为空节点（根目录失败仍报错）。验证：Unicode 折行语义、防抖复用、忽略目录、深度上限、子目录降级五个测试。
+7. **另存为数据安全 + PDF 字体缓存**：弹框前不再序列化旧快照，写盘前从 `weak_editor` 取「此刻」文本，写盘后若当前文本已变则保留 `document_dirty` / `pending_window_edited`；PDF 的 `Fonts::load` 改走进程级 `OnceLock` 字体缓存（原来每次导出重读并解析 ~20MB CJK 字体）。验证：`save_as_writes_latest_text_edited_during_dialog`、`cjk_font_is_parsed_once_across_exports`。**保存/HTML 导出移后台 + 进度提示未做**，见「剩余」。
+8. **配置内存缓存 + 变更才写**：`read_app_preferences_with_dirs` 按 `app_config_file()` 路径缓存，用 `(SystemTime, u64)` 签名感知外部改动，本进程写盘后主动失效；启动路径只在「文件不存在 / 损坏重建 / 规范化后内容真的变化」时落盘（原来每次启动都原子写 + fsync，会抹掉用户手写注释）。验证：重复读取命中缓存、保存后失效、外部编辑被检测、未变更不重写四个测试。
+9. **图片缓存有界化与失败重试**：`BoundedImageCache` 自行 spawn 加载任务、不经框架的 `fetch_asset`；成功结果按 LRU 保留 256 条并显式 `drop_image`，失败结果保留 5s 后丢弃条目并请求重绘，断网恢复后自动重新加载。验证：LRU 淘汰顺序、条目数上限、失败 TTL、资源键稳定性四个测试。框架源码未改（见上方结论）。
+10. **启动/图片热路径（部分）**：`ImageResolvedSource::Embedded` 改存 `Arc<Image>`，base64 解码与 `Image::from_bytes` 全字节哈希只在图片运行时重建时做一次，渲染帧直接复用；最近文件去重由两两比对（O(N²) 次 `canonicalize`）改为 `HashSet` 预计算比较键（O(N)）。验证：`embedded_data_uri_decodes_to_bytes`、`normalizing_recent_files_canonicalizes_each_path_once`。
 
-- 证据：`editing/mod.rs:567`（`refresh_render_cache` → `sync_code_highlight`）、`editing/code.rs:23`、`highlight.rs:636`（`Highlighter::new` + `highlight(..., None)`，无 old tree、无缓存，每次输入全量重解析）。
-- 做法：按 `(language, content_version)` 缓存高亮结果；进一步传 old tree 做增量解析，或防抖 + 后台线程（注意 `code-highlight-*` feature 门控要一致）。
-- 验收：千行代码块连续输入不再每键全量重解析；最小构建 `cargo check -p rumark --no-default-features` 仍通过。
+**额外修复（不在原 backlog）**：`BlockEvent::ToggleTaskChecked` 直接赋值 `kind` 绕过 setter，导致派生缓存读到旧勾选状态 → 改走 `set_kind`；跨块复制时 `escape_literal_text_with_offset_map` 无条件把字面 `_` 转义成 `\_`（`111111_22222222` 复制成 `111111\_22222222`）→ 按 CommonMark 侧翼规则，同一片段内词内 `_` 不再转义，片段边界仍保守转义。
 
-**步骤 4：公式先查缓存、Mermaid 缓存键量化 + 内存缓存**
+**剩余（低优先，需单独回归）**
 
-- 证据：`latex/mod.rs:93`（**先渲染后查缓存**，缓存只省写盘；调用点 `block/render.rs:620/1054` 在绘制路径）、`mermaid/mod.rs:194`（命中仍 `fs::read_to_string`）、`mermaid/mod.rs:230`（`scale.to_bits()` 入键 → 连续 resize 无限生成缓存文件）、`mermaid/mod.rs:200/215`（miss 时 UI 线程同步渲染）。
-- 做法：LaTeX 先按 key 查内存 + 磁盘缓存再渲染；Mermaid 把 scale 量化（如保留 2 位小数）入键、加内存缓存、miss 时后台渲染 + 占位；两者缓存目录加淘汰上限。
-- 验收：含公式/Mermaid 的文档滚动与光标闪烁不再触发重渲染；resize 不再生成新缓存文件。
-
-**步骤 5：撤销快照瘦身 + 上限**
-
-- 证据：`history.rs:64`（`source_text` 存整篇 String）、`history.rs:139`（`UNDO_LIMIT=200` 只限 undo）、`history.rs:347/367`（redo/undo 回压**无上限**）。1MB 文档 ≈ 200–400MB。
-- 做法：改块级或 diff 快照（或至少 `Arc<str>` 共享 + 字节总量上限），redo 同样限长。
-- 验收：长文档连续输入的内存增长有上限；撤销/重做行为与现有测试一致。
-
-**步骤 6：查找防抖 + 工作区异步扫描**
-
-- 证据：`find.rs:132`（`InputEvent::Change` 直接 refresh，无防抖）、`find.rs:517`（`Vec<char>` + 每候选 `String` 分配 + `to_lowercase`，O(N·M)，2000 上限只截断结果不省扫描）、`workspace.rs:838`（同步递归扫描，无深度/忽略/异步/监听，任一子目录不可读 `entry?` **整树失败**）。
-- 做法：查找加防抖 + 复用上次命中做增量；工作区扫描移后台 + 忽略规则（`.git`/`node_modules`/`target` 等）+ 深度上限 + 单目录失败降级为占位而非整树失败。
-- 验收：大目录打开侧栏不卡 UI；逐字输入查找不阻塞。
-
-**步骤 7：另存为陈旧快照 + 保存/导出后台化**
-
-- 证据：`persistence.rs:168`（弹框**前**序列化）→ `:223` 写盘 → `:254` `apply_successful_save` 清脏标记（`:123`）。对话框期间若可编辑，保存旧内容却标记已保存 → **静默丢数据**（对话框模态性待确认）。`persistence.rs:141` 保存到已有路径在 UI 线程同步序列化 + 原子写（`sync_all` + rename 重试 sleep）。
-- 做法：写盘前重新序列化（或写后比对当前文本再决定清脏）；保存/HTML 导出移后台 + 进度提示；PDF 字体缓存（`pdf.rs:78` 每次解析 ~20MB CJK 字体）。
-- 验收：构造「另存为对话框期间继续编辑」场景不丢数据；大文档保存不卡 UI。
-
-**步骤 8：配置内存缓存**
-
-- 证据：`preferences.rs:410`（每次调用读盘 + TOML 解析，无内存缓存；粘贴图片等热路径也读，`events.rs:319`）。
-- 做法：进程内缓存 + 变更才写；注意多窗口共享与外部改动的失效策略。
-- 验收：一次交互内重复读偏好零磁盘 IO；偏好窗口保存后其他窗口能读到新值。
-
-**步骤 9：rgpui 资产缓存淘汰与失败不缓存（框架侧）**
-
-- 证据：rgpui `app.rs` `fetch_asset`（约 2962–2985）`loading_assets` 只在显式 `remove_asset` 时清除，`Err` 同样被缓存 → 瞬时网络失败整会话占位图、内存无限增长。
-- 做法：在 `D:\code\rgpui` 改框架（失败结果不缓存或短 TTL、加 LRU 上限），或先在 rumark 侧失败时调 `remove_asset` 重试。改框架要记录分支/提交与回归范围。
-- 验收：断网后恢复网络，图片能重新加载；长时间浏览大量图片内存有上限。
-
-**步骤 10：粘贴图片与启动路径（较低优先）**
-
-- 证据（代理报告，动手前先复核）：`events.rs:551-578` 粘贴图片 UI 线程同步 base64（≤5MB）+ 落盘，内嵌 data URI 放大每键序列化；`main.rs:197` 启动全同步才出窗；`app_menu.rs:185` 每开一个文件读 history + 原子写 fsync + `config/mod.rs:283` 逐条 canonicalize；`markdown/image.rs:172` 嵌入图每渲染新建 Arc + 全字节 hash。
-- 做法：后台编码/落盘、内嵌改引用；启动先出窗再并行加载；最近文件防抖合并；图片按内容 hash 缓存。
+- 保存 / HTML 导出移后台 + 进度提示（步骤 7 的另一半）：涉及 `atomic_file` 的 `sync_all`/rename 重试与对话框/关闭保护的状态机，改动面大且难用单测覆盖，暂留 UI 线程同步写；数据丢失风险已由上面的「写盘前重取 + 写后比对」消除。
+- 粘贴图片后台编码/落盘、内嵌图改引用、启动先出窗再并行加载、最近文件写入防抖合并（步骤 10 的异步化子集）：都属于启动/事件时序重构，建议连同 4.1 的多文档 tab 改造一起做，避免重复改动 `app_menu.rs` / `main.rs`。
 
 **已确认无问题（别误改）**：光标闪烁已睡到边界（`editing/mod.rs:2184`）、滚动条淡出是一次性定时器（`events.rs:1145`）、拖拽自动滚动仅拖拽期 16ms 运行（`selection.rs:547`）、右键/图片菜单轻量（`context_menu.rs:253`、`image_menu.rs:181`）、PDF `wrap_text` 为 O(n)、DOCX 不加载字体文件。
 
@@ -179,7 +132,7 @@
 ```pwsh
 cargo fmt --check
 cargo clippy -p rumark --all-targets          # 期望 0 warning
-cargo test -p rumark                          # 当前基线 932 passed
+cargo test -p rumark                          # 当前基线 968 passed
 cargo check -p rumark --no-default-features   # 期望 5 个已知 warning
 git diff --check -- 'src/*.rs' 'AGENTS.md'    # 期望无输出
 ```
