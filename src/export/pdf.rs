@@ -6,7 +6,7 @@
 //! Helvetica。含中文但找不到中文字体时返回可操作错误，而非输出乱码方框。
 
 use std::sync::{
-    Arc, OnceLock,
+    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 
@@ -80,40 +80,51 @@ struct Fonts {
 
 /// 进程内共享的已解析字体。CJK 字体动辄数十 MB，每次导出重新读盘并解析
 /// 会把「点一次导出」变成数百毫秒的纯 CPU 开销；解析结果只读，可安全复用。
+#[derive(Clone)]
 struct CachedCjkFont {
     parsed: Arc<ParsedFont>,
     units_per_em: f32,
     space_width_units: f32,
 }
 
-/// `Ok(None)` 表示机器上确实没有可用的中文字体；`Err` 保存解析失败的完整上下文。
-static CJK_FONT_CACHE: OnceLock<Result<Option<CachedCjkFont>, String>> = OnceLock::new();
-/// 字体解析次数（测试用：连续多次导出只允许解析一次）。
+/// 只缓存解析成功的字体；「找不到字体」与解析失败都不缓存，下次导出会
+/// 重新探测，这样用户补齐/修复字体后无需重启应用即可恢复。
+static CJK_FONT_CACHE: Mutex<Option<CachedCjkFont>> = Mutex::new(None);
+/// 字体探测/解析次数（测试用：缓存预热后连续多次导出不应再增加）。
 static CJK_FONT_PARSES: AtomicUsize = AtomicUsize::new(0);
 
-fn cached_cjk_font() -> &'static Result<Option<CachedCjkFont>, String> {
-    CJK_FONT_CACHE.get_or_init(|| {
-        CJK_FONT_PARSES.fetch_add(1, Ordering::Relaxed);
-        let Some((bytes, index, origin)) = bundled_cjk_font().or_else(system_cjk_font) else {
-            return Ok(None);
-        };
-        let mut warnings = Vec::new();
-        let parsed = ParsedFont::from_bytes(&bytes, index, &mut warnings)
-            .with_context(|| format!("中文字体解析失败：{origin}"))
-            .map_err(|err| format!("{err:#}"))?;
-        let metrics = parsed.get_font_metrics();
-        let units_per_em = metrics.units_per_em.max(1) as f32;
-        let space_width_units = parsed
-            .lookup_glyph_index(' ' as u32)
-            .and_then(|gid| parsed.get_glyph_width_internal(gid))
-            .map(|width| width as f32)
-            .unwrap_or(units_per_em / 4.0);
-        Ok(Some(CachedCjkFont {
-            parsed: Arc::new(parsed),
-            units_per_em,
-            space_width_units,
-        }))
-    })
+fn cached_cjk_font() -> Result<Option<CachedCjkFont>, String> {
+    // 冷缓存时在锁内探测并解析：多窗口同时导出只解析一次，不重复读盘/解析
+    // 数十 MB 字体；锁毒化时取回内部值继续，避免一次 panic 让导出永久失效。
+    let mut cache = CJK_FONT_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(font) = cache.as_ref() {
+        return Ok(Some(font.clone()));
+    }
+    // 缓存未命中（或上次失败/没有字体）：重新探测并解析。
+    CJK_FONT_PARSES.fetch_add(1, Ordering::Relaxed);
+    let Some((bytes, index, origin)) = bundled_cjk_font().or_else(system_cjk_font) else {
+        return Ok(None);
+    };
+    let mut warnings = Vec::new();
+    let parsed = ParsedFont::from_bytes(&bytes, index, &mut warnings)
+        .with_context(|| format!("中文字体解析失败：{origin}"))
+        .map_err(|err| format!("{err:#}"))?;
+    let metrics = parsed.get_font_metrics();
+    let units_per_em = metrics.units_per_em.max(1) as f32;
+    let space_width_units = parsed
+        .lookup_glyph_index(' ' as u32)
+        .and_then(|gid| parsed.get_glyph_width_internal(gid))
+        .map(|width| width as f32)
+        .unwrap_or(units_per_em / 4.0);
+    let cached = CachedCjkFont {
+        parsed: Arc::new(parsed),
+        units_per_em,
+        space_width_units,
+    };
+    *cache = Some(cached.clone());
+    Ok(Some(cached))
 }
 
 impl Fonts {
@@ -998,12 +1009,18 @@ mod tests {
     fn cjk_font_is_parsed_once_across_exports() {
         use std::sync::atomic::Ordering;
 
-        // 并行测试可能已预热进程级缓存，故只断言「本次没有新增解析」。
+        // 先导出一份含中文的文档把解析结果写进进程级缓存（别的测试也可能已预热）。
+        render_pdf_bytes("# 预热\n\n中文段落。\n", &test_options()).expect("预热导出成功");
+
+        // 缓存已预热后再统计：后续导出不应新增任何探测/解析。
         let before = CJK_FONT_PARSES.load(Ordering::Relaxed);
         render_pdf_bytes("# 第一次\n\n中文段落。\n", &test_options()).expect("首次导出成功");
         render_pdf_bytes("# 第二次\n\n中文段落。\n", &test_options()).expect("再次导出成功");
-        let parses = CJK_FONT_PARSES.load(Ordering::Relaxed) - before;
-        assert!(parses <= 1, "连续导出不应重复解析字体：新增 {parses} 次");
+        assert_eq!(
+            CJK_FONT_PARSES.load(Ordering::Relaxed) - before,
+            0,
+            "缓存预热后连续导出不应重复解析字体"
+        );
 
         // 两次导出拿到同一份解析结果（Arc 指向同一分配）。
         let first = Fonts::load("中文").expect("字体可用");
