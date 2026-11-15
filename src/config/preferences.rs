@@ -409,8 +409,11 @@ impl From<&AppPreferences> for PreferencesFile {
     }
 }
 
-/// 偏好文件签名：`None` 表示文件不存在；`(修改时间, 长度)` 用于感知外部改动。
-type PreferencesSignature = Option<(SystemTime, u64)>;
+/// 偏好文件签名：`None` 表示文件不存在；`(修改时间, 长度, 内容校验和)` 用于感知外部改动。
+///
+/// 内容校验和取整个文件的 FNV-1a 哈希——偏好文件通常只有几 KB，读取开销可忽略，
+/// 但能可靠检测同秒同长度但内容不同的外部修改。
+type PreferencesSignature = Option<(SystemTime, u64, u64)>;
 
 #[derive(Clone)]
 struct CachedPreferences {
@@ -427,9 +430,26 @@ fn preferences_cache() -> &'static Mutex<HashMap<PathBuf, CachedPreferences>> {
     PREFERENCES_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// 对整个文件内容计算 FNV-1a 哈希，用于感知同秒同长度但内容不同的外部修改。
+/// 文件不存在或读取失败时返回 0（与空文件一致，不影响 metadata 层面的短路）。
+fn content_checksum(path: &Path) -> u64 {
+    let Ok(bytes) = std::fs::read(path) else {
+        return 0;
+    };
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &byte in &bytes {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 fn preferences_signature(path: &Path) -> PreferencesSignature {
     let metadata = std::fs::metadata(path).ok()?;
-    Some((metadata.modified().ok()?, metadata.len()))
+    let mtime = metadata.modified().ok()?;
+    let len = metadata.len();
+    let checksum = content_checksum(path);
+    Some((mtime, len, checksum))
 }
 
 fn cache_preferences(path: &Path, signature: PreferencesSignature, value: &AppPreferences) {
@@ -2191,10 +2211,10 @@ mod tests {
     use super::{
         AppPreferences, EditorSettings, ExportThemeMode, ImagePasteBehavior,
         PREFERENCES_CACHE_HITS, PendingConfigRecovery, PreferencesRecovery, StartupOpenPreference,
-        StatusBarButton, StatusBarPreferences, hotkey_keys_from_values, hotkey_values_from_keys,
-        load_or_create_app_preferences_with_dirs_and_locales, open_preferences_window_with_state,
-        read_app_preferences_with_dirs, save_app_preferences_with_dirs,
-        save_preferences_from_window_with_dirs,
+        StatusBarButton, StatusBarPreferences, content_checksum, hotkey_keys_from_values,
+        hotkey_values_from_keys, load_or_create_app_preferences_with_dirs_and_locales,
+        open_preferences_window_with_state, read_app_preferences_with_dirs,
+        save_app_preferences_with_dirs, save_preferences_from_window_with_dirs,
     };
     use crate::components::ShortcutCommand;
     use crate::config::RumarkConfigDirs;
@@ -2257,6 +2277,22 @@ mod tests {
         assert_eq!(preferences, AppPreferences::default());
         // 新用户默认使用白色主题。
         assert_eq!(preferences.default_theme_id, "rumark-light");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn content_checksum_detects_same_length_content_change() {
+        let root =
+            std::env::temp_dir().join(format!("rumark-preferences-hash-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("temp root should exist");
+        let path = root.join("config.toml");
+
+        std::fs::write(&path, "[theme]\ndefault_theme_id = \"rumark\"\n").expect("write");
+        let before = content_checksum(&path);
+        // 等长但内容不同：mtime/长度都相同的场景靠校验和兜底。
+        std::fs::write(&path, "[theme]\ndefault_theme_id = \"rumarK\"\n").expect("write");
+        assert_ne!(before, content_checksum(&path));
+
         let _ = std::fs::remove_dir_all(root);
     }
 
