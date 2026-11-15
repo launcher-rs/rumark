@@ -8,8 +8,8 @@ use std::path::Path;
 
 /// 原子写文本文件。
 ///
-/// 代价是目标被整块替换成新文件对象：原文件的权限位与硬链接不会保留，
-/// 新文件按目录默认权限创建。
+/// 代价是目标被整块替换成新文件对象：原文件的硬链接不会保留；Unix 上会沿用
+/// 原目标文件的权限位，目标不存在时按目录默认权限创建。
 pub(crate) fn write_text(path: &Path, contents: &str) -> std::io::Result<()> {
     write_bytes(path, contents.as_bytes())
 }
@@ -54,12 +54,23 @@ fn write_with(
         uuid::Uuid::new_v4()
     ));
     let temp_path = parent.join(temp_name);
+    // 覆盖已有文件时记下原权限：重命名换的是新文件对象，权限来自目录 umask，
+    // 会把用户收紧过的 0600 文档/配置放宽成 0644。
+    #[cfg(unix)]
+    let existing_permissions = std::fs::metadata(path)
+        .ok()
+        .map(|metadata| metadata.permissions());
 
     let write_result = (|| -> std::io::Result<()> {
         let mut file = std::fs::File::create(&temp_path)?;
         write(&mut file)?;
         // 先落盘再改名：否则断电后可能留下「已改名但内容仍在页缓存」的空文件。
-        file.sync_all()
+        file.sync_all()?;
+        #[cfg(unix)]
+        if let Some(permissions) = existing_permissions {
+            std::fs::set_permissions(&temp_path, permissions)?;
+        }
+        Ok(())
     })();
 
     if let Err(err) = write_result {
@@ -147,6 +158,27 @@ mod tests {
         write_text(&target, "second").expect("overwrite");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "second");
         assert_only_files(&root, &["config.toml"]);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_text_preserves_existing_unix_permissions_on_overwrite() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_root("atomic-mode");
+        let target = root.join("secret.md");
+
+        write_text(&target, "first").expect("first write");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        // 重命名换的是新文件对象，不显式沿用就会退回目录默认权限（通常 0644）。
+        write_text(&target, "second").expect("overwrite");
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "覆盖写应保留原文件权限");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "second");
+        assert_only_files(&root, &["secret.md"]);
 
         let _ = std::fs::remove_dir_all(root);
     }
