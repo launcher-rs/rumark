@@ -430,6 +430,15 @@ impl Editor {
         source: &PastedImageSource,
     ) -> anyhow::Result<(PathBuf, bool)> {
         let behavior = Self::current_image_paste_behavior();
+        self.materialize_pasted_image_with(source, behavior)
+    }
+
+    /// 按指定粘贴偏好落盘图片（测试可直接注入偏好，避免依赖全局配置）。
+    pub(super) fn materialize_pasted_image_with(
+        &self,
+        source: &PastedImageSource,
+        behavior: ImagePasteBehavior,
+    ) -> anyhow::Result<(PathBuf, bool)> {
         let root_dir = self.image_paste_root_dir()?;
 
         if matches!(behavior, ImagePasteBehavior::None)
@@ -893,6 +902,9 @@ impl Editor {
 
     /// 处理纯下划线段落上的回车：有匹配段落则合并为标题，
     /// 孤立短横线回退为分隔线；消费回车时返回真。
+    ///
+    /// 紧贴上一段的 `---`/`===` 按 CommonMark/GFM（及 Typora）视为 Setext 标题；
+    /// 想插分隔线需先空一行，空段落没有标题目标，会走下面的分隔线分支。
     fn try_form_setext_heading_on_newline(
         &mut self,
         block: &Entity<super::Block>,
@@ -2532,8 +2544,9 @@ mod tests {
     use super::{Editor, ImageEmbedTooLarge, image_error_detail};
     use crate::components::{
         Block, BlockEvent, BlockKind, BlockRecord, CalloutVariant, Delete, DeleteBack,
-        ExitCodeBlock, InlineTextTree, Newline,
+        ExitCodeBlock, InlineTextTree, Newline, PastedImageSource,
     };
+    use crate::config::ImagePasteBehavior;
     use rgpui::{App, AppContext, Entity, TestAppContext};
 
     /// 切换勾选必须经 set_kind，否则内容版本号不递增、派生缓存读到旧文本。
@@ -5002,5 +5015,118 @@ mod tests {
         // 非体积类错误保持原始信息，不做二次包装。
         let other = anyhow::Error::msg("failed to read");
         assert_eq!(image_error_detail(&other, &en), "failed to read");
+    }
+
+    /// 搭一个带文档目录的临时现场，返回 (根目录, 文档路径, 源图片路径)。
+    fn paste_image_fixture(bytes: &[u8]) -> (PathBuf, PathBuf, PathBuf) {
+        let root =
+            std::env::temp_dir().join(format!("rumark-paste-image-{}", uuid::Uuid::new_v4()));
+        let docs = root.join("docs");
+        std::fs::create_dir_all(&docs).expect("文档目录应创建成功");
+        let document = docs.join("note.md");
+        std::fs::write(&document, "# 文档").expect("文档应写入成功");
+        let source = root.join("source.png");
+        std::fs::write(&source, bytes).expect("源图片应写入成功");
+        (root, document, source)
+    }
+
+    /// 列出目录内名含 `.tmp-` 的残留临时文件。
+    fn temp_residues(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .expect("目录应可读")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp-"))
+            .collect()
+    }
+
+    #[rgpui::test]
+    async fn materialize_pasted_image_copies_local_file_into_document_folder(
+        cx: &mut TestAppContext,
+    ) {
+        let (root, document, source) = paste_image_fixture(b"\x89PNG-fake-bytes");
+        let editor = cx.new(|cx| Editor::from_markdown(cx, String::new(), Some(document.clone())));
+
+        let (target, relative) = editor.update(cx, |editor, _cx| {
+            editor
+                .materialize_pasted_image_with(
+                    &PastedImageSource::LocalPath(source.clone()),
+                    ImagePasteBehavior::CopyToDocumentFolder,
+                )
+                .expect("复制应成功")
+        });
+
+        assert_eq!(target, document.parent().unwrap().join("source.png"));
+        assert!(relative, "复制到文档目录后应使用相对引用");
+        assert_eq!(
+            std::fs::read(&target).expect("目标图片应可读"),
+            std::fs::read(&source).expect("源图片应可读"),
+            "目标字节应与源文件一致"
+        );
+        assert!(
+            temp_residues(target.parent().unwrap()).is_empty(),
+            "落盘后不应残留临时文件"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[rgpui::test]
+    async fn materialize_pasted_image_fails_cleanly_when_source_missing(cx: &mut TestAppContext) {
+        let (root, document, _source) = paste_image_fixture(b"unused");
+        let missing = root.join("missing.png");
+        let editor = cx.new(|cx| Editor::from_markdown(cx, String::new(), Some(document.clone())));
+
+        let err = editor.update(cx, |editor, _cx| {
+            editor
+                .materialize_pasted_image_with(
+                    &PastedImageSource::LocalPath(missing),
+                    ImagePasteBehavior::CopyToDocumentFolder,
+                )
+                .expect_err("源文件缺失时应失败")
+        });
+        assert!(err.to_string().contains("failed to copy"), "err: {err}");
+
+        let docs = document.parent().unwrap();
+        let leftovers: Vec<_> = std::fs::read_dir(docs)
+            .expect("文档目录应可读")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            leftovers,
+            vec!["note.md".to_string()],
+            "失败后不应留下半截目标文件或临时文件"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[rgpui::test]
+    async fn materialize_pasted_image_keeps_local_file_already_in_target_dir(
+        cx: &mut TestAppContext,
+    ) {
+        let (root, document, _source) = paste_image_fixture(b"unused");
+        let in_place = document.parent().unwrap().join("inline.png");
+        std::fs::write(&in_place, b"already-there").expect("就地图片应写入成功");
+        let editor = cx.new(|cx| Editor::from_markdown(cx, String::new(), Some(document.clone())));
+
+        let (target, relative) = editor.update(cx, |editor, _cx| {
+            editor
+                .materialize_pasted_image_with(
+                    &PastedImageSource::LocalPath(in_place.clone()),
+                    ImagePasteBehavior::CopyToDocumentFolder,
+                )
+                .expect("同目录路径应直接返回")
+        });
+
+        assert_eq!(target, in_place, "同目录图片不应再复制一份");
+        assert!(relative);
+        assert_eq!(
+            std::fs::read(&target).expect("图片应可读"),
+            b"already-there".to_vec()
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
