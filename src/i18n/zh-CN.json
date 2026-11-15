@@ -203,6 +203,7 @@
   "workspace_no_file_title": "未打开 Markdown 文件",
   "workspace_no_file_message": "打开或保存一个 .md 文件后，工作区会使用该文件所在目录。",
   "workspace_empty_files": "没有可显示的 Markdown 文件",
+  "workspace_files_truncated": "文件过多，仅显示前 {limit} 项",
   "workspace_empty_outline": "当前文档没有标题",
   "workspace_scan_failed": "无法读取工作区",
   "dialog_open_link_title": "打开链接？",

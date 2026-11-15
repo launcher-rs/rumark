@@ -81,6 +81,8 @@ pub(super) struct WorkspaceState {
     root: Option<PathBuf>,
     file_tree: Option<WorkspaceTreeNode>,
     file_error: Option<String>,
+    /// 文件树是否因条目过多被截断（仅显示前 `WORKSPACE_SCAN_MAX_ENTRIES` 项）。
+    file_tree_truncated: bool,
     /// 文件节点标识到种类的映射（框架树行渲染时查图标与点击行为）。
     file_kind_map: Rc<BTreeMap<String, WorkspaceTreeKind>>,
     outline_tree: Vec<WorkspaceTreeNode>,
@@ -131,6 +133,7 @@ impl Editor {
         self.workspace.root = None;
         self.workspace.file_tree = None;
         self.workspace.file_error = None;
+        self.workspace.file_tree_truncated = false;
         self.workspace.outline_key = None;
         if self.workspace.is_open {
             self.sync_workspace_models(cx);
@@ -163,6 +166,7 @@ impl Editor {
         self.workspace.root = next_root.clone();
         self.workspace.file_tree = None;
         self.workspace.file_error = None;
+        self.workspace.file_tree_truncated = false;
 
         let Some(root) = next_root else {
             self.workspace.selected = None;
@@ -179,15 +183,17 @@ impl Editor {
         }
 
         match scan_workspace_dir(&root) {
-            Ok(tree) => {
+            Ok((tree, truncated)) => {
                 self.workspace.expanded.insert(tree.id.clone());
                 self.workspace.file_tree = Some(tree);
+                self.workspace.file_tree_truncated = truncated;
                 self.workspace.selected = self
                     .file_path
                     .as_ref()
                     .map(|path| WorkspaceSelection::File(path.clone()));
             }
             Err(err) => {
+                self.workspace.file_tree_truncated = false;
                 self.workspace.file_error = Some(err.to_string());
             }
         }
@@ -592,7 +598,11 @@ impl Editor {
         }
 
         let kinds = self.workspace.file_kind_map.clone();
-        div()
+        let tree = Tree::new(&self.file_tree_state, move |ix, entry, selected, _, cx| {
+            render_file_tree_row(ix, entry, selected, &kinds, cx)
+        });
+
+        let panel = div()
             .w_full()
             .flex_1()
             .min_h(px(0.0))
@@ -600,13 +610,26 @@ impl Editor {
             .flex_col()
             .px(px(8.0))
             .py(px(10.0))
-            .child(Tree::new(
-                &self.file_tree_state,
-                move |ix, entry, selected, _, cx| {
-                    render_file_tree_row(ix, entry, selected, &kinds, cx)
-                },
-            ))
-            .into_any_element()
+            .child(tree);
+
+        if self.workspace.file_tree_truncated {
+            // 数字走参数，避免常量调整后文案与实际截断值脱节。
+            let limit = WORKSPACE_SCAN_MAX_ENTRIES.to_string();
+            let hint = i18n.t("workspace_files_truncated", &[("limit", limit.as_str())]);
+            panel.child(
+                div()
+                    .w_full()
+                    .flex_shrink_0()
+                    .px(px(4.0))
+                    .pt(px(6.0))
+                    .text_size(px(12.0))
+                    .text_color(theme.muted_foreground)
+                    .child(SharedString::from(hint)),
+            )
+        } else {
+            panel
+        }
+        .into_any_element()
     }
 
     /// 渲染工作区大纲树（为空时显示空状态；列表由框架树承载）。
@@ -875,15 +898,24 @@ fn is_ignored_workspace_dir(path: &Path) -> bool {
 }
 
 /// 扫描目录生成工作区文件树（仅目录与 Markdown 文件）。
-fn scan_workspace_dir(path: &Path) -> Result<WorkspaceTreeNode> {
-    scan_workspace_dir_at(path, 0, true)
+fn scan_workspace_dir(path: &Path) -> Result<(WorkspaceTreeNode, bool)> {
+    scan_workspace_dir_at(path, 0, true, WORKSPACE_SCAN_MAX_ENTRIES)
 }
 
 /// 带深度与失败降级的目录扫描。
 ///
 /// 根目录不可读仍是错误（交给 UI 提示）；子目录不可读或单条 entry 失败只
 /// 降级成空节点 / 跳过，不让整棵树消失。深度与条目上限防止大目录卡 UI。
-fn scan_workspace_dir_at(path: &Path, depth: usize, is_root: bool) -> Result<WorkspaceTreeNode> {
+///
+/// 返回 `(节点, 是否截断)`：任一目录的条目超过 `max_entries`（或子目录被
+/// 截断）时为 true，调用方据此向用户提示文件树不完整。`max_entries` 仅供
+/// 测试传入较小上限，生产路径固定用 `WORKSPACE_SCAN_MAX_ENTRIES`。
+fn scan_workspace_dir_at(
+    path: &Path,
+    depth: usize,
+    is_root: bool,
+    max_entries: usize,
+) -> Result<(WorkspaceTreeNode, bool)> {
     let empty_node = || WorkspaceTreeNode {
         id: file_node_id(path),
         label: file_label(path),
@@ -892,7 +924,7 @@ fn scan_workspace_dir_at(path: &Path, depth: usize, is_root: bool) -> Result<Wor
     };
 
     if depth >= WORKSPACE_SCAN_MAX_DEPTH {
-        return Ok(empty_node());
+        return Ok((empty_node(), false));
     }
 
     let entries = match fs::read_dir(path) {
@@ -902,12 +934,23 @@ fn scan_workspace_dir_at(path: &Path, depth: usize, is_root: bool) -> Result<Wor
                 anyhow::Error::new(err).context(format!("failed to read '{}'", path.display()))
             );
         }
-        Err(_) => return Ok(empty_node()),
+        Err(_) => return Ok((empty_node(), false)),
     };
 
-    let mut children = Vec::new();
-    for entry in entries.take(WORKSPACE_SCAN_MAX_ENTRIES) {
+    // 收到上限即停，只多看一条用于判断是否还有更多：避免大目录全量入内存。
+    let mut all_children = Vec::new();
+    let mut truncated = false;
+    for entry in entries {
         let Ok(entry) = entry else { continue };
+        if all_children.len() >= max_entries {
+            truncated = true;
+            break;
+        }
+        all_children.push(entry);
+    }
+
+    let mut children = Vec::new();
+    for entry in all_children {
         let entry_path = entry.path();
         let Ok(file_type) = entry.file_type() else {
             continue;
@@ -917,7 +960,10 @@ fn scan_workspace_dir_at(path: &Path, depth: usize, is_root: bool) -> Result<Wor
                 continue;
             }
             // 子目录内部已把失败降级为空节点，这里不会再拖垮整棵树。
-            children.push(scan_workspace_dir_at(&entry_path, depth + 1, false)?);
+            let (child, child_truncated) =
+                scan_workspace_dir_at(&entry_path, depth + 1, false, max_entries)?;
+            truncated |= child_truncated;
+            children.push(child);
         } else if file_type.is_file() && is_markdown_file(&entry_path) {
             children.push(WorkspaceTreeNode {
                 id: file_node_id(&entry_path),
@@ -936,12 +982,15 @@ fn scan_workspace_dir_at(path: &Path, depth: usize, is_root: bool) -> Result<Wor
             .then_with(|| left.label.to_lowercase().cmp(&right.label.to_lowercase()))
     });
 
-    Ok(WorkspaceTreeNode {
-        id: file_node_id(path),
-        label: file_label(path),
-        kind: WorkspaceTreeKind::Directory(path.to_path_buf()),
-        children,
-    })
+    Ok((
+        WorkspaceTreeNode {
+            id: file_node_id(path),
+            label: file_label(path),
+            kind: WorkspaceTreeKind::Directory(path.to_path_buf()),
+            children,
+        },
+        truncated,
+    ))
 }
 
 /// 取路径的文件名作为节点展示标签。
@@ -1106,10 +1155,10 @@ fn is_closing_fence(trimmed: &str, marker: char, len: usize) -> bool {
 mod tests {
     use super::{
         WORKSPACE_PANEL_RESIZE_MAX_WIDTH, WORKSPACE_PANEL_RESIZE_MIN_WIDTH,
-        WORKSPACE_SCAN_MAX_DEPTH, WorkspaceSelection, WorkspaceState, WorkspaceTreeKind,
-        WorkspaceTreeNode, build_outline_tree, clamp_workspace_panel_resize_width,
-        collect_file_kinds, file_tree_item, find_outline_line, outline_tree_item,
-        prune_outline_state, scan_workspace_dir, scan_workspace_dir_at,
+        WORKSPACE_SCAN_MAX_DEPTH, WORKSPACE_SCAN_MAX_ENTRIES, WorkspaceSelection, WorkspaceState,
+        WorkspaceTreeKind, WorkspaceTreeNode, build_outline_tree,
+        clamp_workspace_panel_resize_width, collect_file_kinds, file_tree_item, find_outline_line,
+        outline_tree_item, prune_outline_state, scan_workspace_dir, scan_workspace_dir_at,
         workspace_panel_width_for_viewport,
     };
     use std::collections::{BTreeMap, HashSet};
@@ -1131,7 +1180,7 @@ mod tests {
         fs::write(root.join("a.txt"), "ignored").expect("write txt");
         fs::write(root.join("nested").join("b.md"), "b").expect("write nested md");
 
-        let tree = scan_workspace_dir(&root).expect("scan tree");
+        let (tree, _truncated) = scan_workspace_dir(&root).expect("scan tree");
         let labels = tree
             .children
             .iter()
@@ -1162,7 +1211,7 @@ mod tests {
         fs::write(root.join("docs").join("keep.md"), "x").expect("write nested md");
         fs::write(root.join("visible.md"), "x").expect("write root md");
 
-        let tree = scan_workspace_dir(&root).expect("scan tree");
+        let (tree, _truncated) = scan_workspace_dir(&root).expect("scan tree");
         let labels = tree
             .children
             .iter()
@@ -1183,7 +1232,7 @@ mod tests {
         fs::create_dir_all(&deep).expect("create deep dirs");
         fs::write(deep.join("too-deep.md"), "x").expect("write deep md");
 
-        let tree = scan_workspace_dir(&root).expect("scan tree");
+        let (tree, _truncated) = scan_workspace_dir(&root).expect("scan tree");
         let mut node = &tree;
         let mut visited = 0;
         while let Some(child) = node.children.first() {
@@ -1203,12 +1252,12 @@ mod tests {
         fs::create_dir_all(&root).expect("create root");
         let missing = root.join("gone");
 
-        let node = scan_workspace_dir_at(&missing, 1, false)
+        let (node, _) = scan_workspace_dir_at(&missing, 1, false, WORKSPACE_SCAN_MAX_ENTRIES)
             .expect("子目录不可读应降级为空节点，而不是整树失败");
         assert!(node.children.is_empty());
         assert!(matches!(node.kind, WorkspaceTreeKind::Directory(_)));
         assert!(
-            scan_workspace_dir_at(&missing, 0, true).is_err(),
+            scan_workspace_dir_at(&missing, 0, true, WORKSPACE_SCAN_MAX_ENTRIES).is_err(),
             "根目录不可读仍应报错给 UI"
         );
 
@@ -1405,5 +1454,39 @@ mod tests {
             assert_eq!(editor.workspace.outline_tree[0].label, "Root changed");
         });
         cx.quit();
+    }
+
+    #[test]
+    fn workspace_scan_reports_truncation_when_exceeding_max_entries() {
+        let root =
+            std::env::temp_dir().join(format!("rumark-truncate-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("create root");
+        for i in 0..3 {
+            fs::write(root.join(format!("f{i}.md")), "x").expect("write md");
+        }
+
+        // 上限 2、实际 3 个文件：截断，且 children 恰好保留 2 项。
+        let (tree, truncated) = scan_workspace_dir_at(&root, 0, true, 2).expect("scan tree");
+        assert!(truncated, "超出上限应标记截断");
+        assert_eq!(tree.children.len(), 2, "截断后条目数应等于上限");
+
+        // 未超上限不截断。
+        let (tree, truncated) = scan_workspace_dir_at(&root, 0, true, 8).expect("scan tree");
+        assert!(!truncated, "未超上限不应截断");
+        assert_eq!(tree.children.len(), 3);
+
+        // 子目录被截断时根节点也要报告：根目录自身只有 1 个条目，不会被截断。
+        let nested_root = root.join("nested-root");
+        let nested = nested_root.join("nested");
+        fs::create_dir_all(&nested).expect("create nested");
+        for i in 0..3 {
+            fs::write(nested.join(format!("n{i}.md")), "x").expect("write nested md");
+        }
+        let (tree, truncated) = scan_workspace_dir_at(&nested_root, 0, true, 2).expect("scan tree");
+        assert!(truncated, "子目录截断应向上传播");
+        assert_eq!(tree.children.len(), 1);
+        assert_eq!(tree.children[0].children.len(), 2);
+
+        let _ = fs::remove_dir_all(root);
     }
 }

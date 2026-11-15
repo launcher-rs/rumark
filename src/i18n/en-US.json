@@ -219,6 +219,7 @@
   "workspace_no_file_title": "No Markdown File Open",
   "workspace_no_file_message": "Open or save a .md file to use its folder as the workspace.",
   "workspace_empty_files": "No Markdown files to show",
+  "workspace_files_truncated": "Too many files, showing first {limit} entries only",
   "workspace_empty_outline": "This document has no headings",
   "workspace_scan_failed": "Unable to Read Workspace",
   "dialog_open_link_title": "Open link?",
