@@ -5,7 +5,11 @@
 
 ## 1. 工作区状态与改动分组
 
-2026-11-13 的**性能与体验审查 backlog（第 3.3 节）已收口并提交**，工作区干净（见 `git log --oneline -3`）。首个提交 `0abf8f4` 是派生数据缓存层；后续提交覆盖步骤 1～9 的余下优化、两个正确性修复（任务复选框绕过 setter、跨块复制把词内 `_` 误转义成 `\_`）与步骤 9 的应用层图片缓存。步骤 7/10 中的异步化子集未做，理由见 3.3 节「剩余」。
+2026-11-14 一轮**代码审查的修复批次尚未提交**（`git status` 可见 12 个改动文件）：查找回车双扫描与替换后搜索键失效、PDF CJK 字体重复解析、偏好校验和只读前 4 KiB、文件树截断上限被削弱且嵌套截断丢失、另存后无改动也重新序列化、撤销字节裁剪可能清空历史；另补了粘贴图片落盘单测（原 3.1）与原子写沿用原文件 Unix 权限位（原 2.3，含 `#[cfg(unix)]` 断言测试，Windows 开发机不会编译到）。**手动渲染回归（原 3.2）已做**：用 `docs/render-sample.md` 逐屏截图核对引用内空行、脚注内空行缩进、列表组空段落折叠、H1/H2 细灰下划线、H6 灰阶、表格对齐与竖线转义、脚注/任务列表/提示块，并用临时文档确认图片 / Mermaid / 公式聚焦后「源码 + 渲染同屏」正常；未见回归。表格整块命中（点单元格进编辑、点框选中整块）由 `selection.rs` 两个单测覆盖。提交后把本段改回「工作区干净」。验证基线已跑通：fmt / clippy（0 警告）/ 全量 976 passed / 最小构建。
+
+2026-11-13 的**性能与体验审查 backlog（第 3.3 节）已收口并提交**（见 `git log --oneline -3`）。首个提交 `0abf8f4` 是派生数据缓存层；后续提交覆盖步骤 1～9 的余下优化、两个正确性修复（任务复选框绕过 setter、跨块复制把词内 `_` 误转义成 `\_`）与步骤 9 的应用层图片缓存。步骤 7/10 中的异步化子集未做，理由见 3.3 节「剩余」。
+
+2026-11-14 **两项待决已拍板**：① **保留 Setext**——`段落\n---` 解析为 H2 与 CommonMark/GFM、Typora 一致，且「先空一行再输 `---`」仍是分隔线（空段落没有标题目标，走分隔线分支），行为由 `events.rs` 两个单测锁定；已在 `document.rs` 导入解析与 `events.rs` 回车分支补注记，避免复审误判为缺陷。② **导出能力保留**——`AGENTS.md` 第 51 行已是「HTML 单文件导出、PDF/DOCX 导出仍在」，与 `Cargo.toml` 默认 feature（`export-pdf`/`export-docx`）及菜单/动作门控一致，无文档矛盾，不做下线。
 
 `docs/render-sample.md` 被 `include_str!` 进多处测试（`components/markdown/inline/tests.rs`、`editor/document.rs`、`editor/tests.rs`、`export/{pdf,docx}.rs`），**改它就是改测试夹具**，改完必须跑全量 `cargo test -p rumark`。
 
@@ -13,44 +17,9 @@
 
 ## 2. 待决事项（需要拍板）
 
-### 2.1 `段落` + `---` 是否禁用 Setext
-
-- 背景：`段落\n---` 现在会被解析成 H2（Setext），与 Typora 一致；但「想把 `---` 当分隔线」的用户会意外得到标题。
-- 影响测试（改就要一起改）：
-  - `editor::events::tests::setext_dash_underline_enter_promotes_previous_paragraph_to_h2`
-  - `editor::events::tests::dash_underline_without_heading_target_stays_a_separator`
-  - `editor::document::tests::imports_setext_headings_and_grouped_paragraphs`
-- 做法（若禁用）：在 `src/editor/document.rs` 的导入解析里限制 Setext 认可条件（例如仅当上一段自身以空行结束/处于块起始位置才算标题），同步更新上面 3 个测试与 `docs/render-sample.md` 对应用例。
-- 状态：**待定**。
-
-### 2.2 AGENTS.md 与 Cargo.toml 的导出能力矛盾
-
-- 背景：`AGENTS.md` 写「已知被裁功能：版本更新检查、HTML/PDF 导出已删除」，但 `Cargo.toml` 的默认 feature 仍含 `export-pdf`/`export-docx`（依赖 `printpdf`/`docx-rs`），`src/export/pdf.rs` 与 `src/editor/persistence.rs` 的导出分支都在编译、测试里也有覆盖。
-- 二选一：
-  - (a) 只改文档：把 AGENTS.md 那句改成「导出保留（feature 可裁剪）」；
-  - (b) 真下线：删菜单项/动作/feature/依赖，**注意别删共享的块模型代码**（`src/main.rs` 里 `cfg_attr(not(any(feature = "export-pdf", feature = "export-docx")), allow(dead_code))` 就是为它留的）。
-- 状态：**待定**。
-
-### 2.3 原子写的权限代价（可选）
-
-- 背景：重命名替换会带来新文件对象，原文件的权限位/硬链接不保留、新文件按目录默认权限创建（`src/atomic_file.rs` 的 `write_text` 文档已写明）。Unix 上可能出现原先 `0600` 的文档被放宽成 `0644`。
-- 做法（若补）：写完临时文件后 `set_permissions(原目标权限)` 再 rename（VS Code 同款）；需要 `#[cfg(unix)]` 的权限断言测试（开发机是 Windows，跑不到）。
-- 状态：**未做**，风险低，可按需补。
+暂无。
 
 ## 3. 待办任务（可直接执行）
-
-### 3.1 给「粘贴图片落盘」补单测
-
-- 背景：`src/editor/events.rs` 的 `materialize_pasted_image` 没有测试。它读取 `current_image_paste_behavior()`（内部 `read_app_preferences()` 直读磁盘上的真实用户偏好），测试无法稳定注入行为；而且默认偏好 `ImagePasteBehavior::None` + `LocalPath` 会**提前 return、根本不落盘**。
-- 做法：
-  1. 把行为参数化：新增 `materialize_pasted_image_with(&self, source, behavior)`（原有 `materialize_pasted_image` 取完行为后转调它，行为不变）。
-  2. 在 `events.rs` 的 `#[cfg(test)] mod tests` 里用 `std::env::temp_dir().join("rumark-*")` 建「文档目录 + 文档文件」与**另一个目录**下的源图（源不在目标目录内，才会真的走复制）。
-  3. 断言：`ImagePasteBehavior::CopyToDocumentFolder` 下目标文件字节 == 源文件字节；目标目录无 `.tmp-<pid>` 残留；源文件缺失时返回 Err 且不留半截目标文件。
-- 验收：`cargo test -p rumark materialize_pasted_image`。
-
-### 3.2 手动渲染回归
-
-用根目录 `docs/render-sample.md` 打开逐项目视检查（覆盖 CommonMark + GFM 扩展、嵌套、边界）。本轮尤其看：引用内空行（`> `）、脚注内空行缩进、列表组之间的空段落折叠、H1/H2 细灰下划线、H6 发灰、表格整块选中（点表格框/非单元格处）、图片与 Mermaid/公式的「渲染 + 源码同屏」。
 
 ### 3.3 性能与体验审查 backlog（2026-11-13 全面审查，按序执行）
 

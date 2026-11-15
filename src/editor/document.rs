@@ -1087,6 +1087,8 @@ impl Editor {
                 continue;
             }
 
+            // 紧贴段落的 `---`/`===` 按 CommonMark 解析成 Setext 标题（与 Typora 一致），
+            // 不是分隔线；分隔线需要与上一段之间有空行。
             if let Some(level) = lines
                 .get(index + 1)
                 .and_then(|next| BlockKind::parse_setext_rule(next))
