@@ -151,6 +151,8 @@ impl Editor {
     ///
     /// 撤销/重做回压也会推入条目，只限制 `finalize_pending_undo_capture`
     /// 会让这两条路径无限增长；这里给两个栈统一套用。
+    ///
+    /// 至少保留最近一条：即使单条超过字节上限也不全部裁掉，否则撤销完全失效。
     fn trim_history(history: &mut Vec<UndoEntry>, max_entries: usize, max_bytes: usize) {
         if history.len() > max_entries {
             let overflow = history.len() - max_entries;
@@ -161,8 +163,10 @@ impl Editor {
         if total <= max_bytes {
             return;
         }
+        // 保留最近一条：即使它自身超过字节上限，也好过撤销全失效。
+        let max_removable = history.len().saturating_sub(1);
         let mut remove = 0;
-        for entry in history.iter() {
+        for entry in history.iter().take(max_removable) {
             if total <= max_bytes {
                 break;
             }
@@ -522,5 +526,35 @@ mod tests {
         let cloned = entry.clone();
 
         assert!(Arc::ptr_eq(&entry.source_text, &cloned.source_text));
+    }
+
+    #[test]
+    fn trim_history_keeps_at_least_one_entry_even_if_it_exceeds_byte_limit() {
+        // 单条 100 字节，字节上限 50：不能全部裁掉，至少保留最近一条。
+        let huge = "x".repeat(100);
+        let mut history: Vec<UndoEntry> = vec![history_entry(&huge)];
+
+        Editor::trim_history(&mut history, usize::MAX, 50);
+
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].source_text.as_ref(), huge.as_str());
+    }
+
+    #[test]
+    fn trim_history_with_mixed_sizes_keeps_newest_over_limit() {
+        // 3 条：小、小、超大。字节上限 30。前两条被裁掉，第三条虽超限但保留。
+        let huge = "z".repeat(100);
+        let mut history: Vec<UndoEntry> = [
+            history_entry("aaaa"),
+            history_entry("bbbb"),
+            history_entry(&huge),
+        ]
+        .into_iter()
+        .collect();
+
+        Editor::trim_history(&mut history, usize::MAX, 30);
+
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].source_text.as_ref(), huge.as_str());
     }
 }
