@@ -281,7 +281,8 @@ impl Editor {
             self.clear_pending_drop_replace_state(cx);
             return;
         };
-        let markdown = self.serialized_document_text(cx);
+        // 不在弹框前序列化：对话框期间文档可能继续被编辑，写盘前重新取当前
+        // 文本才能避免「保存旧内容却清掉脏标记」的静默丢数据。
         let (default_dir, suggested_name) = self.save_dialog_defaults();
         let prompt = cx.prompt_for_new_path(&default_dir, suggested_name.as_deref());
         let weak_editor = cx.entity().downgrade();
@@ -333,6 +334,16 @@ impl Editor {
                 save_path.set_extension("md");
             }
 
+            // 对话框结束后取「此刻」的文档，而不是弹框前的快照。
+            let Ok((markdown, written_fingerprint)) = weak_editor.update(cx, |this, cx| {
+                (
+                    this.serialized_document_text(cx),
+                    this.derived_document(cx).fingerprint(),
+                )
+            }) else {
+                return;
+            };
+
             if let Err(err) = crate::atomic_file::write_text(&save_path, &markdown) {
                 let _ = weak_editor_for_write_error.update(cx, |this, cx| {
                     this.abort_pending_drop_replace_after_save(cx);
@@ -366,6 +377,12 @@ impl Editor {
             let prompted_path = drop_path.clone();
             let replace_result = weak_editor.update(cx, move |this, cx| {
                 this.apply_successful_save(saved_path, cx);
+                // 写盘期间若又发生编辑，保留脏标记，让下一次保存覆盖新内容。
+                // 用内容指纹判断：无改动时命中派生缓存，切换视图模式也不会误判。
+                if this.derived_document(cx).fingerprint() != written_fingerprint {
+                    this.document_dirty = true;
+                    this.pending_window_edited = true;
+                }
                 this.pending_drop_replace_path = Some(drop_path);
                 this.replace_after_successful_save_async(cx)
             });
