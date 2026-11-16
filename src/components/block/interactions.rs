@@ -66,7 +66,7 @@ impl Block {
     }
 
     /// 是否为受支持的本地图片路径。
-    fn is_supported_local_image_path(path: &std::path::Path) -> bool {
+    pub(crate) fn is_supported_local_image_path(path: &std::path::Path) -> bool {
         if !path.is_file() {
             return false;
         }
@@ -79,8 +79,8 @@ impl Block {
         )
     }
 
-    /// 拆分粘贴图片时的首尾文本。
-    fn paste_image_split(&self) -> (InlineTextTree, InlineTextTree) {
+    /// 拆分图片插入时的首尾文本（按当前选区拆分）。
+    pub(crate) fn paste_image_split(&self) -> (InlineTextTree, InlineTextTree) {
         let clean_selected = self.selection_clean_range();
         let (leading, tail) = self.record.title.split_at(clean_selected.start);
         let (_, trailing) = tail.split_at(clean_selected.end.saturating_sub(clean_selected.start));
@@ -1448,7 +1448,10 @@ impl Block {
         }
         if self.showing_rendered_image() {
             self.is_selecting = false;
-            self.request_image_edit_expansion();
+            // 内嵌 base64 图片的源码超长，点击只聚焦不展开；编辑源码走右键菜单。
+            if !self.renders_embedded_image() {
+                self.request_image_edit_expansion();
+            }
             if self.focus_handle.is_focused(window) {
                 if self.sync_image_focus_state(true) {
                     cx.notify();

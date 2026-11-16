@@ -1,4 +1,4 @@
-//! 外部 Markdown 文件拖放：替换当前编辑器窗口的文档。
+//! 外部文件拖放：Markdown 替换当前文档，图片插入光标处。
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -7,7 +7,7 @@ use anyhow::Result;
 use rgpui::*;
 
 use super::{Editor, ViewMode};
-use crate::components::BlockRecord;
+use crate::components::{Block, BlockKind, BlockRecord, PastedImageSource};
 use crate::i18n::I18nManager;
 
 impl Editor {
@@ -20,6 +20,11 @@ impl Editor {
             })
     }
 
+    /// 判断路径是否为可插入文档的本地图片文件。
+    pub(super) fn is_supported_image_path(path: &Path) -> bool {
+        Block::is_supported_local_image_path(path)
+    }
+
     /// 从拖放路径列表中取出第一个 Markdown 文件路径。
     pub(super) fn first_dropped_markdown_path(paths: &[PathBuf]) -> Option<PathBuf> {
         paths
@@ -28,22 +33,119 @@ impl Editor {
             .cloned()
     }
 
-    /// 处理外部路径拖放：非 Markdown 提示，Markdown 则请求替换文档。
+    /// 从拖放路径列表中筛出图片文件（保持拖入顺序）。
+    pub(super) fn dropped_image_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
+        paths
+            .iter()
+            .filter(|path| Self::is_supported_image_path(path))
+            .cloned()
+            .collect()
+    }
+
+    /// 处理外部路径拖放：Markdown 替换文档，图片插入光标处，其余提示。
     pub(crate) fn on_external_paths_drop(
         &mut self,
         paths: &ExternalPaths,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(path) = Self::first_dropped_markdown_path(paths.paths()) else {
-            let message = cx
-                .global::<I18nManager>()
-                .t("dialog_drop_replace_non_markdown", &[]);
-            self.show_drop_open_failed_prompt(message, window, cx);
+        if let Some(path) = Self::first_dropped_markdown_path(paths.paths()) {
+            self.request_dropped_markdown_replace(path, window, cx);
             return;
-        };
+        }
 
-        self.request_dropped_markdown_replace(path, window, cx);
+        let images = Self::dropped_image_paths(paths.paths());
+        if !images.is_empty() {
+            self.insert_dropped_images(&images, window, cx);
+            return;
+        }
+
+        let message = cx
+            .global::<I18nManager>()
+            .t("dialog_drop_replace_non_markdown", &[]);
+        self.show_drop_open_failed_prompt(message, window, cx);
+    }
+
+    /// 把拖入的图片按粘贴管线插入文档（遵循图片粘贴偏好）。
+    ///
+    /// 每张图片插在上一张之后：插入后落成独立图片段落并聚焦，
+    /// 下一张按该段落末尾的光标位置继续拆分，自然形成连续图片块。
+    pub(super) fn insert_dropped_images(
+        &mut self,
+        images: &[PathBuf],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for path in images {
+            let Some(block) = self.drop_image_target_block(window, cx) else {
+                return;
+            };
+            let (leading, trailing) = block.read(cx).paste_image_split();
+            self.handle_paste_image_request(
+                block,
+                &leading,
+                &PastedImageSource::LocalPath(path.clone()),
+                &trailing,
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
+    /// 选取承接拖入图片的块。
+    ///
+    /// 标题、代码、表格等块内联插入图片源码会破坏原文语义，改为在其后
+    /// 新建空段落承接图片；普通段落沿用光标拆分逻辑。
+    fn drop_image_target_block(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<Block>> {
+        let block = self
+            .document
+            .focused_block_entity_id(window, cx)
+            .or_else(|| self.first_focusable_entity_id(cx))
+            .and_then(|id| self.focusable_entity_by_id(id))?;
+
+        let in_table_cell = self.table_cell_binding(block.entity_id()).is_some();
+        if !Self::block_rejects_inline_image(&block, self.view_mode, in_table_cell, cx) {
+            return Some(block);
+        }
+
+        let location = self.document.find_block_location(block.entity_id())?;
+        let paragraph = Self::new_block(cx, BlockRecord::paragraph(String::new()));
+        self.document.insert_blocks_at(
+            location.parent,
+            location.index + 1,
+            vec![paragraph.clone()],
+            cx,
+        );
+        self.focus_block(paragraph.entity_id());
+        Some(paragraph)
+    }
+
+    /// 判断块内联插入图片源码是否会破坏原文（标题、代码、表格等）。
+    fn block_rejects_inline_image(
+        block: &Entity<Block>,
+        view_mode: ViewMode,
+        in_table_cell: bool,
+        cx: &App,
+    ) -> bool {
+        if view_mode != ViewMode::Rendered || in_table_cell {
+            return false;
+        }
+        matches!(
+            block.read(cx).kind(),
+            BlockKind::Heading { .. }
+                | BlockKind::Separator
+                | BlockKind::Table
+                | BlockKind::CodeBlock { .. }
+                | BlockKind::MathBlock
+                | BlockKind::MermaidBlock
+                | BlockKind::HtmlBlock
+                | BlockKind::Comment
+                | BlockKind::RawMarkdown
+        )
     }
 
     /// 请求用拖放的 Markdown 文件替换当前文档（脏文档先弹窗确认）。
@@ -485,6 +587,10 @@ mod tests {
     use super::Editor;
     use std::path::{Path, PathBuf};
 
+    use crate::components::BlockKind;
+    use crate::i18n::I18nManager;
+    use rgpui::TestAppContext;
+
     /// 在独立临时目录里创建若干文件并返回其路径（测试辅助）。
     fn temp_markdown_dir(files: &[(&str, &str)]) -> Vec<PathBuf> {
         let root = std::env::temp_dir().join(format!("rumark-file-drop-{}", uuid::Uuid::new_v4()));
@@ -548,5 +654,94 @@ mod tests {
 
         assert_eq!(Editor::first_dropped_markdown_path(&paths), None);
         assert_eq!(Editor::first_dropped_markdown_path(&[]), None);
+    }
+
+    #[test]
+    fn dropped_image_paths_keep_order_and_skip_other_files() {
+        let paths = temp_markdown_dir(&[
+            ("a.png", "x"),
+            ("notes.txt", "y"),
+            ("photo.JPG", "z"),
+            ("doc.md", "# 文档"),
+            ("vector.svg", "<svg/>"),
+        ]);
+
+        assert_eq!(
+            Editor::dropped_image_paths(&paths),
+            vec![paths[0].clone(), paths[2].clone(), paths[4].clone()]
+        );
+        assert!(Editor::dropped_image_paths(&paths[1..2]).is_empty());
+    }
+
+    #[test]
+    fn image_suffixes_are_recognized_case_insensitively() {
+        let paths = temp_markdown_dir(&[
+            ("a.png", "x"),
+            ("b.JPEG", "x"),
+            ("c.WebP", "x"),
+            ("d.gif", "x"),
+            ("e.svg", "x"),
+            ("f.bmp", "x"),
+            ("g.tiff", "x"),
+            ("h.txt", "x"),
+            ("i.png.bak", "x"),
+        ]);
+
+        for path in &paths[..7] {
+            assert!(Editor::is_supported_image_path(path), "{}", path.display());
+        }
+        assert!(!Editor::is_supported_image_path(&paths[7]));
+        assert!(!Editor::is_supported_image_path(&paths[8]));
+
+        let missing = paths[0].with_file_name("missing.png");
+        assert!(!Editor::is_supported_image_path(&missing));
+    }
+
+    /// 初始化编辑器测试环境（i18n、主题与组件动作）。
+    fn init_test_app(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            I18nManager::init_with_language_id(cx, "en-US");
+            rgpui::theme::init(cx);
+            crate::components::init(cx);
+        });
+    }
+
+    #[rgpui::test]
+    async fn dropped_image_after_focused_heading_gets_its_own_paragraph(cx: &mut TestAppContext) {
+        init_test_app(cx);
+
+        let dir = std::env::temp_dir().join(format!("rumark-drop-image-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir should be created");
+        let image_path = dir.join("photo.png");
+        std::fs::write(&image_path, b"placeholder").expect("temp image should be written");
+
+        // 文档载入后焦点落在首个块（标题）上。
+        let (editor, cx) = cx.add_window_view(|_window, cx| {
+            Editor::from_markdown(cx, "# Title\n\nbody".to_string(), None)
+        });
+
+        editor.update_in(cx, |editor, window, cx| {
+            editor.insert_dropped_images(std::slice::from_ref(&image_path), window, cx);
+
+            // 标题保持原样，图片另起段落，不再把源码拼进标题。
+            assert_eq!(
+                editor
+                    .document
+                    .root_blocks()
+                    .iter()
+                    .map(|block| block.read(cx).kind())
+                    .collect::<Vec<_>>(),
+                vec![
+                    BlockKind::Heading { level: 1 },
+                    BlockKind::Paragraph,
+                    BlockKind::Paragraph,
+                ]
+            );
+            let markdown = editor.serialized_document_text(cx);
+            assert!(markdown.starts_with("# Title\n"), "got {markdown:?}");
+            assert!(markdown.contains("![photo]"), "got {markdown:?}");
+        });
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

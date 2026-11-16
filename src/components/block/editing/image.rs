@@ -135,6 +135,19 @@ impl Block {
         self.image_runtime.is_some() && !self.is_source_raw_mode() && !self.image_edit_expanded
     }
 
+    /// 是否为内嵌 `data:` URI 图片。
+    ///
+    /// 这类图片的源码是超长 base64 串，点击时不展开源码编辑（展开会把
+    /// 上万字符的串摊进正文），需要编辑时从右键菜单显式进入。
+    pub(crate) fn renders_embedded_image(&self) -> bool {
+        self.image_runtime.as_ref().is_some_and(|runtime| {
+            matches!(
+                runtime.resolved_source,
+                ImageResolvedSource::Embedded { .. }
+            )
+        })
+    }
+
     /// 是否处于「源码行与渲染图同屏」的图片编辑态。
     ///
     /// 点击图片进入该状态：源码行叠加在渲染图上方，图片保持可见（对齐 Typora）。

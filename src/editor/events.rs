@@ -774,7 +774,7 @@ impl Editor {
     }
 
     /// 处理粘贴图片请求（落盘后按模式插入）。
-    fn handle_paste_image_request(
+    pub(super) fn handle_paste_image_request(
         &mut self,
         block: Entity<super::Block>,
         leading: &InlineTextTree,
@@ -1185,15 +1185,70 @@ impl Editor {
         }
     }
 
-    /// 鼠标按下编辑器正文时关闭菜单与行列选中。
+    /// 鼠标按下编辑器正文时关闭菜单与行列选中，
+    /// 并处理落在末行下方空白处的点击。
     pub(crate) fn on_editor_mouse_down(
         &mut self,
-        _event: &MouseDownEvent,
+        event: &MouseDownEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.clear_table_axis_preview(cx);
         self.clear_table_axis_selection(cx);
+        if event.button == MouseButton::Left && !event.modifiers.shift {
+            self.focus_document_end_from_blank_click(event.position, cx);
+        }
+    }
+
+    /// 左键点击正文下方空白：把光标落到文档末尾（对齐 Typora）。
+    ///
+    /// 末块能承载光标时聚焦并把光标移到块尾；图片、表格等无光标落点的
+    /// 结构块则在文档末尾补一个空段落再聚焦。落在块内部（含块间留白）
+    /// 时不做处理，交给块自身的命中逻辑。
+    fn focus_document_end_from_blank_click(
+        &mut self,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.view_mode != super::ViewMode::Rendered {
+            return;
+        }
+        let Some(last) = self
+            .document
+            .visible_blocks()
+            .last()
+            .map(|visible| visible.entity.clone())
+        else {
+            return;
+        };
+        let (below, strands) = {
+            let block = last.read(cx);
+            let Some(bounds) = block.last_shell_bounds.or(block.last_bounds) else {
+                return;
+            };
+            let below = position.y > bounds.bottom() + px(2.0);
+            let strands = block.kind().is_atomic_block()
+                || block.kind().is_quote_container()
+                || block.kind().is_footnote_definition()
+                || block.renders_as_standalone_image();
+            (below, strands)
+        };
+        if !below {
+            return;
+        }
+
+        if strands {
+            let trailing = Self::new_block(cx, BlockRecord::paragraph(String::new()));
+            let index = self.document.root_count();
+            self.document
+                .insert_blocks_at(None, index, vec![trailing.clone()], cx);
+            self.focus_block(trailing.entity_id());
+        } else {
+            let end = last.read(cx).plain_len();
+            Self::reset_block_cursor(&last, end, cx);
+            self.focus_block(last.entity_id());
+        }
+        cx.notify();
     }
 
     /// 滚轮滚动时点亮滚动条。
@@ -2547,7 +2602,10 @@ mod tests {
         ExitCodeBlock, InlineTextTree, Newline, PastedImageSource,
     };
     use crate::config::ImagePasteBehavior;
-    use rgpui::{App, AppContext, Entity, TestAppContext};
+    use rgpui::{
+        App, AppContext, Bounds, Entity, Modifiers, MouseButton, MouseDownEvent, Pixels, Point,
+        TestAppContext, point, px, size,
+    };
 
     /// 切换勾选必须经 set_kind，否则内容版本号不递增、派生缓存读到旧文本。
     #[rgpui::test]
@@ -3907,6 +3965,113 @@ mod tests {
 
             // No trailing paragraph is invented for an ordinary text block.
             assert_eq!(editor.document.root_count(), 1);
+        });
+    }
+
+    /// 构造只关心位置的左键单击事件（测试辅助）。
+    fn left_click(position: Point<Pixels>) -> MouseDownEvent {
+        MouseDownEvent {
+            button: MouseButton::Left,
+            position,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+            first_mouse: false,
+        }
+    }
+
+    #[rgpui::test]
+    async fn blank_click_below_image_appends_trailing_paragraph(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let editor = cx.new(|cx| Editor::from_markdown(cx, "![a](pics/a.png)".to_string(), None));
+
+        editor.update(cx, |editor, cx| {
+            let image = editor.document.first_root().expect("image").clone();
+            image.update(cx, |block, _cx| {
+                block.last_shell_bounds = Some(Bounds::new(
+                    point(px(0.0), px(0.0)),
+                    size(px(600.0), px(200.0)),
+                ));
+            });
+        });
+
+        let event = left_click(point(px(300.0), px(400.0)));
+        cx.update(|window, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.on_editor_mouse_down(&event, window, cx);
+            });
+        });
+
+        editor.update(cx, |editor, cx| {
+            let visible = editor.document.visible_blocks();
+            assert_eq!(visible.len(), 2, "应补出一个尾段落");
+            assert_eq!(visible[1].entity.read(cx).kind(), BlockKind::Paragraph);
+            assert_eq!(visible[1].entity.read(cx).rendered_text(), "");
+            assert_eq!(
+                editor.pending_focus,
+                Some(visible[1].entity.entity_id()),
+                "光标应落到新段落"
+            );
+        });
+    }
+
+    #[rgpui::test]
+    async fn blank_click_below_paragraph_moves_caret_to_end(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let editor = cx.new(|cx| Editor::from_markdown(cx, "hello".to_string(), None));
+
+        let paragraph = editor.update(cx, |editor, cx| {
+            let paragraph = editor.document.first_root().expect("paragraph").clone();
+            paragraph.update(cx, |block, _cx| {
+                block.last_shell_bounds = Some(Bounds::new(
+                    point(px(0.0), px(0.0)),
+                    size(px(600.0), px(20.0)),
+                ));
+            });
+            paragraph
+        });
+
+        let event = left_click(point(px(300.0), px(200.0)));
+        cx.update(|window, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.on_editor_mouse_down(&event, window, cx);
+            });
+        });
+
+        editor.update(cx, |editor, cx| {
+            // 普通文本块不额外生段落，只把光标移到结尾。
+            assert_eq!(editor.document.root_count(), 1);
+            assert_eq!(paragraph.read(cx).selected_range, 5..5);
+            assert_eq!(editor.pending_focus, Some(paragraph.entity_id()));
+        });
+    }
+
+    #[rgpui::test]
+    async fn click_inside_last_block_does_not_move_caret(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let editor = cx.new(|cx| Editor::from_markdown(cx, "hello".to_string(), None));
+
+        let paragraph = editor.update(cx, |editor, cx| {
+            let paragraph = editor.document.first_root().expect("paragraph").clone();
+            paragraph.update(cx, |block, _cx| {
+                block.last_shell_bounds = Some(Bounds::new(
+                    point(px(0.0), px(0.0)),
+                    size(px(600.0), px(20.0)),
+                ));
+            });
+            paragraph
+        });
+
+        let event = left_click(point(px(300.0), px(10.0)));
+        cx.update(|window, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.on_editor_mouse_down(&event, window, cx);
+            });
+        });
+
+        editor.update(cx, |editor, cx| {
+            // 块内点击交给块自身处理，编辑器空白逻辑不得改动光标。
+            assert_eq!(editor.document.root_count(), 1);
+            assert_eq!(paragraph.read(cx).selected_range, 0..0);
         });
     }
 

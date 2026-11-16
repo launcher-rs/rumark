@@ -84,6 +84,16 @@ fn loading_image_label(alt: &str, i18n: &I18nSnapshot) -> SharedString {
     }
 }
 
+/// 生成内嵌图片源码的单行摘要：截断 base64 串，保留开头的描述与 MIME 信息。
+fn embedded_image_source_preview(source: &str, limit: usize) -> String {
+    let mut chars = source.chars();
+    let mut preview: String = chars.by_ref().take(limit).collect();
+    if chars.next().is_some() {
+        preview.push('…');
+    }
+    preview
+}
+
 /// 渲染图片占位符。
 fn render_image_placeholder(
     width: Length,
@@ -534,6 +544,31 @@ impl Block {
         container.into_any_element()
     }
 
+    /// 渲染内嵌 `data:` 图片聚焦时的单行源码摘要。
+    ///
+    /// 完整 base64 串过长，聚焦后只在图片上方显示截断的开头，
+    /// 用于确认当前选中的是哪张内嵌图片；完整源码走右键「编辑源码」。
+    fn render_embedded_image_summary(&self, theme: &Theme) -> AnyElement {
+        let t = &ThemeTypography::DEFAULT;
+        let Some(runtime) = self.image_runtime() else {
+            return div().into_any_element();
+        };
+        div()
+            .w_full()
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .truncate()
+            .font(crate::theme::code_text_font())
+            .text_size(px(t.code_size))
+            .line_height(rems(t.text_line_height))
+            .text_color(theme.muted_foreground)
+            .child(SharedString::from(embedded_image_source_preview(
+                &runtime.src,
+                96,
+            )))
+            .into_any_element()
+    }
+
     /// 渲染列表项中的独立图片内容。
     ///
     /// 编辑态下让「源码行 + 渲染图」同屏，行为与独立图片段落一致（对齐 Typora）。
@@ -591,6 +626,15 @@ impl Block {
                     FontWeight::NORMAL,
                     cx,
                 ))
+                .child(div().flex_grow(1.).child(image))
+        } else if focused && self.renders_embedded_image() {
+            div()
+                .min_w(px(0.0))
+                .flex_grow(1.)
+                .flex()
+                .flex_col()
+                .gap(px(d.block_padding_y))
+                .child(self.render_embedded_image_summary(theme))
                 .child(div().flex_grow(1.).child(image))
         } else {
             div().flex_grow(1.).child(image)
@@ -2226,6 +2270,16 @@ impl Render for Block {
                     .into_any_element();
             }
             if self.showing_rendered_image() {
+                // 内嵌 base64 图片点击后不展开源码，只在图片上方给出一行截断摘要。
+                if focused && self.renders_embedded_image() {
+                    return focused_base
+                        .flex()
+                        .flex_col()
+                        .gap(px(d.block_padding_y))
+                        .child(self.render_embedded_image_summary(&theme))
+                        .child(image)
+                        .into_any_element();
+                }
                 return focused_base.child(image).into_any_element();
             }
         }
@@ -3510,13 +3564,29 @@ fn inline_word_chunks(text: &str, code: bool, has_background: bool) -> Vec<&str>
 #[cfg(test)]
 mod tests {
     use super::{
-        HtmlStyle, column_axis_gutter_visible, html_is_whitespace_text, html_node_is_block_level,
-        html_node_visual_style, inline_word_chunks, split_html_text_at_blank_line,
+        HtmlStyle, column_axis_gutter_visible, embedded_image_source_preview,
+        html_is_whitespace_text, html_node_is_block_level, html_node_visual_style,
+        inline_word_chunks, split_html_text_at_blank_line,
     };
     use crate::components::{AxisMarker, TableAxisKind};
     use crate::components::{Block, BlockKind, BlockRecord, InlineTextTree, parse_html_document};
     use crate::i18n::I18nManager;
     use rgpui::{Hsla, Rgba, TestAppContext, px};
+
+    #[test]
+    fn embedded_image_preview_truncates_on_char_boundaries() {
+        let long = format!("data:image/png;base64,{}", "A".repeat(200));
+        let preview = embedded_image_source_preview(&long, 96);
+        assert_eq!(preview.chars().count(), 97);
+        assert!(preview.ends_with('…'));
+
+        let short = "data:image/png;base64,AAAA";
+        assert_eq!(embedded_image_source_preview(short, 96), short);
+
+        let unicode = "描述图片".repeat(40);
+        let preview = embedded_image_source_preview(&unicode, 7);
+        assert_eq!(preview, "描述图片描述图…");
+    }
 
     #[test]
     fn top_gutter_only_appears_for_column_axis_state() {

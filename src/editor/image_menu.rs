@@ -329,7 +329,8 @@ impl Editor {
             }
         });
 
-        menu.separator()
+        let mut menu = menu
+            .separator()
             .item(Self::image_item(
                 strings.t("image_embed_base64", &[]),
                 data.is_local(),
@@ -345,7 +346,19 @@ impl Editor {
                 editor,
                 data,
                 Self::on_image_extract_file,
-            ))
+            ));
+        // 内嵌图片点击不再展开源码，改由菜单显式进入源码编辑态。
+        if data.is_embedded() {
+            menu = menu.item(Self::image_item(
+                strings.t("image_edit_source", &[]),
+                true,
+                false,
+                editor,
+                data,
+                Self::on_image_edit_source,
+            ));
+        }
+        menu
     }
 
     /// 构造单个图片菜单项。
@@ -561,6 +574,21 @@ impl Editor {
         };
         let markdown = data.markdown_with_target(&target);
         Self::rewrite_image_block(editor, data, markdown, cx);
+    }
+
+    /// 进入内嵌图片的源码编辑态（展开原始 base64 源串）。
+    pub(super) fn on_image_edit_source(
+        editor: &mut Editor,
+        data: &ImageMenuData,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        editor.close_context_menu(cx);
+        data.block.update(cx, |block, _cx| {
+            block.request_image_edit_expansion();
+        });
+        editor.focus_block(data.block.entity_id());
+        cx.notify();
     }
 
     /// 用新的图片文本替换块内容（HTML 串落到 HTML 块，否则为段落）。
