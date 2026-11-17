@@ -45,7 +45,6 @@ impl RumarkConfigDirs {
         let dirs = ProjectDirs::from("rs", "launcher", "Rumark")
             .context("failed to resolve the Rumark config directory")?;
         let root = dirs.config_dir().to_path_buf();
-        migrate_legacy_config_dir(&root);
         Ok(Self { root })
     }
 
@@ -74,45 +73,6 @@ impl RumarkConfigDirs {
     pub(crate) fn app_config_file(&self) -> PathBuf {
         self.root.join("config.toml")
     }
-}
-
-/// 若新配置目录不存在而旧 `Mojian` 目录存在，则递归拷贝旧目录内容到新目录。
-fn migrate_legacy_config_dir(new_root: &Path) {
-    if new_root.exists() {
-        return;
-    }
-    let Some(legacy) = ProjectDirs::from("rs", "launcher", "Mojian") else {
-        return;
-    };
-    let legacy_root = legacy.config_dir();
-    if !legacy_root.exists() {
-        return;
-    }
-    if let Err(err) = copy_dir_recursive(legacy_root, new_root) {
-        eprintln!(
-            "failed to migrate legacy Mojian config '{}' to '{}': {err}",
-            legacy_root.display(),
-            new_root.display()
-        );
-    }
-}
-
-/// 递归拷贝目录内容。
-fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else if file_type.is_file() {
-            // 逐个文件原子写：迁移途中中断不会留下「截断的配置文件」被后续读取。
-            crate::atomic_file::copy_file(&src_path, &dst_path)?;
-        }
-    }
-    Ok(())
 }
 
 /// 读取最近文件历史记录。
