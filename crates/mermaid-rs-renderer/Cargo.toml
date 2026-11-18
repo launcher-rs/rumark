@@ -1,0 +1,90 @@
+# 本 crate 由 crates.io 的 mermaid-rs-renderer 0.3.1 vendor 进本仓自维护（MIT，见 LICENSE）。
+# 相对上游的裁剪与修改见本目录 README.md；升级上游时对照 CHANGELOG.md 逐项评估。
+[package]
+name = "mermaid-rs-renderer"
+version = "0.3.1"
+edition = "2024"
+description = "Fast Mermaid diagram renderer in pure Rust (vendored, trimmed for rumark)"
+license = "MIT"
+repository = "https://github.com/1jehuang/mermaid-rs-renderer"
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+
+[lib]
+name = "mermaid_rs_renderer"
+path = "src/lib.rs"
+
+# 上游的 cli/png feature（clap、resvg、usvg）已随 mmdr CLI 一并裁掉，rumark 只用 lib 渲染 SVG。
+[features]
+default = []
+
+[[test]]
+name = "aspect_fold_suite"
+path = "tests/aspect_fold_suite.rs"
+
+[[test]]
+name = "correctness_suite"
+path = "tests/correctness_suite.rs"
+
+[[test]]
+name = "determinism_suite"
+path = "tests/determinism_suite.rs"
+
+[[test]]
+name = "invariant_suite"
+path = "tests/invariant_suite.rs"
+
+[[test]]
+name = "layout_suite"
+path = "tests/layout_suite.rs"
+
+[[test]]
+name = "output_shape_suite"
+path = "tests/output_shape_suite.rs"
+
+[[test]]
+name = "parse_errors"
+path = "tests/parse_errors.rs"
+
+[[test]]
+name = "robustness_suite"
+path = "tests/robustness_suite.rs"
+
+[[test]]
+name = "semantic_suite"
+path = "tests/semantic_suite.rs"
+
+[[test]]
+name = "visual_issue_suite"
+path = "tests/visual_issue_suite.rs"
+
+[dependencies.anyhow]
+version = "1.0"
+
+[dependencies.fontdb]
+version = "0.23"
+
+[dependencies.json5]
+version = "1.3"
+
+[dependencies.once_cell]
+version = "1.21.4"
+
+[dependencies.regex]
+version = "1.12"
+
+[dependencies.serde]
+version = "1.0"
+features = ["derive"]
+
+[dependencies.serde_json]
+version = "1.0"
+
+[dependencies.thiserror]
+version = "2.0"
+
+[dependencies.ttf-parser]
+version = "0.25"

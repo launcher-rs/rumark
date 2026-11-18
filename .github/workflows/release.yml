@@ -152,12 +152,12 @@ jobs:
       - name: 编译（Windows）
         if: runner.os == 'Windows'
         shell: pwsh
-        run: cargo build --profile ${{ needs.prepare.outputs.profile }}
+        run: cargo build -p rumark --profile ${{ needs.prepare.outputs.profile }}
 
       - name: 编译（Linux/macOS）
         if: runner.os != 'Windows'
         shell: bash
-        run: cargo build --profile "${{ needs.prepare.outputs.profile }}"
+        run: cargo build -p rumark --profile "${{ needs.prepare.outputs.profile }}"
 
       - name: 打包（Windows）
         if: runner.os == 'Windows'

@@ -36,11 +36,14 @@ cargo fmt --check
 # 2. 静态检查(要求 0 警告)
 cargo clippy -p rumark --all-targets
 
-# 3. 单元测试(983 个测试,内嵌在源码 #[cfg(test)] 模块中)
+# 3. 单元测试(内嵌在源码 #[cfg(test)] 模块中)
 cargo test -p rumark
 
 # 4. 最小构建验证(无默认 feature)
 cargo check -p rumark --no-default-features
+
+# 5. vendored Mermaid 渲染库的回归测试(crates/mermaid-rs-renderer)
+cargo test -p mermaid-rs-renderer
 ```
 
 ## 代码规范
@@ -52,6 +55,7 @@ cargo check -p rumark --no-default-features
 - **HTML 导出**:原始 HTML 必须经 `sanitize_html_fragment` 清洗
 - **内部标识**:不要修改 `rumark` / `rumark-light` 主题 id、`rumark::...` action 命名空间、`rs.launcher.Rumark` 应用标识 —— 改名会破坏已存用户配置
 - **依赖**:新增重型依赖前先说明理由;tree-sitter 版本全部 pin 死(`=x.y.z`),升级需整组对齐
+- **vendored crate**:`crates/mermaid-rs-renderer` 为自维护 vendor(基于上游 0.3.1,MIT),是仓内唯一 path 依赖;修改时以 `rumark` 注释标注改动点,布局改动需跑其测试套件
 - **换行符**:所有 `.rs` 文件必须为 CRLF 无 BOM(项目通过 `.gitattributes` 保证)
 
 ## 提交规范

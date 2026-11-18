@@ -17,12 +17,14 @@
 
 ## 依赖与 Feature 约定
 
+- 本仓是 cargo workspace（根 `Cargo.toml` 即 workspace 根，`[profile.*]` 只能定义在这里；成员为根包 rumark + `crates/mermaid-rs-renderer`）。`cargo fmt --check` / `cargo clippy --all-targets` / 裸 `cargo test` 会覆盖全部成员，vendored crate 必须同绿。
 - `rgpui` / `rgpui-platform` 为 crates.io 版本依赖（当前 `1.7`，`Cargo.lock` 锁定精确版本）。框架升级时同步改 `Cargo.toml` 两处版本号 + `dev-dependencies` 的 `test-support` 项（三处必须同版本，不要留旧号靠 `^` 兜底），跑通后提交 `Cargo.lock`。不要改回 path 依赖，不要在本仓 patch 框架代码。
+- `crates/mermaid-rs-renderer` 是自维护 vendor 的 Mermaid 渲染库（基于上游 0.3.1 裁剪，MIT，改动点以 `rumark` 注释标注，见该目录 README.md）。它是本仓内**唯一允许的 path 依赖**，上述「不要改回 path 依赖」红线仅针对 rgpui。上游测试套件（424 例）是布局回归防线，改布局代码后跑 `cargo test -p mermaid-rs-renderer`；release 打包只构建根包（`cargo build -p rumark --profile size`），不会带上它。
 - 代码高亮是可选裁剪的：`code-highlight-core/official/config`、`html-native` 控制 `tree-sitter*` 依赖。默认全开。各 `build_*_config` 的 `#[cfg]` 必须与注册表里的调用点门控一致（yaml 归 `official`、toml 归 `config`），否则最小构建会引用未链接的 crate。
   - 最小编译验证：`cargo check -p rumark --no-default-features`
   - tree-sitter 版本全部 pin 死（`=x.y.z`），升级需整组对齐，不要单独 bump。
 - 构建档位：`[profile.dev]` 本 crate `opt-level = 1`，`[profile.dev.package."*"]` 依赖 `opt-level = 2`，`rgpui`/`rgpui-macros` 再提到 `3`。debug 慢先怀疑自家代码，不要随手调低这些档位（`opt-level = 0` 下块布局与逐帧重绘会慢一个数量级）。
-- 现存重型依赖：`printpdf` / `docx-rs`（PDF、DOCX 导出）、`mermaid-rs-renderer`（Mermaid）、`ratex-*`（LaTeX）、`reqwest`（远程图片与网络请求）。加新重型依赖前先确认必要性。
+- 现存重型依赖：`printpdf` / `docx-rs`（PDF、DOCX 导出）、`mermaid-rs-renderer`（Mermaid，已 vendor）、`ratex-*`（LaTeX）、`reqwest`（远程图片与网络请求）。加新重型依赖前先确认必要性。
 
 ## 结构与入口
 
