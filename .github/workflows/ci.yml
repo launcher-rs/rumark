@@ -1,11 +1,5 @@
-# 持续集成：push / PR / 手动触发，先静态检查再三平台构建冒烟。
-#
-# 两个 job：
-#   lint      —— Linux 上跑 `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings`（格式与 lint，含测试代码）；
-#   build     —— 三平台 release 构建 → `--version/--help` 冒烟 → 单测 → 最小构建验证。
-#
-# 依赖装法与 release.yml 保持一致（rgpui Linux 后端要 Wayland/X11 头文件），
-# 这里不发版、不打包，产物只用于冒烟，跑完即丢。
+# 持续集成：push / PR / 手动触发，只做静态检查（fmt + clippy）。
+# 编译、冒烟与单测在本地按 CONTRIBUTING 的校验顺序跑，CI 不重复。
 name: ci
 
 on:
@@ -26,7 +20,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # 静态检查：格式 + lint。放在 Linux 单跑，最快拿到"能不能合"的结论。
+  # 静态检查：格式 + lint（含测试代码）。Linux 单跑，最快拿到"能不能合"的结论。
   lint:
     name: fmt + clippy
     runs-on: ubuntu-22.04
@@ -40,7 +34,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # clippy 要完整编译一遍，系统依赖与构建一致；Linux 故意钉 22.04（glibc 基线只升不降）。
+      # clippy 要完整编译一遍，系统依赖与本地构建一致；
+      # Linux 故意钉 22.04（glibc 基线只升不降）。
       - name: 安装系统依赖（Linux）
         shell: bash
         run: |
@@ -56,80 +51,3 @@ jobs:
       - name: 静态检查（cargo clippy --all-targets -- -D warnings）
         shell: bash
         run: cargo clippy --all-targets -- -D warnings
-
-  # 构建 + 冒烟 + 单测：三平台并行，谁都不等谁。
-  build:
-    name: build (${{ matrix.name }})
-    needs: lint
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            name: windows-x86_64
-          - os: ubuntu-22.04
-            name: linux-x86_64
-          - os: macos-latest
-            name: macos-aarch64
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: 安装 Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: 安装系统依赖（Linux）
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-dev libx11-xcb-dev libxcb1-dev \
-            libasound2-dev libudev-dev
-
-      # Windows 专属代码的 lint：依赖与后面的 release 构建同 profile，可直接复用编译结果。
-      # 必须排在 cargo build --release 之前，先让 clippy 把依赖编出来，构建时就不用重来。
-      # 带 `--all-targets`（与 CONTRIBUTING 的本地校验一致），顺带把测试代码与
-      # dev-dependencies 编出来，后面的 cargo test 不再重编。
-      - name: 静态检查（cargo clippy --release --all-targets，仅 Windows）
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: cargo clippy --release --all-targets -- -D warnings
-
-      - name: 构建（cargo build --release）
-        shell: bash
-        run: cargo build --release
-
-      # 冒烟：--version/--help 必须立刻正常退出。
-      - name: 冒烟（Windows）
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $exe = (Resolve-Path -LiteralPath '.\target\release\rumark.exe').Path
-          foreach ($flag in '--version', '--help') {
-            $proc = Start-Process -FilePath $exe -ArgumentList $flag -NoNewWindow -Wait -PassThru
-            if ($proc.ExitCode -ne 0) { throw "冒烟失败：$flag（退出码 $($proc.ExitCode)）" }
-          }
-
-      - name: 冒烟（Linux/macOS）
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          ./target/release/rumark --version
-          ./target/release/rumark --help >/dev/null
-
-      # 单测复用 release 档依赖（同 profile 不重编），只重编工作区的测试目标。
-      - name: 单元测试（cargo test --release --bins）
-        shell: bash
-        run: cargo test --release --bins
-
-      # 最小构建验证：确保 --no-default-features 也能通过。
-      # 这里不加 `-D warnings`：该档位有 5 个既有 warning（code_highlight.rs 里未按
-      # `code-highlight-core` 门控的几处），只要求编译通过。
-      - name: 最小构建检查（cargo check --no-default-features）
-        shell: bash
-        run: cargo check --no-default-features
