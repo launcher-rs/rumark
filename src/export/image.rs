@@ -78,13 +78,21 @@ mod tests {
 
     #[test]
     fn resolve_local_path_joins_relative_and_keeps_absolute() {
-        let base = std::path::Path::new("D:/docs");
+        // 绝对路径写法随平台不同：Windows 盘符路径在 Unix 下不算绝对路径。
+        let (base, absolute) = if cfg!(windows) {
+            ("D:/docs", "D:/other/pic.png")
+        } else {
+            ("/tmp/docs", "/tmp/other/pic.png")
+        };
+        let base = std::path::Path::new(base);
         assert_eq!(
             resolve_local_path("assets/pic.png", Some(base)),
-            std::path::Path::new("D:/docs/assets/pic.png")
+            base.join("assets/pic.png")
         );
-        let absolute = resolve_local_path("D:/other/pic.png", Some(base));
-        assert_eq!(absolute, std::path::Path::new("D:/other/pic.png"));
+        assert_eq!(
+            resolve_local_path(absolute, Some(base)),
+            std::path::Path::new(absolute)
+        );
     }
 
     #[test]
