@@ -132,7 +132,6 @@ impl Editor {
             return;
         }
 
-        self.rendered_select_all_cycle = None;
         // 上一轮拖拽若漏掉松开（如窗口失焦），丢弃残留的自动滚动循环。
         self.drag_autoscroll_task = None;
         self.drag_pointer = Some(event.position);
@@ -823,30 +822,7 @@ impl Editor {
                 }
     }
 
-    /// 全选首击：仅选中聚焦块的全部文本。
-    fn select_focused_block_text_for_rendered_select_all(
-        &mut self,
-        block: Entity<Block>,
-        cx: &mut Context<Self>,
-    ) {
-        self.clear_cross_block_selection(cx);
-        self.end_block_pointer_selection_sessions(cx);
-        self.clear_table_axis_preview(cx);
-        self.clear_table_axis_selection(cx);
-        block.update(cx, |block, cx| {
-            let len = block.plain_len();
-            block.selected_range = 0..len;
-            block.selection_reversed = false;
-            block.marked_range = None;
-            block.vertical_motion_x = None;
-            block.cursor_blink_epoch = std::time::Instant::now();
-            cx.notify();
-        });
-        self.active_entity_id = Some(block.entity_id());
-        cx.notify();
-    }
-
-    /// 全选后续：选中渲染文档的全部块。
+    /// 全选：选中渲染文档的全部块。
     fn select_all_rendered_document(&mut self, cx: &mut Context<Self>) {
         if self.rendered_document_is_fully_selected(cx) {
             return;
@@ -893,42 +869,16 @@ impl Editor {
         cx.notify();
     }
 
-    /// 渲染模式全选按键：连击在块内全选与文档全选间升级。
+    /// 渲染模式全选按键：一次选中整篇渲染文档。
     pub(super) fn on_rendered_select_all_press(
         &mut self,
-        block: Entity<Block>,
+        _block: Entity<Block>,
         cx: &mut Context<Self>,
     ) {
         if self.view_mode != ViewMode::Rendered {
-            self.rendered_select_all_cycle = None;
             return;
         }
-
-        let now = std::time::Instant::now();
-        let block_id = block.entity_id();
-        let count = match self.rendered_select_all_cycle {
-            Some(cycle)
-                if cycle.entity_id == block_id
-                    && now.duration_since(cycle.last_pressed_at)
-                        <= Self::SELECT_ALL_CYCLE_WINDOW =>
-            {
-                cycle.count.saturating_add(1)
-            }
-            _ => 1,
-        }
-        .min(3);
-
-        self.rendered_select_all_cycle = Some(super::SelectAllOverlayCycle {
-            entity_id: block_id,
-            count,
-            last_pressed_at: now,
-        });
-
-        if count == 1 {
-            self.select_focused_block_text_for_rendered_select_all(block, cx);
-        } else {
-            self.select_all_rendered_document(cx);
-        }
+        self.select_all_rendered_document(cx);
     }
 
     /// 把跨块选区换算为源码偏移快照（无选区返回空）。

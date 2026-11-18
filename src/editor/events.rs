@@ -1554,7 +1554,6 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         if Self::block_event_clears_cross_block_selection(event) {
-            self.rendered_select_all_cycle = None;
             self.clear_cross_block_selection(cx);
         }
 
@@ -1877,7 +1876,6 @@ impl Editor {
         }
 
         if Self::block_event_clears_cross_block_selection(event) {
-            self.rendered_select_all_cycle = None;
             self.clear_cross_block_selection(cx);
         }
 

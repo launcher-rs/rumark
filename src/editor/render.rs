@@ -1157,6 +1157,7 @@ impl Render for Editor {
 
         let content_area = div()
             .id("editor-scroll")
+            .debug_selector(|| "editor-scroll".to_string())
             .w_full()
             .h_full()
             .flex_1()
@@ -1171,6 +1172,7 @@ impl Render for Editor {
             content_area.child(
                 div()
                     .id("editor-scrollbar-thumb")
+                    .debug_selector(|| "editor-scrollbar-thumb".to_string())
                     .absolute()
                     .occlude()
                     .top(px(thumb_top))

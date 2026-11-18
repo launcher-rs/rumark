@@ -135,7 +135,6 @@ pub struct Editor {
     drag_pointer: Option<Point<Pixels>>,
     /// 拖拽期间的自动滚动循环任务（拖拽结束后释放）。
     drag_autoscroll_task: Option<Task<()>>,
-    rendered_select_all_cycle: Option<SelectAllOverlayCycle>,
     scrollbar_hovered: bool,
     scrollbar_visible_until: Instant,
     scrollbar_fade_task: Option<Task<()>>,
@@ -268,14 +267,6 @@ pub(super) struct CrossBlockDrag {
     pub(super) anchor: CrossBlockSelectionEndpoint,
 }
 
-/// 渲染模式选区升级用的短时 Ctrl/Cmd+A 计数器。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct SelectAllOverlayCycle {
-    entity_id: EntityId,
-    count: u8,
-    last_pressed_at: Instant,
-}
-
 /// 单个可见块文本区间到规范 Markdown 偏移的映射。
 /// 逐字符偏移表用 `Arc` 共享，使整份映射可以廉价克隆进缓存。
 #[derive(Clone)]
@@ -300,7 +291,6 @@ impl Editor {
     /// 单条历史栈（撤销/重做各自）最多保留的源码字节总量。
     const HISTORY_BYTES_LIMIT: usize = 64 * 1024 * 1024;
     const UNDO_COALESCE_WINDOW: Duration = Duration::from_millis(1_000);
-    const SELECT_ALL_CYCLE_WINDOW: Duration = Duration::from_millis(750);
 
     /// 对话框按钮统一路由：持有实体直接更新。
     ///
@@ -386,7 +376,6 @@ impl Editor {
             cross_block_drag: None,
             drag_pointer: None,
             drag_autoscroll_task: None,
-            rendered_select_all_cycle: None,
             scrollbar_hovered: false,
             scrollbar_visible_until: Instant::now(),
             scrollbar_fade_task: None,

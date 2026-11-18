@@ -66,6 +66,7 @@ pub(super) struct WorkspaceTreeNode {
     label: String,
     kind: WorkspaceTreeKind,
     children: Vec<WorkspaceTreeNode>,
+    loaded: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -128,12 +129,11 @@ impl Editor {
         self.toggle_workspace_drawer(window, cx);
     }
 
-    /// 文档路径变化后重置工作区模型（打开时即时同步）。
+    /// 文档路径变化后同步工作区模型（打开时即时同步）。
+    ///
+    /// 文件树不在这里清空：交由 `sync_workspace_file_tree` 按根目录是否变化决定，
+    /// 同一目录内切换文档时走“仅更新选中项”的快速路径，避免同步全量重扫目录卡 UI。
     pub(super) fn sync_workspace_after_document_path_change(&mut self, cx: &mut Context<Self>) {
-        self.workspace.root = None;
-        self.workspace.file_tree = None;
-        self.workspace.file_error = None;
-        self.workspace.file_tree_truncated = false;
         self.workspace.outline_key = None;
         if self.workspace.is_open {
             self.sync_workspace_models(cx);
@@ -148,7 +148,14 @@ impl Editor {
 
     /// 获取当前文件所在目录作为工作区根目录。
     fn workspace_root_for_current_file(&self) -> Option<PathBuf> {
-        self.file_path.as_ref()?.parent().map(Path::to_path_buf)
+        let file_path = self.file_path.as_ref()?;
+        if self.workspace.is_open
+            && let Some(root) = self.workspace.root.as_ref()
+            && file_path.starts_with(root)
+        {
+            return Some(root.clone());
+        }
+        file_path.parent().map(Path::to_path_buf)
     }
 
     /// 同步工作区文件树（根目录不变时仅更新选中项）。
@@ -263,6 +270,22 @@ impl Editor {
         match event {
             TreeEvent::Expanded(id) => {
                 self.workspace.expanded.insert(id.to_string());
+                let directory = self.workspace.file_kind_map.get(id.as_str()).cloned();
+                if let Some(WorkspaceTreeKind::Directory(path)) = directory
+                    && let Some(root) = self.workspace.root.as_deref()
+                {
+                    let depth = path
+                        .strip_prefix(root)
+                        .map(|relative| relative.components().count())
+                        .unwrap_or(WORKSPACE_SCAN_MAX_DEPTH);
+                    if let Some(tree) = self.workspace.file_tree.as_mut()
+                        && let Some(truncated) =
+                            load_workspace_directory(tree, id.as_str(), &path, depth)
+                    {
+                        self.workspace.file_tree_truncated |= truncated;
+                        self.sync_file_tree_state(cx);
+                    }
+                }
             }
             TreeEvent::Collapsed(id) => {
                 self.workspace.expanded.remove(id.as_str());
@@ -557,6 +580,7 @@ impl Editor {
         Some(
             div()
                 .id("workspace-panel")
+                .debug_selector(|| "workspace-panel".to_string())
                 .h_full()
                 .w(px(panel_width))
                 .flex()
@@ -740,9 +764,11 @@ fn render_outline_tree_row(ix: usize, entry: &TreeEntry, selected: bool, cx: &mu
         ""
     };
     ListItem::new(ix)
+        .debug_selector(move || format!("ws-tree-row-{ix}"))
         .h(px(WORKSPACE_ROW_HEIGHT))
         .pl(px(8.0 + entry.depth() as f32 * WORKSPACE_ROW_INDENT))
         .rounded(px(6.0))
+        .cursor_pointer()
         .selected(selected)
         .child(
             h_flex()
@@ -780,14 +806,18 @@ fn render_outline_tree_row(ix: usize, entry: &TreeEntry, selected: bool, cx: &mu
 }
 /// 空目录按叶子处理（无箭头），与旧自研渲染的 `has_children` 语义一致。
 fn file_tree_item(node: &WorkspaceTreeNode, expanded: &HashSet<String>) -> TreeItem {
-    let has_children = !node.children.is_empty();
+    let mut children = node
+        .children
+        .iter()
+        .map(|child| file_tree_item(child, expanded))
+        .collect::<Vec<_>>();
+    if matches!(node.kind, WorkspaceTreeKind::Directory(_)) && !node.loaded {
+        children.push(TreeItem::new(format!("{}:loading", node.id), "").disabled(true));
+    }
+    let has_children = !children.is_empty();
     TreeItem::new(node.id.clone(), node.label.clone())
         .expanded(has_children && expanded.contains(&node.id))
-        .children(
-            node.children
-                .iter()
-                .map(|child| file_tree_item(child, expanded)),
-        )
+        .children(children)
 }
 
 /// 收集文件节点标识到种类的映射（框架树行渲染时查图标；空目录靠此正确显示文件夹图标）。
@@ -832,9 +862,11 @@ fn render_file_tree_row(
         ),
     };
     ListItem::new(ix)
+        .debug_selector(move || format!("ws-tree-row-{ix}"))
         .h(px(WORKSPACE_ROW_HEIGHT))
         .pl(px(8.0 + entry.depth() as f32 * WORKSPACE_ROW_INDENT))
         .rounded(px(6.0))
+        .cursor_pointer()
         .selected(selected)
         .child(
             h_flex()
@@ -902,13 +934,12 @@ fn scan_workspace_dir(path: &Path) -> Result<(WorkspaceTreeNode, bool)> {
     scan_workspace_dir_at(path, 0, true, WORKSPACE_SCAN_MAX_ENTRIES)
 }
 
-/// 带深度与失败降级的目录扫描。
+/// 只读取当前目录的直接子项，子目录内容等展开时再扫描。
 ///
 /// 根目录不可读仍是错误（交给 UI 提示）；子目录不可读或单条 entry 失败只
 /// 降级成空节点 / 跳过，不让整棵树消失。深度与条目上限防止大目录卡 UI。
 ///
-/// 返回 `(节点, 是否截断)`：任一目录的条目超过 `max_entries`（或子目录被
-/// 截断）时为 true，调用方据此向用户提示文件树不完整。`max_entries` 仅供
+/// 返回 `(节点, 是否截断)`：当前目录的条目超过 `max_entries` 时为 true，调用方据此向用户提示文件树不完整。`max_entries` 仅供
 /// 测试传入较小上限，生产路径固定用 `WORKSPACE_SCAN_MAX_ENTRIES`。
 fn scan_workspace_dir_at(
     path: &Path,
@@ -921,6 +952,7 @@ fn scan_workspace_dir_at(
         label: file_label(path),
         kind: WorkspaceTreeKind::Directory(path.to_path_buf()),
         children: Vec::new(),
+        loaded: true,
     };
 
     if depth >= WORKSPACE_SCAN_MAX_DEPTH {
@@ -959,17 +991,20 @@ fn scan_workspace_dir_at(
             if is_ignored_workspace_dir(&entry_path) {
                 continue;
             }
-            // 子目录内部已把失败降级为空节点，这里不会再拖垮整棵树。
-            let (child, child_truncated) =
-                scan_workspace_dir_at(&entry_path, depth + 1, false, max_entries)?;
-            truncated |= child_truncated;
-            children.push(child);
+            children.push(WorkspaceTreeNode {
+                id: file_node_id(&entry_path),
+                label: file_label(&entry_path),
+                kind: WorkspaceTreeKind::Directory(entry_path),
+                children: Vec::new(),
+                loaded: depth + 1 >= WORKSPACE_SCAN_MAX_DEPTH,
+            });
         } else if file_type.is_file() && is_markdown_file(&entry_path) {
             children.push(WorkspaceTreeNode {
                 id: file_node_id(&entry_path),
                 label: file_label(&entry_path),
                 kind: WorkspaceTreeKind::MarkdownFile(entry_path),
                 children: Vec::new(),
+                loaded: true,
             });
         }
     }
@@ -988,9 +1023,38 @@ fn scan_workspace_dir_at(
             label: file_label(path),
             kind: WorkspaceTreeKind::Directory(path.to_path_buf()),
             children,
+            loaded: true,
         },
         truncated,
     ))
+}
+
+/// 延迟读取展开目录的直接子项，并更新原树节点。
+fn load_workspace_directory(
+    node: &mut WorkspaceTreeNode,
+    target_id: &str,
+    path: &Path,
+    depth: usize,
+) -> Option<bool> {
+    if node.id == target_id {
+        if node.loaded {
+            return None;
+        }
+        match scan_workspace_dir_at(path, depth, false, WORKSPACE_SCAN_MAX_ENTRIES) {
+            Ok((scanned, truncated)) => {
+                node.children = scanned.children;
+                node.loaded = true;
+                return Some(truncated);
+            }
+            Err(_) => return None,
+        }
+    }
+    for child in &mut node.children {
+        if let Some(truncated) = load_workspace_directory(child, target_id, path, depth) {
+            return Some(truncated);
+        }
+    }
+    None
 }
 
 /// 取路径的文件名作为节点展示标签。
@@ -1103,6 +1167,7 @@ fn build_outline_tree(markdown: &str) -> Vec<WorkspaceTreeNode> {
                 level,
             },
             children: Vec::new(),
+            loaded: true,
         };
 
         let siblings = if let Some((_, parent_path)) = stack.last() {
@@ -1158,12 +1223,13 @@ mod tests {
         WORKSPACE_SCAN_MAX_DEPTH, WORKSPACE_SCAN_MAX_ENTRIES, WorkspaceSelection, WorkspaceState,
         WorkspaceTreeKind, WorkspaceTreeNode, build_outline_tree,
         clamp_workspace_panel_resize_width, collect_file_kinds, file_tree_item, find_outline_line,
-        outline_tree_item, prune_outline_state, scan_workspace_dir, scan_workspace_dir_at,
-        workspace_panel_width_for_viewport,
+        load_workspace_directory, outline_tree_item, prune_outline_state, scan_workspace_dir,
+        scan_workspace_dir_at, workspace_panel_width_for_viewport,
     };
     use std::collections::{BTreeMap, HashSet};
     use std::fs;
     use std::path::PathBuf;
+    use std::rc::Rc;
 
     use rgpui::{AppContext, TestAppContext};
 
@@ -1180,7 +1246,7 @@ mod tests {
         fs::write(root.join("a.txt"), "ignored").expect("write txt");
         fs::write(root.join("nested").join("b.md"), "b").expect("write nested md");
 
-        let (tree, _truncated) = scan_workspace_dir(&root).expect("scan tree");
+        let (mut tree, _truncated) = scan_workspace_dir(&root).expect("scan tree");
         let labels = tree
             .children
             .iter()
@@ -1195,6 +1261,20 @@ mod tests {
             tree.children[1].kind,
             WorkspaceTreeKind::MarkdownFile(_)
         ));
+        assert!(!tree.children[0].loaded, "子目录首次扫描时保持未加载");
+        assert!(
+            file_tree_item(&tree, &HashSet::new()).children[0].is_folder(),
+            "未扫描子目录仍应显示为可展开目录"
+        );
+
+        let nested_path = root.join("nested");
+        let nested_id = super::file_node_id(&nested_path);
+        assert_eq!(
+            load_workspace_directory(&mut tree, &nested_id, &nested_path, 1),
+            Some(false)
+        );
+        assert!(tree.children[0].loaded);
+        assert_eq!(tree.children[0].children[0].label, "b.md");
 
         let _ = fs::remove_dir_all(root);
     }
@@ -1232,15 +1312,9 @@ mod tests {
         fs::create_dir_all(&deep).expect("create deep dirs");
         fs::write(deep.join("too-deep.md"), "x").expect("write deep md");
 
-        let (tree, _truncated) = scan_workspace_dir(&root).expect("scan tree");
-        let mut node = &tree;
-        let mut visited = 0;
-        while let Some(child) = node.children.first() {
-            node = child;
-            visited += 1;
-            assert!(visited <= WORKSPACE_SCAN_MAX_DEPTH, "扫描深度不应超过上限");
-        }
-        assert_eq!(visited, WORKSPACE_SCAN_MAX_DEPTH);
+        let (tree, _truncated) = scan_workspace_dir(&root).expect("scan root");
+        assert_eq!(tree.children.len(), 1);
+        assert!(!tree.children[0].loaded, "深层目录不应在初次扫描时遍历");
 
         let _ = fs::remove_dir_all(root);
     }
@@ -1387,14 +1461,17 @@ mod tests {
                     label: "empty".to_string(),
                     kind: WorkspaceTreeKind::Directory(PathBuf::from("/docs/empty")),
                     children: Vec::new(),
+                    loaded: true,
                 },
                 WorkspaceTreeNode {
                     id: "file:/docs/a.md".to_string(),
                     label: "a.md".to_string(),
                     kind: WorkspaceTreeKind::MarkdownFile(PathBuf::from("/docs/a.md")),
                     children: Vec::new(),
+                    loaded: true,
                 },
             ],
+            loaded: true,
         };
         let mut expanded = HashSet::new();
         expanded.insert("file:/docs".to_string());
@@ -1475,7 +1552,7 @@ mod tests {
         assert!(!truncated, "未超上限不应截断");
         assert_eq!(tree.children.len(), 3);
 
-        // 子目录被截断时根节点也要报告：根目录自身只有 1 个条目，不会被截断。
+        // 子目录不在根扫描时遍历，其截断状态留到展开时再报告。
         let nested_root = root.join("nested-root");
         let nested = nested_root.join("nested");
         fs::create_dir_all(&nested).expect("create nested");
@@ -1483,10 +1560,89 @@ mod tests {
             fs::write(nested.join(format!("n{i}.md")), "x").expect("write nested md");
         }
         let (tree, truncated) = scan_workspace_dir_at(&nested_root, 0, true, 2).expect("scan tree");
-        assert!(truncated, "子目录截断应向上传播");
+        assert!(!truncated, "未展开的子目录不应参与根目录截断统计");
         assert_eq!(tree.children.len(), 1);
-        assert_eq!(tree.children[0].children.len(), 2);
+        let (nested_tree, truncated) =
+            scan_workspace_dir_at(&nested, 1, false, 2).expect("scan nested tree");
+        assert!(truncated, "展开后应报告子目录截断");
+        assert_eq!(nested_tree.children.len(), 2);
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn switching_document_in_same_dir_reuses_file_tree() {
+        let mut cx = TestAppContext::single();
+        cx.update(|cx| {
+            I18nManager::init_with_language_id(cx, "en-US");
+            rgpui::theme::init(cx);
+            crate::components::init(cx);
+        });
+        let root =
+            std::env::temp_dir().join(format!("rumark-switch-tree-{}", uuid::Uuid::new_v4()));
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested).expect("create dirs");
+        let a = root.join("a.md");
+        let b = root.join("b.md");
+        let c = nested.join("c.md");
+        fs::write(&a, "a").expect("write a");
+        fs::write(&b, "b").expect("write b");
+        fs::write(&c, "c").expect("write c");
+
+        let editor = cx.new(|cx| Editor::from_markdown(cx, "x".to_string(), Some(a.clone())));
+        editor.update(&mut cx, |editor, cx| {
+            editor.workspace.is_open = true;
+            editor.sync_workspace_after_document_path_change(cx);
+            let initial_tree = editor.workspace.file_kind_map.clone();
+            assert_eq!(editor.workspace.root.as_deref(), Some(root.as_path()));
+
+            // 同目录切换：根目录未变，应走快速路径复用文件树（不重新扫描）。
+            editor.file_path = Some(b.clone());
+            editor.sync_workspace_after_document_path_change(cx);
+            assert_eq!(editor.workspace.root.as_deref(), Some(root.as_path()));
+            assert!(
+                Rc::ptr_eq(&initial_tree, &editor.workspace.file_kind_map),
+                "同目录切换文档不应重建文件树"
+            );
+            assert_eq!(
+                editor.workspace.selected,
+                Some(WorkspaceSelection::File(b.clone()))
+            );
+
+            // 工作区内切换到子目录文件：保留原根目录与文件树，避免面板缩进子目录。
+            editor.file_path = Some(c.clone());
+            editor.sync_workspace_after_document_path_change(cx);
+            assert_eq!(editor.workspace.root.as_deref(), Some(root.as_path()));
+            assert!(
+                Rc::ptr_eq(&initial_tree, &editor.workspace.file_kind_map),
+                "工作区内切换子目录文档应复用文件树"
+            );
+            assert_eq!(
+                editor.workspace.selected,
+                Some(WorkspaceSelection::File(c.clone()))
+            );
+
+            // 打开工作区之外的文件时，再以新文件所在目录作为根目录。
+            let outside_root = root.with_file_name(format!(
+                "rumark-switch-tree-outside-{}",
+                uuid::Uuid::new_v4()
+            ));
+            fs::create_dir_all(&outside_root).expect("create outside dir");
+            let outside = outside_root.join("outside.md");
+            fs::write(&outside, "outside").expect("write outside");
+            editor.file_path = Some(outside.clone());
+            editor.sync_workspace_after_document_path_change(cx);
+            assert_eq!(
+                editor.workspace.root.as_deref(),
+                Some(outside_root.as_path())
+            );
+            assert!(
+                !Rc::ptr_eq(&initial_tree, &editor.workspace.file_kind_map),
+                "切换到工作区外的文档应重建文件树"
+            );
+            let _ = fs::remove_dir_all(outside_root);
+        });
+        let _ = fs::remove_dir_all(&root);
+        cx.quit();
     }
 }

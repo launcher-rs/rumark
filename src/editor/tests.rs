@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rgpui::{
     AnyWindowHandle, AppContext, ClickEvent, KeyDownEvent, Keystroke, ParentElement, Styled,
@@ -3498,7 +3498,7 @@ async fn ctrl_a_selects_entire_source_document_in_source_mode(cx: &mut TestAppCo
 }
 
 #[rgpui::test]
-async fn ctrl_a_selects_only_focused_block_text_in_rendered_mode(cx: &mut TestAppContext) {
+async fn ctrl_a_selects_entire_rendered_document(cx: &mut TestAppContext) {
     init_editor_test_app(cx);
     let (editor, cx) = cx.add_window_view(|_window, cx| {
         Editor::from_markdown(cx, "alpha\n\nbeta".to_string(), None)
@@ -3517,12 +3517,15 @@ async fn ctrl_a_selects_only_focused_block_text_in_rendered_mode(cx: &mut TestAp
     redraw(cx);
 
     editor.read_with(cx, |editor, cx| {
-        let first = editor.document.visible_blocks()[0].entity.read(cx);
-        let second = editor.document.visible_blocks()[1].entity.read(cx);
-        assert_eq!(first.selected_range, 0..0);
-        assert_eq!(second.selected_range, 0..second.plain_len());
-        assert_eq!(editor.selected_markdown_text(cx).as_deref(), Some("beta"));
-        assert_eq!(editor.capture_source_selection_snapshot(cx).range, 7..11);
+        assert_eq!(
+            editor.selected_markdown_text(cx).as_deref(),
+            Some("alpha\n\nbeta")
+        );
+        assert_eq!(editor.capture_source_selection_snapshot(cx).range, 0..11);
+        for visible in editor.document.visible_blocks() {
+            let block = visible.entity.read(cx);
+            assert_eq!(block.editor_selection_range, Some(0..block.plain_len()));
+        }
     });
 }
 
@@ -3544,16 +3547,6 @@ async fn repeated_ctrl_a_selects_all_rendered_blocks(cx: &mut TestAppContext) {
         });
     });
     redraw(cx);
-
-    cx.simulate_keystrokes("ctrl-a");
-    redraw(cx);
-
-    editor.read_with(cx, |editor, cx| {
-        let first = editor.document.visible_blocks()[0].entity.read(cx);
-        assert_eq!(first.selected_range, 0..first.plain_len());
-        assert_eq!(editor.selected_markdown_text(cx).as_deref(), Some("alpha"));
-        assert_eq!(editor.capture_source_selection_snapshot(cx).range, 0..5);
-    });
 
     cx.simulate_keystrokes("ctrl-a");
     redraw(cx);
@@ -3589,64 +3582,6 @@ async fn repeated_ctrl_a_selects_all_rendered_blocks(cx: &mut TestAppContext) {
             if len > 0 {
                 assert_eq!(block.editor_selection_range, Some(0..len));
             }
-        }
-    });
-}
-
-#[rgpui::test]
-async fn rendered_ctrl_a_cycle_expires_before_second_press(cx: &mut TestAppContext) {
-    init_editor_test_app(cx);
-    let (editor, cx) = cx.add_window_view(|_window, cx| {
-        Editor::from_markdown(cx, "alpha\n\nbeta".to_string(), None)
-    });
-
-    editor.update(cx, |editor, cx| {
-        let block = editor.document.visible_blocks()[1].entity.clone();
-        editor.focus_block(block.entity_id());
-        block.update(cx, |block, block_cx| {
-            block.move_to(1, block_cx);
-        });
-    });
-    redraw(cx);
-
-    cx.simulate_keystrokes("ctrl-a");
-    redraw(cx);
-
-    editor.update(cx, |editor, cx| {
-        let block = editor.document.visible_blocks()[1].entity.clone();
-        block.update(cx, |block, _cx| {
-            block.selected_range = 1..1;
-        });
-        let cycle = editor
-            .rendered_select_all_cycle
-            .as_mut()
-            .expect("first Ctrl+A should arm the rendered select-all cycle");
-        cycle.last_pressed_at =
-            Instant::now() - (Editor::SELECT_ALL_CYCLE_WINDOW + Duration::from_millis(1));
-    });
-
-    cx.simulate_keystrokes("ctrl-a");
-    redraw(cx);
-
-    editor.read_with(cx, |editor, cx| {
-        let second = editor.document.visible_blocks()[1].entity.read(cx);
-        assert_eq!(second.selected_range, 0..second.plain_len());
-        assert_eq!(editor.selected_markdown_text(cx).as_deref(), Some("beta"));
-        assert_eq!(editor.capture_source_selection_snapshot(cx).range, 7..11);
-    });
-
-    cx.simulate_keystrokes("ctrl-a");
-    redraw(cx);
-
-    editor.read_with(cx, |editor, cx| {
-        assert_eq!(
-            editor.selected_markdown_text(cx).as_deref(),
-            Some("alpha\n\nbeta")
-        );
-        assert_eq!(editor.capture_source_selection_snapshot(cx).range, 0..11);
-        for visible in editor.document.visible_blocks() {
-            let block = visible.entity.read(cx);
-            assert_eq!(block.editor_selection_range, Some(0..block.plain_len()));
         }
     });
 }
