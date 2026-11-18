@@ -1904,7 +1904,20 @@ impl Editor {
                 if should_normalize_quote {
                     self.normalize_rendered_quote_structure(cx);
                 } else {
-                    self.rebuild_image_runtimes(cx);
+                    let block_ref = block.read(cx);
+                    let may_change_global_references = block_ref.kind()
+                        == BlockKind::FootnoteDefinition
+                        || block_ref.record.title.plain_text().contains("]:")
+                        || block_ref.record.title.plain_text().contains("[^")
+                        || !self.image_reference_definitions.is_empty()
+                        || !self.link_reference_definitions.is_empty()
+                        || !self.footnote_registry.bindings.is_empty();
+                    if may_change_global_references {
+                        self.rebuild_image_runtimes(cx);
+                    } else {
+                        let base_dir = self.image_base_dir();
+                        self.sync_runtime_context_for_block(&block, base_dir.as_deref(), cx);
+                    }
                 }
                 if let Some(focus_id) = callout_focus_target {
                     self.focus_block(focus_id);
