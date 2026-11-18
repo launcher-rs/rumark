@@ -611,21 +611,8 @@ pub fn render_svg_with_dimensions(
                 "<rect x=\"{:.2}\" y=\"{:.2}\" width=\"{:.2}\" height=\"{:.2}\" {fill_attr} stroke=\"{}\" stroke-width=\"1.2\"/>",
                 seq_box.x, seq_box.y, seq_box.width, seq_box.height, stroke
             ));
-            if let Some(label) = seq_box.label.as_ref() {
-                let pad_x = theme.font_size * 0.8;
-                let pad_y = theme.font_size * 0.9;
-                let label_x = seq_box.x + pad_x;
-                let label_y = seq_box.y + pad_y + label.height / 2.0;
-                svg.push_str(&text_block_svg_anchor(
-                    label_x,
-                    label_y,
-                    label,
-                    theme,
-                    config,
-                    "start",
-                    Some(theme.primary_text_color.as_str()),
-                ));
-            }
+            // rumark: box 标签延迟到参与者头部绘制之后再画（见下方），避免被
+            // 头部矩形遮挡（单参与者 box 的标签中心恰好落在头部矩形内）。
         }
     }
 
@@ -1568,6 +1555,26 @@ pub fn render_svg_with_dimensions(
             }
             if node.link.is_some() {
                 svg.push_str("</a>");
+            }
+        }
+        // rumark: box 标签在参与者头部之上绘制，保证单参与者 box 的标题可见
+        // （标签水平居中于 box 顶部）。
+        if let Some(seq) = seq_data {
+            for seq_box in &seq.boxes {
+                if let Some(label) = seq_box.label.as_ref() {
+                    let pad_y = theme.font_size * 0.9;
+                    let label_x = seq_box.x + seq_box.width / 2.0;
+                    let label_y = seq_box.y + pad_y + label.height / 2.0;
+                    svg.push_str(&text_block_svg_anchor(
+                        label_x,
+                        label_y,
+                        label,
+                        theme,
+                        config,
+                        "middle",
+                        Some(theme.primary_text_color.as_str()),
+                    ));
+                }
             }
         }
         for footbox in seq_data.map(|s| s.footboxes.as_slice()).unwrap_or_default() {

@@ -314,6 +314,7 @@ pub(super) fn compute_sequence_layout(
                     position: note.position,
                     participants: note.participants.clone(),
                     index: note.index,
+                    order: note.order,
                 });
                 message_cursor += height;
             }
@@ -436,7 +437,10 @@ pub(super) fn compute_sequence_layout(
             let mut min_y = first_y;
             let mut max_y = last_y;
             for note in &sequence_notes {
-                if note.index >= frame.start_idx && note.index <= frame.end_idx {
+                // rumark: 用语句序号判断归属——仅统计真正写在帧关键字之间的注释。
+                // 此前按 index 判断，会把「写在 loop 之前、index 恰好等于帧起点」的
+                // 注释算进帧内，把框的上边界撑到注释处，吞掉前面的消息。
+                if note.order > frame.open_order && note.order < frame.close_order {
                     min_y = min_y.min(note.y);
                     max_y = max_y.max(note.y + note.height);
                 }
@@ -576,20 +580,22 @@ pub(super) fn compute_sequence_layout(
             .map(|foot| foot.y + foot.height)
             .fold(lifeline_end, f32::max);
         for seq_box in &graph.sequence_boxes {
-            let mut min_center_x = f32::INFINITY;
-            let mut max_center_x = f32::NEG_INFINITY;
+            // rumark: 包围盒按参与者头部的完整矩形计算（含文字宽度），此前按生命线
+            // 中心计算，box 矩形比参与者头部还窄，边框线贴着生命线穿过、标签被
+            // 头部矩形盖住不可见。
+            let mut min_left = f32::INFINITY;
+            let mut max_right = f32::NEG_INFINITY;
             for participant in &seq_box.participants {
                 if let Some(node) = nodes.get(participant) {
-                    let center = sequence_lane_center(node);
-                    min_center_x = min_center_x.min(center);
-                    max_center_x = max_center_x.max(center);
+                    min_left = min_left.min(node.x);
+                    max_right = max_right.max(node.x + node.width);
                 }
             }
-            if !min_center_x.is_finite() || !max_center_x.is_finite() {
+            if !min_left.is_finite() || !max_right.is_finite() {
                 continue;
             }
-            let x = min_center_x - pad_x;
-            let width = (max_center_x - min_center_x) + pad_x * 2.0;
+            let x = min_left - pad_x;
+            let width = (max_right - min_left) + pad_x * 2.0;
             let label = seq_box
                 .label
                 .as_ref()
@@ -630,7 +636,22 @@ pub(super) fn compute_sequence_layout(
         }
     };
     for (_, _, event) in events {
-        let y = activation_y_for(event.index);
+        // rumark: activate/deactivate 写在第 index 条消息之前。activate 从第 index
+        // 条消息的行开始（与 mermaid.js 一致）；deactivate 应止于前一条消息与第
+        // index 条消息之间的行间隙——此前直接取第 index 条消息的行，激活条会多
+        // 覆盖一条消息的行高。
+        let y = match event.kind {
+            crate::ir::SequenceActivationKind::Activate => activation_y_for(event.index),
+            crate::ir::SequenceActivationKind::Deactivate => {
+                if event.index == 0 {
+                    lifeline_start
+                } else if event.index < message_ys.len() {
+                    (message_ys[event.index - 1] + message_ys[event.index]) * 0.5
+                } else {
+                    activation_end_default
+                }
+            }
+        };
         let stack = activation_stacks
             .entry(event.participant.clone())
             .or_default();

@@ -4991,6 +4991,8 @@ fn parse_sequence_diagram(input: &str) -> Result<ParseOutput> {
     let mut open_frames: Vec<crate::ir::SequenceFrame> = Vec::new();
     let mut frames: Vec<crate::ir::SequenceFrame> = Vec::new();
     let mut open_boxes: Vec<crate::ir::SequenceBox> = Vec::new();
+    // rumark: 帧/注释语句的先后序号（见 SequenceNote.order 注释）。
+    let mut boundary_order: usize = 0;
 
     for raw_line in lines {
         let line = raw_line.trim();
@@ -5062,6 +5064,8 @@ fn parse_sequence_diagram(input: &str) -> Result<ParseOutput> {
             } else {
                 Some(strip_quotes(label))
             };
+            boundary_order += 1;
+            let open_order = boundary_order;
             let start_idx = graph.edges.len();
             open_frames.push(crate::ir::SequenceFrame {
                 kind,
@@ -5072,11 +5076,14 @@ fn parse_sequence_diagram(input: &str) -> Result<ParseOutput> {
                 }],
                 start_idx,
                 end_idx: start_idx,
+                open_order,
+                close_order: open_order,
             });
             continue;
         }
 
         if lower == "else" || lower.starts_with("else ") {
+            boundary_order += 1;
             if let Some(frame) = open_frames.last_mut() {
                 let split_idx = graph.edges.len();
                 if let Some(last) = frame.sections.last_mut() {
@@ -5098,6 +5105,7 @@ fn parse_sequence_diagram(input: &str) -> Result<ParseOutput> {
         }
 
         if lower == "and" || lower.starts_with("and ") {
+            boundary_order += 1;
             if let Some(frame) = open_frames.last_mut()
                 && frame.kind == crate::ir::SequenceFrameKind::Par
             {
@@ -5121,6 +5129,7 @@ fn parse_sequence_diagram(input: &str) -> Result<ParseOutput> {
         }
 
         if lower == "option" || lower.starts_with("option ") {
+            boundary_order += 1;
             if let Some(frame) = open_frames.last_mut()
                 && frame.kind == crate::ir::SequenceFrameKind::Critical
             {
@@ -5144,12 +5153,14 @@ fn parse_sequence_diagram(input: &str) -> Result<ParseOutput> {
         }
 
         if lower == "end" {
+            boundary_order += 1;
             if let Some(mut frame) = open_frames.pop() {
                 let end_idx = graph.edges.len();
                 if let Some(last) = frame.sections.last_mut() {
                     last.end_idx = end_idx;
                 }
                 frame.end_idx = end_idx;
+                frame.close_order = boundary_order;
                 frames.push(frame);
             } else if let Some(seq_box) = open_boxes.pop() {
                 graph.sequence_boxes.push(seq_box);
@@ -5164,11 +5175,13 @@ fn parse_sequence_diagram(input: &str) -> Result<ParseOutput> {
                 }
                 ensure_sequence_node(&mut graph, &labels, id, None);
             }
+            boundary_order += 1;
             graph.sequence_notes.push(crate::ir::SequenceNote {
                 position,
                 participants,
                 label,
                 index: graph.edges.len(),
+                order: boundary_order,
             });
             continue;
         }
@@ -5587,15 +5600,43 @@ fn split_on_ampersand(input: &str) -> Vec<&str> {
     parts
 }
 
+/// rumark: 把 `|标签|` 的内容替换为空格（保持字节位置），防止链式拆分时标签
+/// 文本中的连字符等字符被 ARROW_TOKEN_RE 误识别为第二条箭头（如 `high-risk`）。
+/// 注意多字节字符必须按 `len_utf8()` 填充，与 mask_bracket_content 一致。
+fn mask_pipe_label_content(masked: &str) -> String {
+    let mut result = String::with_capacity(masked.len());
+    let mut in_pipe = false;
+    for ch in masked.chars() {
+        match ch {
+            '|' => {
+                in_pipe = !in_pipe;
+                result.push(ch);
+            }
+            _ if in_pipe => {
+                for _ in 0..ch.len_utf8() {
+                    result.push(' ');
+                }
+            }
+            _ => result.push(ch),
+        }
+    }
+    result
+}
+
 fn split_edge_chain(line: &str) -> Option<Vec<String>> {
     let masked = mask_bracket_content(line);
-    if PIPE_LABEL_RE.is_match(&masked)
-        || QUOTED_LABEL_ARROW_RE.is_match(line)
+    // rumark: 管道标签（`-->|文本|`）不再整体放弃链式拆分——下方已有把节点前缀
+    // `|标签|` 归还给前一条箭头的逻辑。此前含管道标签的链式行会退化为单边解析，
+    // 行内第二条边的目标节点被整段当作第一条边的目标 id，节点标签也被吞掉
+    // （如 `A -->|否| B[文本] -.-> C`）。空格间隔的标签形式仍无法用前缀归还
+    // 表达，继续跳过。
+    if QUOTED_LABEL_ARROW_RE.is_match(line)
         || LABEL_ARROW_RE.is_match(&masked)
         || COMPACT_DOTTED_LABEL_ARROW_RE.is_match(&masked)
     {
         return None;
     }
+    let masked = mask_pipe_label_content(&masked);
 
     let matches: Vec<regex::Match> = ARROW_TOKEN_RE.find_iter(&masked).collect();
     if matches.len() < 2 {
@@ -6879,6 +6920,26 @@ A["foo & bar"] & B --> C"#;
         let customer = parsed.graph.nodes.get("CUSTOMER").unwrap();
         assert!(customer.label.contains("CUSTOMER"));
         assert!(customer.label.contains("string id"));
+    }
+
+    // rumark: 含管道标签的链式边此前会退化为单边解析——第二条边的目标被整段
+    // 当作第一条边的目标 id，节点标签也被吞掉（`A -->|否| B[文本] -.-> C`）。
+    #[test]
+    fn parse_chained_edges_with_pipe_labels() {
+        let input = "flowchart TD\nA -->|否| B[你好] -.-> C\nB -->|是| D[完成] ==> E\n";
+        let parsed = parse_mermaid(input).unwrap();
+        assert_eq!(parsed.graph.edges.len(), 4, "两条链式行应拆出 4 条边");
+        assert_eq!(parsed.graph.edges[0].from, "A");
+        assert_eq!(parsed.graph.edges[0].to, "B");
+        assert_eq!(parsed.graph.edges[0].label.as_deref(), Some("否"));
+        assert_eq!(parsed.graph.edges[1].to, "C");
+        assert_eq!(parsed.graph.edges[2].label.as_deref(), Some("是"));
+        assert_eq!(parsed.graph.edges[3].to, "E");
+        let node_b = parsed.graph.nodes.get("B").expect("节点 B");
+        assert_eq!(node_b.label, "你好", "方括号标签不应残留在节点 id 中");
+        let node_d = parsed.graph.nodes.get("D").expect("节点 D");
+        assert_eq!(node_d.label, "完成");
+        assert!(parsed.graph.nodes.contains_key("C") && parsed.graph.nodes.contains_key("E"));
     }
 
     #[test]

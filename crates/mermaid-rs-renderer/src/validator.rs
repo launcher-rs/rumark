@@ -268,6 +268,12 @@ fn check_leading_arrow(lines: &[&str]) -> Result<(), ParseError> {
         if trimmed.is_empty() || trimmed.starts_with("%%") {
             continue;
         }
+        // rumark: 类图的 `<<interface>>` 等刻板注解行以 '<' 开头，会被下方
+        // starts_with_arrow 误判为行首箭头；mermaid 语法中不存在以 '<<' 开头的
+        // 合法连线，这里直接放行。
+        if trimmed.starts_with("<<") {
+            continue;
+        }
         if starts_with_arrow(trimmed) {
             let col = col_of_first_nonws(raw);
             let found_token: String = trimmed.chars().take_while(|c| !c.is_whitespace()).collect();
@@ -668,6 +674,16 @@ flowchart LR"#;
             ParseError::UnexpectedToken { expected, .. }
                 if expected == "node identifier"
         ));
+    }
+
+    // rumark: 类图刻板注解行以 '<<' 开头，不应触发行首箭头报错（此前
+    // parse_mermaid_strict 会拒绝官方支持的 `<<interface>>` 语法）。
+    #[test]
+    fn class_stereotype_annotation_passes_strict() {
+        let input = "classDiagram\nclass A {\n<<interface>>\n+doSomething()\n}\nB ..|> A\n";
+        crate::parse_mermaid_strict(input).expect("刻板注解应通过严格解析");
+        let input2 = "classDiagram\nclass B {\n<<abstract>>\n}\n";
+        crate::parse_mermaid_strict(input2).expect("abstract 刻板注解应通过严格解析");
     }
 
     #[test]
