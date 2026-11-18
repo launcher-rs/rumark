@@ -197,9 +197,22 @@ const HIGHLIGHT_LANGUAGES: &[HighlightLanguageSpec] = &[
     },
     HighlightLanguageSpec {
         key: HighlightLanguage::Mermaid,
-        aliases: &["mermaid"],
+        aliases: &["mermaid", "mmd"],
     },
 ];
+
+/// 返回输入前缀匹配的首个高亮语言名称，用于代码围栏语言补全。
+pub(crate) fn suggest_code_language(prefix: &str) -> Option<&'static str> {
+    let prefix = prefix.trim().to_ascii_lowercase();
+    if prefix.is_empty() {
+        return None;
+    }
+
+    HIGHLIGHT_LANGUAGES
+        .iter()
+        .flat_map(|language| language.aliases.iter().copied())
+        .find(|alias| alias.starts_with(&prefix))
+}
 
 /// tree-sitter 标签名表，顺序与官方 highlightr 的 tags.json 一致。
 #[cfg(feature = "code-highlight-core")]

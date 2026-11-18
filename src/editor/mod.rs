@@ -327,14 +327,12 @@ impl Editor {
 
         let mut document = DocumentTree::new(roots);
         document.rebuild_metadata_and_snapshot(cx);
-        let pending_focus = document.first_root().map(|block| block.entity_id());
-
         let mut editor = Self {
             document,
             table_cells: HashMap::new(),
             view_mode: ViewMode::Rendered,
-            pending_focus,
-            active_entity_id: pending_focus,
+            pending_focus: None,
+            active_entity_id: None,
             pending_scroll_active_block_into_view: true,
             pending_scroll_recheck_after_layout: true,
             pending_save: false,
@@ -401,7 +399,12 @@ impl Editor {
             .detach();
         cx.subscribe(&outline_tree_state, Self::on_outline_tree_event)
             .detach();
-        editor.pending_focus = editor.first_focusable_entity_id(cx);
+        // 文档以 Mermaid 图开头时先展示图表预览，避免启动后自动进入源码编辑态。
+        editor.pending_focus = editor.first_focusable_entity_id(cx).filter(|entity_id| {
+            editor
+                .focusable_entity_by_id(*entity_id)
+                .is_some_and(|block| block.read(cx).kind() != BlockKind::MermaidBlock)
+        });
         editor.active_entity_id = editor.pending_focus;
         editor.refresh_stable_document_snapshot(cx);
         editor

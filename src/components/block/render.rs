@@ -2,6 +2,7 @@
 //!
 //! 每种块类型产生不同视觉样式：列表项渲染标记列（项目符号/序号），纯 Markdown 回退渲染为纯文本。
 
+use rgpui::prelude::FluentBuilder as _;
 use rgpui::*;
 
 const EDITOR_KEY_CONTEXT: &str = "BlockEditor";
@@ -708,13 +709,24 @@ impl Block {
         i18n: &I18nSnapshot,
         window: &Window,
     ) -> AnyElement {
-        let d = &ThemeDimensions::DEFAULT;
-        let t = &ThemeTypography::DEFAULT;
         let raw = self
             .record
             .raw_fallback
             .as_deref()
             .unwrap_or_else(|| self.rendered_text());
+        self.render_mermaid_source(raw, theme, i18n, window)
+    }
+
+    /// 渲染给定的 Mermaid 围栏源码。
+    fn render_mermaid_source(
+        &self,
+        raw: &str,
+        theme: &Theme,
+        i18n: &I18nSnapshot,
+        window: &Window,
+    ) -> AnyElement {
+        let d = &ThemeDimensions::DEFAULT;
+        let t = &ThemeTypography::DEFAULT;
 
         let Some(source) = parse_mermaid_fence_source(raw) else {
             return div()
@@ -2699,8 +2711,20 @@ impl Render for Block {
             }
             BlockKind::CodeBlock { .. } => {
                 let show_language_input = focused || code_language_focused;
+                let is_mermaid_language = match &self.record.kind {
+                    BlockKind::CodeBlock {
+                        language: Some(language),
+                    } => matches!(language.to_ascii_lowercase().as_str(), "mermaid" | "mmd"),
+                    _ => false,
+                };
                 let language_placeholder =
                     SharedString::from(i18n.t("code_language_placeholder", &[]));
+                let language_suggestion =
+                    crate::components::suggest_code_language(self.code_language_text())
+                        .filter(|suggestion| {
+                            !suggestion.eq_ignore_ascii_case(self.code_language_text())
+                        })
+                        .map(SharedString::from);
                 let code_panel = focused_base
                     .bg(theme.muted)
                     .rounded_sm()
@@ -2718,14 +2742,21 @@ impl Render for Block {
                             .child(TextBlockElement::new(cx.entity(), is_placeholder)),
                     );
 
-                if show_language_input {
+                let code_element = if show_language_input {
                     let input_height = d.code_language_input_height
                         + d.code_language_input_padding_y * 2.0
                         + d.code_language_input_border_width * 2.0;
+                    let suggestion_height = if language_suggestion.is_some() {
+                        20.0
+                    } else {
+                        0.0
+                    };
                     div()
                         .w_full()
                         .relative()
-                        .pb(px(input_height + d.code_language_input_gap))
+                        .pb(px(input_height
+                            + d.code_language_input_gap
+                            + suggestion_height))
                         .child(code_panel)
                         .child(
                             div()
@@ -2779,11 +2810,45 @@ impl Render for Block {
                                 .child(CodeLanguageBarElement::new(
                                     cx.entity(),
                                     language_placeholder,
-                                )),
+                                ))
+                                .when_some(language_suggestion, |this, suggestion| {
+                                    this.child(
+                                        div().w_full().mt(px(2.0)).child(
+                                            Button::new(format!(
+                                                "code-language-suggestion-{}",
+                                                self.record.id
+                                            ))
+                                            .label(suggestion)
+                                            .ghost()
+                                            .compact()
+                                            .on_click(cx.listener(
+                                                Self::on_code_language_accept_suggestion,
+                                            )),
+                                        ),
+                                    )
+                                }),
                         )
                         .into_any_element()
                 } else {
                     code_panel.into_any_element()
+                };
+                if is_mermaid_language {
+                    let source = format!("```mermaid\n{}\n```", self.rendered_text());
+                    let rendered = self.render_mermaid_source(&source, &theme, &i18n, window);
+                    if show_language_input {
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_col()
+                            .gap(px(d.block_padding_y))
+                            .child(code_element)
+                            .child(rendered)
+                            .into_any_element()
+                    } else {
+                        rendered
+                    }
+                } else {
+                    code_element
                 }
             }
             BlockKind::Table => {

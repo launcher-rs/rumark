@@ -1345,7 +1345,30 @@ impl Block {
     ) {
         if self.code_language_focus_handle.is_focused(window) {
             cx.stop_propagation();
+            self.accept_code_language_suggestion(cx);
         }
+    }
+
+    /// 接受当前匹配的代码语言补全。
+    pub(crate) fn on_code_language_accept_suggestion(
+        &mut self,
+        _: &ClickEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.accept_code_language_suggestion(cx);
+    }
+
+    /// 用补全结果替换当前语言字段。
+    fn accept_code_language_suggestion(&mut self, cx: &mut Context<Self>) {
+        let current = self.code_language_text().to_string();
+        let Some(suggestion) = crate::components::suggest_code_language(&current) else {
+            return;
+        };
+        if suggestion.eq_ignore_ascii_case(&current) {
+            return;
+        }
+        self.replace_code_language_text_in_range(0..current.len(), suggestion, None, false, cx);
     }
 
     /// 吞掉语言框内的取消缩进键。

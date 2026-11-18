@@ -219,6 +219,7 @@
   "context_heading_5": "五级标题",
   "context_heading_6": "六级标题",
   "insert_math": "公式块",
+  "insert_mermaid": "Mermaid 图表",
   "insert_paragraph_above": "段落（上方）",
   "insert_paragraph_below": "段落（下方）",
   "insert_bulleted_list": "无序列表",

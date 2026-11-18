@@ -529,6 +529,15 @@ impl Editor {
             data,
             Self::on_insert_math_block,
         ))
+        .item(Self::insert_popup_item(
+            strings.t("insert_mermaid", &[]),
+            None,
+            true,
+            false,
+            editor,
+            data,
+            Self::on_insert_mermaid_block,
+        ))
         .separator()
         .item(Self::insert_popup_item(
             strings.t("insert_paragraph_above", &[]),
@@ -857,6 +866,28 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         self.insert_kind_after_target(BlockKind::MathBlock, event, cx);
+    }
+
+    /// 点击「插入 Mermaid」：在目标后插入空 Mermaid 围栏块。
+    pub(super) fn on_insert_mermaid_block(
+        &mut self,
+        _event: &ClickEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(target) = self.take_insert_target() else {
+            return;
+        };
+        self.insert_block_after_target(
+            target,
+            BlockRecord::with_plain_text(
+                BlockKind::CodeBlock {
+                    language: Some("mermaid".into()),
+                },
+                "flowchart TD\n    A --> B",
+            ),
+            cx,
+        );
     }
 
     /// 在目标附近插入空段落（上方走 `Before` 落点，下方走既有 `After` 落点）。
