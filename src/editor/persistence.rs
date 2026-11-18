@@ -323,7 +323,15 @@ impl Editor {
             .snapshot()
             .t("export_toc_title", &[]);
         let (include_toc, dark) = export_html_options(cx);
-        let html = markdown_to_standalone_html(&markdown, &title, dark, include_toc, &toc_title);
+        let base_dir = self.image_paste_root_dir().ok();
+        let html = markdown_to_standalone_html(
+            &markdown,
+            &title,
+            dark,
+            include_toc,
+            &toc_title,
+            base_dir.as_deref(),
+        );
         let (default_dir, _) = self.save_dialog_defaults();
         let suggested_name = format!("{title}.html");
         let prompt = cx.prompt_for_new_path(&default_dir, Some(&suggested_name));
@@ -363,7 +371,15 @@ impl Editor {
             .snapshot()
             .t("export_toc_title", &[]);
         let (include_toc, dark) = export_html_options(cx);
-        let html = markdown_to_standalone_html(&markdown, &title, dark, include_toc, &toc_title);
+        let base_dir = self.image_paste_root_dir().ok();
+        let html = markdown_to_standalone_html(
+            &markdown,
+            &title,
+            dark,
+            include_toc,
+            &toc_title,
+            base_dir.as_deref(),
+        );
         cx.write_to_clipboard(ClipboardItem::new_string(html));
     }
 
@@ -401,6 +417,7 @@ impl Editor {
         let options = crate::export::ExportOptions {
             title: title.clone(),
             include_toc,
+            base_dir: self.image_paste_root_dir().ok(),
         };
         // 缺字体的提示文案要在主线程取好：后台任务只产出字节或错误，不碰 i18n 全局。
         let cjk_font_hint = cx
@@ -711,12 +728,15 @@ fn export_html_options(cx: &App) -> (bool, bool) {
 /// 把 Markdown 转为单文件 HTML（GFM 表格/删除线/任务列表/脚注全开，明暗跟随编辑器主题）。
 ///
 /// 有标题且 `include_toc` 为真时在正文前插入嵌套目录（标题行注入 `{#锚点}` 供跳转）。
+/// 本地图片按 `base_dir` 解析后内嵌为 `data:` URI，导出文件脱离文档目录也能直显；
+/// 远程图片保留原地址（单文件不承诺离线显示网络图）。
 fn markdown_to_standalone_html(
     markdown: &str,
     title: &str,
     dark: bool,
     include_toc: bool,
     toc_title: &str,
+    base_dir: Option<&Path>,
 ) -> String {
     use pulldown_cmark::{Options, Parser, html};
     let headings = collect_export_headings(markdown);
@@ -734,7 +754,10 @@ fn markdown_to_standalone_html(
     options.insert(Options::ENABLE_HEADING_ATTRIBUTES);
     let parser = Parser::new_ext(&anchored, options);
     let mut body = String::new();
-    html::push_html(&mut body, sanitize_export_events(parser));
+    html::push_html(
+        &mut body,
+        sanitize_export_events(embed_local_image_events(parser, base_dir)),
+    );
     let toc = if include_toc {
         render_export_toc(&headings, toc_title)
     } else {
@@ -772,6 +795,39 @@ fn markdown_to_standalone_html(
         <body>\n{toc}{body}\n</body>\n</html>\n",
         if dark { "dark" } else { "light" },
     )
+}
+
+/// 把事件流中的本地图片目标替换为内嵌 `data:` URI（读取失败保留原地址）。
+fn embed_local_image_events<'a>(
+    events: impl Iterator<Item = pulldown_cmark::Event<'a>>,
+    base_dir: Option<&Path>,
+) -> impl Iterator<Item = pulldown_cmark::Event<'a>> {
+    events.map(move |event| match event {
+        pulldown_cmark::Event::Start(pulldown_cmark::Tag::Image {
+            link_type,
+            dest_url,
+            title,
+            id,
+        }) => {
+            let embedded =
+                crate::export::image::load_local_image_bytes(&dest_url, base_dir).map(|bytes| {
+                    let path = crate::export::image::resolve_local_path(&dest_url, base_dir);
+                    let mime = Editor::embedded_mime_for_extension(&path);
+                    Editor::embedded_data_uri(mime, &bytes)
+                });
+            let dest_url = match embedded {
+                Some(uri) => pulldown_cmark::CowStr::from(uri),
+                None => dest_url,
+            };
+            pulldown_cmark::Event::Start(pulldown_cmark::Tag::Image {
+                link_type,
+                dest_url,
+                title,
+                id,
+            })
+        }
+        other => other,
+    })
 }
 
 /// 把 Markdown 事件流里的原始 HTML 片段替换为清洗后的安全标记。
@@ -845,8 +901,14 @@ mod tests {
 
     #[test]
     fn standalone_html_keeps_gfm_table_and_escapes_title() {
-        let html =
-            markdown_to_standalone_html("| a |\n| --- |\n| 1 |", "A&B <T>", false, true, "目录");
+        let html = markdown_to_standalone_html(
+            "| a |\n| --- |\n| 1 |",
+            "A&B <T>",
+            false,
+            true,
+            "目录",
+            None,
+        );
         assert!(html.contains("<table>"), "html: {html:?}");
         assert!(
             html.contains("<title>A&amp;B &lt;T&gt;</title>"),
@@ -860,8 +922,8 @@ mod tests {
 
     #[test]
     fn standalone_html_dark_mode_uses_dark_palette() {
-        let light = markdown_to_standalone_html("# T", "T", false, true, "目录");
-        let dark = markdown_to_standalone_html("# T", "T", true, true, "目录");
+        let light = markdown_to_standalone_html("# T", "T", false, true, "目录", None);
+        let dark = markdown_to_standalone_html("# T", "T", true, true, "目录", None);
         assert!(light.contains("#ffffff"), "html: {light:?}");
         assert!(dark.contains("#0d1117"), "html: {dark:?}");
         assert!(
@@ -872,7 +934,7 @@ mod tests {
 
     #[test]
     fn standalone_html_toc_can_be_disabled() {
-        let html = markdown_to_standalone_html("# A\n\ntext", "T", false, false, "目录");
+        let html = markdown_to_standalone_html("# A\n\ntext", "T", false, false, "目录", None);
         assert!(!html.contains("<nav class=\"toc\">"), "html: {html:?}");
         assert!(!html.contains("{#a}"), "html: {html:?}");
         assert!(html.contains("<h1>A</h1>"), "html: {html:?}");
@@ -892,7 +954,7 @@ mod tests {
     #[test]
     fn export_toc_renders_nested_nav_with_anchors() {
         let markdown = "# A\n\n## B\n\n# A\n";
-        let html = markdown_to_standalone_html(markdown, "T", false, true, "Contents");
+        let html = markdown_to_standalone_html(markdown, "T", false, true, "Contents", None);
         assert!(html.contains("<nav class=\"toc\">"), "html: {html:?}");
         assert!(html.contains("<strong>Contents</strong>"), "html: {html:?}");
         assert!(html.contains("href=\"#a\""), "html: {html:?}");
@@ -924,6 +986,7 @@ mod tests {
             false,
             false,
             "目录",
+            None,
         );
         assert!(!html.contains("<script>"), "html: {html:?}");
         assert!(html.contains("&lt;script&gt;"), "html: {html:?}");
@@ -938,6 +1001,7 @@ mod tests {
             false,
             false,
             "目录",
+            None,
         );
         assert!(!html.contains("onerror"), "html: {html:?}");
         assert!(!html.contains("javascript:"), "html: {html:?}");
@@ -952,10 +1016,28 @@ mod tests {
             false,
             false,
             "目录",
+            None,
         );
         assert!(html.contains("<details open=\"\">"), "html: {html:?}");
         assert!(html.contains("<summary>标题</summary>"), "html: {html:?}");
         assert!(html.contains("</details>"), "html: {html:?}");
+    }
+
+    #[test]
+    fn standalone_html_embeds_local_images_as_data_uri() {
+        let root = std::env::temp_dir().join(format!("rumark-html-img-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("assets")).expect("temp dir");
+        std::fs::write(root.join("assets/pic.png"), b"fake-png-bytes").expect("write image");
+
+        let markdown = "![图](./assets/pic.png)\n\n![远程](https://example.com/a.png)\n\n![缺图](./missing.png)";
+        let html = markdown_to_standalone_html(markdown, "T", false, false, "目录", Some(&root));
+        assert!(html.contains("data:image/png;base64,"), "html: {html:?}");
+        assert!(!html.contains("./assets/pic.png"), "html: {html:?}");
+        // 远程地址保留原样，缺失文件不内嵌也不报错。
+        assert!(html.contains("https://example.com/a.png"), "html: {html:?}");
+        assert!(html.contains("./missing.png"), "html: {html:?}");
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

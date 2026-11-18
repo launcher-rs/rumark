@@ -8,10 +8,11 @@
 //! 三种格式共享下面的块模型：先由 `parse_blocks` 把 Markdown 走
 //! `pulldown-cmark` 解析为与呈现无关的块树，再由各格式渲染器消费。
 //! 降级约定：公式/流程图等编辑器内富渲染在导出中回退为等宽原文，
-//! 以保证内容不丢失；图片暂以替代文本占位。
+//! 以保证内容不丢失；图片按文档目录解析后嵌入（加载失败回退替代文本占位）。
 
 #[cfg(feature = "export-docx")]
 pub(crate) mod docx;
+pub(crate) mod image;
 #[cfg(feature = "export-pdf")]
 pub(crate) mod pdf;
 
@@ -45,6 +46,8 @@ pub(crate) struct ExportOptions {
     pub(crate) title: String,
     /// 是否在正文前插入目录（沿用 HTML 导出的目录偏好）。
     pub(crate) include_toc: bool,
+    /// 相对图片路径的基准目录（文档所在目录，未保存时为当前目录）。
+    pub(crate) base_dir: Option<std::path::PathBuf>,
 }
 
 /// 行内节点：各格式按能力取舍呈现（如下划线/删除线 PDF 暂忽略）。
@@ -64,8 +67,8 @@ pub(crate) enum Inline {
     Math(String),
     /// 链接：渲染展示文本，目标地址供 DOCX 超链接使用。
     Link { label: String, url: String },
-    /// 图片：渲染替代文本占位（不嵌原图）。
-    Image { alt: String },
+    /// 图片：目标地址供各格式解析嵌入，加载失败时以替代文本占位。
+    Image { alt: String, url: String },
     /// 脚注引用（如 `[^1]`）。
     FootnoteRef(String),
     /// 硬换行。
@@ -131,7 +134,7 @@ pub(crate) fn inline_text(inline: &[Inline]) -> String {
             }
             Inline::Code(code) | Inline::Math(code) => out.push_str(code),
             Inline::Link { label, .. } => out.push_str(label),
-            Inline::Image { alt } => out.push_str(alt),
+            Inline::Image { alt, .. } => out.push_str(alt),
             Inline::FootnoteRef(label) => {
                 out.push_str("[^");
                 out.push_str(label);
@@ -554,12 +557,14 @@ where
             Event::Start(Tag::Image { dest_url, .. }) => {
                 let alt_nodes = collect_inline(events, &TagEnd::Image);
                 let alt = inline_text(&alt_nodes);
+                let url = dest_url.into_string();
                 inline.push(Inline::Image {
                     alt: if alt.trim().is_empty() {
-                        dest_url.into_string()
+                        url.clone()
                     } else {
                         alt
                     },
+                    url,
                 });
             }
             Event::Start(Tag::Subscript) => {
@@ -714,6 +719,28 @@ mod tests {
             "missing a strike node; inline: {inline:?}"
         );
         assert_eq!(inline_text(inline), "粗与斜与码与文与公式与删");
+    }
+
+    #[test]
+    fn walker_keeps_image_url_and_alt() {
+        let blocks = parse_blocks("![替代](./assets/pic.png)\n\n![](bare.png)\n");
+        let Block::Paragraph(inline) = &blocks[0] else {
+            panic!("expected paragraph: {blocks:?}");
+        };
+        let Inline::Image { alt, url } = &inline[0] else {
+            panic!("expected image: {inline:?}");
+        };
+        assert_eq!(alt, "替代");
+        assert_eq!(url, "./assets/pic.png");
+        let Block::Paragraph(inline) = &blocks[1] else {
+            panic!("expected paragraph: {blocks:?}");
+        };
+        let Inline::Image { alt, url } = &inline[0] else {
+            panic!("expected image: {inline:?}");
+        };
+        // 空替代文本回退为目标地址，但 url 始终保留供嵌图解析。
+        assert_eq!(alt, "bare.png");
+        assert_eq!(url, "bare.png");
     }
 
     #[test]

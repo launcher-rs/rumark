@@ -5,6 +5,7 @@
 //! OFL 的 Noto Sans SC 优先）→ 各平台系统字体目录 → 纯英文文档回退内置
 //! Helvetica。含中文但找不到中文字体时返回可操作错误，而非输出乱码方框。
 
+use std::path::PathBuf;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -13,7 +14,8 @@ use std::sync::{
 use anyhow::{Context as _, anyhow};
 use printpdf::{
     BuiltinFont, Color, Line, LinePoint, Mm, Op, PaintMode, ParsedFont, PdfDocument, PdfFontHandle,
-    PdfPage, PdfSaveOptions, Point, Pt, Rect, Rgb, TextItem,
+    PdfPage, PdfSaveOptions, Point, Pt, RawImage, RawImageData, RawImageFormat, Rect, Rgb,
+    TextItem, XObjectTransform,
 };
 
 use super::{Align, Block, ExportOptions, Inline, collect_headings, inline_text, parse_blocks};
@@ -46,12 +48,12 @@ pub(crate) fn render_pdf_bytes(markdown: &str, options: &ExportOptions) -> anyho
         Some(parsed) => PdfFontHandle::External(doc.add_font(parsed)),
         None => PdfFontHandle::Builtin(BuiltinFont::Helvetica),
     };
-    let mut layout = Layout::new(&fonts, font);
+    let mut layout = Layout::new(&fonts, font, &mut doc, options.base_dir.clone());
     if options.include_toc {
         layout.push_toc(&collect_headings(&blocks));
     }
     layout.push_blocks(&blocks, 0);
-    layout.finish(doc)
+    layout.finish()
 }
 
 /// 缺中文字体标记错误（调用方据此切换 i18n 文案，而非解析字符串）。
@@ -247,6 +249,9 @@ fn contains_cjk(text: &str) -> bool {
 struct Layout<'a> {
     fonts: &'a Fonts,
     font: PdfFontHandle,
+    /// 图片 XObject 需在文档级注册，装配期直接持有文档引用。
+    doc: &'a mut PdfDocument,
+    base_dir: Option<PathBuf>,
     pages: Vec<Vec<Op>>,
     cursor_mm: f32,
 }
@@ -298,10 +303,17 @@ fn gray(value: f32) -> Color {
 
 impl<'a> Layout<'a> {
     /// 新建装配器（首页光标置于上边距）。
-    fn new(fonts: &'a Fonts, font: PdfFontHandle) -> Self {
+    fn new(
+        fonts: &'a Fonts,
+        font: PdfFontHandle,
+        doc: &'a mut PdfDocument,
+        base_dir: Option<PathBuf>,
+    ) -> Self {
         Self {
             fonts,
             font,
+            doc,
+            base_dir,
             pages: vec![Vec::new()],
             cursor_mm: MARGIN_TOP_MM,
         }
@@ -488,13 +500,13 @@ impl<'a> Layout<'a> {
                 self.gap(2.0);
             }
             Block::Paragraph(inline) => {
-                let runs = flatten_inline(inline);
-                if runs.iter().all(|(text, _)| text.trim().is_empty()) {
+                let segments = split_inline_flow(inline);
+                if !segments.iter().any(FlowSegment::has_content) {
                     self.gap(2.0);
                     return;
                 }
                 self.gap(1.5);
-                self.push_rich_lines(&runs, x, width, BODY_PT, ink());
+                self.push_segments(segments, x, width, None);
                 self.gap(1.5);
             }
             Block::Code { code, .. } => {
@@ -566,20 +578,15 @@ impl<'a> Layout<'a> {
                     for block in &item.blocks {
                         match block {
                             Block::Paragraph(inline) => {
-                                let runs = flatten_inline(inline);
-                                let mut runs = runs;
-                                if first_line {
-                                    runs.insert(0, (first.clone(), RunKind::Plain));
+                                let segments = split_inline_flow(inline);
+                                let prefix = if first_line {
                                     first_line = false;
-                                }
+                                    Some(first.as_str())
+                                } else {
+                                    None
+                                };
                                 let offset = item_indent;
-                                self.push_rich_lines(
-                                    &runs,
-                                    x + offset,
-                                    width - offset,
-                                    BODY_PT,
-                                    ink(),
-                                );
+                                self.push_segments(segments, x + offset, width - offset, prefix);
                             }
                             _ => self.push_block(block, depth + 1),
                         }
@@ -631,6 +638,95 @@ impl<'a> Layout<'a> {
             let font = self.font_handle();
             self.text_line(x_mm, &line, size_pt, color.clone(), font);
         }
+    }
+
+    /// 段落内容装配：文本段走富文本行，图片段嵌图（失败回退占位文本）。
+    ///
+    /// `prefix` 为列表首段的编号/符号前缀，并入首个文本段。
+    fn push_segments(
+        &mut self,
+        mut segments: Vec<FlowSegment>,
+        x_mm: f32,
+        width_mm: f32,
+        prefix: Option<&str>,
+    ) {
+        if let Some(prefix) = prefix {
+            let prefix_run = (prefix.to_string(), RunKind::Plain);
+            match segments.first_mut() {
+                Some(FlowSegment::Runs(runs)) => runs.insert(0, prefix_run),
+                _ => segments.insert(0, FlowSegment::Runs(vec![prefix_run])),
+            }
+        }
+        for segment in segments {
+            match segment {
+                FlowSegment::Runs(runs) => {
+                    if runs.iter().all(|(text, _)| text.trim().is_empty()) {
+                        continue;
+                    }
+                    self.push_rich_lines(&runs, x_mm, width_mm, BODY_PT, ink());
+                }
+                FlowSegment::Image { alt, url } => {
+                    if !self.push_picture(&url, x_mm, width_mm) {
+                        let font = self.font_handle();
+                        self.text_line(
+                            x_mm,
+                            &format!("[图片：{alt}]"),
+                            BODY_PT,
+                            secondary_ink(),
+                            font,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// 嵌入一张图片：按版心宽等比缩放（小图不放大、超高钳到页高六成），
+    /// 解码失败或文件缺失返回 `false` 由调用方回退占位。
+    fn push_picture(&mut self, url: &str, x_mm: f32, width_mm: f32) -> bool {
+        let Some(bytes) = super::image::load_image_bytes(url, self.base_dir.as_deref()) else {
+            return false;
+        };
+        let Some(decoded) = super::image::decode_image(&bytes) else {
+            return false;
+        };
+        let (px_w, px_h) = (decoded.width(), decoded.height());
+        // 96dpi 屏幕像素的自然毫米尺寸（区别于正文 pt 换算的 0.3528）。
+        let natural_w_mm = px_w as f32 * 0.2646;
+        let natural_h_mm = px_h as f32 * 0.2646;
+        let max_h_mm = (self.bottom_mm() - MARGIN_TOP_MM) * 0.6;
+        let scale = (width_mm / natural_w_mm)
+            .min(max_h_mm / natural_h_mm)
+            .min(1.0);
+        let w_mm = natural_w_mm * scale;
+        let h_mm = natural_h_mm * scale;
+        self.ensure_space(h_mm + 2.0);
+        let top = self.cursor_mm;
+        let raw = RawImage {
+            pixels: RawImageData::U8(decoded.to_rgba8().into_raw()),
+            width: px_w as usize,
+            height: px_h as usize,
+            data_format: RawImageFormat::RGBA8,
+            tag: Vec::new(),
+        };
+        let id = self.doc.add_image(&raw);
+        // dpi=72 时自动缩放把 1px 映射为 1pt，再按目标尺寸二次缩放。
+        self.pages
+            .last_mut()
+            .expect("至少一页")
+            .push(Op::UseXobject {
+                id,
+                transform: XObjectTransform {
+                    translate_x: Some(Pt(x_mm * PT_PER_MM)),
+                    translate_y: Some(Pt((PAGE_HEIGHT_MM - top - h_mm) * PT_PER_MM)),
+                    dpi: Some(72.0),
+                    scale_x: Some(w_mm * PT_PER_MM / px_w as f32),
+                    scale_y: Some(h_mm * PT_PER_MM / px_h as f32),
+                    ..Default::default()
+                },
+            });
+        self.cursor_mm = top + h_mm + 2.0;
+        true
     }
 
     /// 按宽度换行（返回至少一行；超长单词按字硬断）。
@@ -867,7 +963,7 @@ impl<'a> Layout<'a> {
     }
 
     /// 落盘：逐页装配后保存（字体子集化由保存选项自动完成）。
-    fn finish(self, mut doc: PdfDocument) -> anyhow::Result<Vec<u8>> {
+    fn finish(self) -> anyhow::Result<Vec<u8>> {
         let pages: Vec<PdfPage> = self
             .pages
             .into_iter()
@@ -876,7 +972,8 @@ impl<'a> Layout<'a> {
         if pages.is_empty() {
             return Err(anyhow!("文档为空，无法生成 PDF"));
         }
-        Ok(doc
+        Ok(self
+            .doc
             .with_pages(pages)
             .save(&PdfSaveOptions::default(), &mut Vec::new()))
     }
@@ -889,29 +986,61 @@ enum RunKind {
     Code,
 }
 
-/// 行内树展平为文本游程。
-fn flatten_inline(inline: &[Inline]) -> Vec<(String, RunKind)> {
-    let mut runs = Vec::new();
-    flatten_into(inline, RunKind::Plain, &mut runs);
-    runs
+/// 段落内容片段：连续文本游程或一张图片（图片打断文本流独立成段）。
+enum FlowSegment {
+    Runs(Vec<(String, RunKind)>),
+    Image { alt: String, url: String },
 }
 
-/// 递归展平（样式嵌套时代码优先保留）。
-fn flatten_into(inline: &[Inline], parent: RunKind, runs: &mut Vec<(String, RunKind)>) {
-    for node in inline {
-        match node {
-            Inline::Text(text) => push_run(runs, text.clone(), parent),
-            Inline::Strong(inner) | Inline::Emphasis(inner) | Inline::Strike(inner) => {
-                flatten_into(inner, parent, runs);
-            }
-            Inline::Code(code) => push_run(runs, code.clone(), RunKind::Code),
-            Inline::Math(math) => push_run(runs, math.clone(), RunKind::Code),
-            Inline::Link { label, .. } => push_run(runs, label.clone(), parent),
-            Inline::Image { alt } => push_run(runs, format!("[图片：{alt}]"), parent),
-            Inline::FootnoteRef(label) => push_run(runs, format!("[^{label}]"), parent),
-            Inline::Break => push_run(runs, "\n".to_string(), parent),
+impl FlowSegment {
+    /// 是否有可见内容（空白文本段跳过，图片段恒有内容）。
+    fn has_content(&self) -> bool {
+        match self {
+            Self::Runs(runs) => runs.iter().any(|(text, _)| !text.trim().is_empty()),
+            Self::Image { .. } => true,
         }
     }
+}
+
+/// 行内树切分为文本/图片片段序列（样式嵌套拍平，图片保留目标地址）。
+fn split_inline_flow(inline: &[Inline]) -> Vec<FlowSegment> {
+    fn walk(
+        inline: &[Inline],
+        parent: RunKind,
+        runs: &mut Vec<(String, RunKind)>,
+        segments: &mut Vec<FlowSegment>,
+    ) {
+        for node in inline {
+            match node {
+                Inline::Text(text) => push_run(runs, text.clone(), parent),
+                Inline::Strong(inner) | Inline::Emphasis(inner) | Inline::Strike(inner) => {
+                    walk(inner, parent, runs, segments);
+                }
+                Inline::Code(code) => push_run(runs, code.clone(), RunKind::Code),
+                Inline::Math(math) => push_run(runs, math.clone(), RunKind::Code),
+                Inline::Link { label, .. } => push_run(runs, label.clone(), parent),
+                Inline::Image { alt, url } => {
+                    if !runs.is_empty() {
+                        segments.push(FlowSegment::Runs(std::mem::take(runs)));
+                    }
+                    segments.push(FlowSegment::Image {
+                        alt: alt.clone(),
+                        url: url.clone(),
+                    });
+                }
+                Inline::FootnoteRef(label) => push_run(runs, format!("[^{label}]"), parent),
+                Inline::Break => push_run(runs, "\n".to_string(), parent),
+            }
+        }
+    }
+
+    let mut segments = Vec::new();
+    let mut runs = Vec::new();
+    walk(inline, RunKind::Plain, &mut runs, &mut segments);
+    if !runs.is_empty() {
+        segments.push(FlowSegment::Runs(runs));
+    }
+    segments
 }
 
 /// 合并相邻同类游程，避免碎片化换行计算。
@@ -995,6 +1124,7 @@ mod tests {
         ExportOptions {
             title: "测试文档".to_string(),
             include_toc: true,
+            base_dir: None,
         }
     }
 
@@ -1044,6 +1174,7 @@ mod tests {
         let options = ExportOptions {
             title: "plain".to_string(),
             include_toc: false,
+            base_dir: None,
         };
         let bytes = render_pdf_bytes("Hello *world*.\n\n- a\n- b\n", &options).expect("渲染成功");
         assert!(bytes.starts_with(b"%PDF"));
@@ -1078,7 +1209,13 @@ mod tests {
             units_per_em: 1000.0,
             space_width_units: 1000.0,
         };
-        let layout = Layout::new(&fonts, PdfFontHandle::Builtin(BuiltinFont::Helvetica));
+        let mut doc = printpdf::PdfDocument::new("wrap-test");
+        let layout = Layout::new(
+            &fonts,
+            PdfFontHandle::Builtin(BuiltinFont::Helvetica),
+            &mut doc,
+            None,
+        );
         let lines = layout.wrap_text(&"中".repeat(30), 10.0, 25.0);
         // 25mm × 2.8346 ≈ 70.87pt，单字 10pt → 每行 7 字。
         assert_eq!(lines[0].chars().count(), 7, "首行字数错误：{lines:?}");
@@ -1099,6 +1236,38 @@ mod tests {
         assert_eq!(list_marker(false, 1, None, 1), "◦");
         assert_eq!(list_marker(false, 1, Some(true), 0), "[x]");
         assert_eq!(list_marker(false, 1, Some(false), 0), "[ ]");
+    }
+
+    #[test]
+    fn pdf_embeds_local_image_as_xobject() {
+        let root = std::env::temp_dir().join(format!("rumark-pdf-img-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("temp dir");
+        let fixture = image::RgbaImage::from_pixel(6, 4, image::Rgba([30, 120, 200, 255]));
+        fixture
+            .save(root.join("pic.png"))
+            .expect("write fixture png");
+
+        let options = ExportOptions {
+            title: "嵌图".to_string(),
+            include_toc: false,
+            base_dir: Some(root.clone()),
+        };
+        let markdown = "前文\n\n![图](./pic.png)\n\n后文\n\n- 列表项\n\n  ![列表图](./pic.png)\n";
+        let bytes = render_pdf_bytes(markdown, &options).expect("渲染成功");
+        assert!(bytes.starts_with(b"%PDF"));
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("/Subtype/Image"), "应含图片 XObject");
+        assert!(text.contains("/XObject"), "应注册 XObject 资源");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pdf_missing_image_falls_back_without_error() {
+        let bytes = render_pdf_bytes("![缺图](./missing.png)", &test_options()).expect("渲染成功");
+        assert!(bytes.starts_with(b"%PDF"));
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(!text.contains("/Subtype/Image"), "缺图不应产生图片对象");
     }
 
     #[test]

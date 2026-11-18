@@ -2,11 +2,14 @@
 //!
 //! 经共享块模型直写原生 Word 文档：标题样式、真列表编号、网格表格、
 //! 目录域与中英文字体分区（西文 Calibri/Consolas、中文微软雅黑），
-//! 全程纯 Rust、无外部进程依赖。公式/流程图回退等宽原文，图片以替代文本占位。
+//! 全程纯 Rust、无外部进程依赖。公式/流程图回退等宽原文，
+//! 段落内图片解码转 PNG 嵌入（加载失败回退替代文本占位）。
+
+use std::path::PathBuf;
 
 use docx_rs::{
     AbstractNumbering, AlignmentType, Docx, Hyperlink, HyperlinkType, IndentLevel, Level, LevelJc,
-    LevelText, NumberFormat, Numbering, NumberingId, Paragraph, Run, RunFonts, Start, Table,
+    LevelText, NumberFormat, Numbering, NumberingId, Paragraph, Pic, Run, RunFonts, Start, Table,
     TableAlignmentType, TableCell, TableOfContents, TableRow,
 };
 
@@ -20,6 +23,12 @@ const DECIMAL_ABSTRACT_ID: usize = 102;
 const BODY_HALF_POINTS: usize = 21;
 /// 代码与表格的较小字号（半磅）。
 const SMALL_HALF_POINTS: usize = 18;
+/// 版心宽度（EMU）：A4 宽 11906 twips 减左右边距各 1701，1 twip = 635 EMU。
+const CONTENT_WIDTH_EMU: u32 = (11906 - 1701 * 2) * 635;
+/// 图片高度上限（EMU）：约版心高六成，避免单图撑满整页。
+const MAX_IMAGE_HEIGHT_EMU: u32 = 5_000_000;
+/// 1 像素对应的 EMU（96dpi）。
+const EMU_PER_PX: f64 = 9525.0;
 
 /// 把 Markdown 渲染为完整 DOCX 字节（ZIP 容器，Word 可直接打开）。
 pub(crate) fn render_docx_bytes(
@@ -43,7 +52,10 @@ pub(crate) fn render_docx_bytes(
                     .auto(),
             );
     }
-    let mut writer = DocxWriter { depth: 0 };
+    let mut writer = DocxWriter {
+        depth: 0,
+        base_dir: options.base_dir.clone(),
+    };
     for block in &blocks {
         doc = writer.push_block(doc, block);
     }
@@ -128,9 +140,27 @@ fn mono_run(text: &str) -> Run {
 /// 块装配器（`depth` 为列表嵌套深度，决定编号层级）。
 struct DocxWriter {
     depth: u32,
+    base_dir: Option<PathBuf>,
 }
 
 impl DocxWriter {
+    /// 加载图片并转为按版心缩放的 PNG 内嵌对象（失败返回 `None` 走占位）。
+    fn image_pic(&self, url: &str) -> Option<Pic> {
+        let bytes = super::image::load_image_bytes(url, self.base_dir.as_deref())?;
+        let decoded = super::image::decode_image(&bytes)?;
+        let (width, height) = (decoded.width(), decoded.height());
+        let mut png = Vec::new();
+        decoded
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .ok()?;
+        // 小图不放大，大图等比钳到版心宽与页高上限。
+        let scale = (CONTENT_WIDTH_EMU as f64 / (width as f64 * EMU_PER_PX))
+            .min(MAX_IMAGE_HEIGHT_EMU as f64 / (height as f64 * EMU_PER_PX))
+            .min(1.0);
+        let width_emu = ((width as f64 * EMU_PER_PX * scale) as u32).max(1);
+        let height_emu = ((height as f64 * EMU_PER_PX * scale) as u32).max(1);
+        Some(Pic::new_with_dimensions(png, width, height).size(width_emu, height_emu))
+    }
     /// 单个块装配（消费并返回文档，适配消费式 builder）。
     fn push_block(&mut self, doc: Docx, block: &Block) -> Docx {
         match block {
@@ -364,9 +394,10 @@ impl DocxWriter {
                         .add_run(styled_run(label, style.link()));
                     pieces.push(Piece::Hyperlink(Box::new(link)));
                 }
-                Inline::Image { alt } => {
-                    push_text_piece(pieces, format!("[图片：{alt}]"), style.gray());
-                }
+                Inline::Image { alt, url } => match self.image_pic(url) {
+                    Some(pic) => pieces.push(Piece::Run(Run::new().add_image(pic))),
+                    None => push_text_piece(pieces, format!("[图片：{alt}]"), style.gray()),
+                },
                 Inline::FootnoteRef(label) => {
                     push_text_piece(pieces, format!("[^{label}]"), style);
                 }
@@ -399,7 +430,7 @@ impl DocxWriter {
                 Inline::Link { label, .. } => {
                     push_text_run(runs, label.clone(), style.link(), small);
                 }
-                Inline::Image { alt } => {
+                Inline::Image { alt, .. } => {
                     push_text_run(runs, format!("[图片：{alt}]"), style.gray(), small);
                 }
                 Inline::FootnoteRef(label) => {
@@ -533,6 +564,7 @@ mod tests {
         ExportOptions {
             title: "测试文档".to_string(),
             include_toc: true,
+            base_dir: None,
         }
     }
 
@@ -555,6 +587,7 @@ mod tests {
         let options = ExportOptions {
             title: "plain".to_string(),
             include_toc: false,
+            base_dir: None,
         };
         let bytes = render_docx_bytes("Hello *world*.\n", &options).expect("渲染成功");
         assert!(bytes.starts_with(b"PK"));
@@ -583,6 +616,44 @@ mod tests {
         let mut text = String::new();
         part.read_to_string(&mut text).expect("部件为 UTF-8");
         text
+    }
+
+    #[test]
+    fn docx_embeds_local_image_into_media() {
+        let root = std::env::temp_dir().join(format!("rumark-docx-img-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("temp dir");
+        let fixture = image::RgbImage::from_pixel(4, 3, image::Rgb([200, 30, 30]));
+        fixture
+            .save(root.join("pic.png"))
+            .expect("write fixture png");
+
+        let options = ExportOptions {
+            title: "嵌图".to_string(),
+            include_toc: false,
+            base_dir: Some(root.clone()),
+        };
+        let bytes =
+            render_docx_bytes("前文\n\n![图](./pic.png)\n\n后文", &options).expect("渲染成功");
+        let archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).expect("合法 zip");
+        assert!(
+            archive
+                .file_names()
+                .any(|name| name.starts_with("word/media/")),
+            "应内嵌图片部件：{:?}",
+            archive.file_names().collect::<Vec<_>>()
+        );
+        let document = unpack_docx_part(&bytes, "word/document.xml");
+        assert!(document.contains("blip"), "图片引用落盘：{document}");
+        assert!(document.contains("前文") && document.contains("后文"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn docx_missing_image_falls_back_to_alt_text() {
+        let bytes = render_docx_bytes("![缺图](./missing.png)", &test_options()).expect("渲染成功");
+        let document = unpack_docx_part(&bytes, "word/document.xml");
+        assert!(document.contains("[图片：缺图]"), "占位文本：{document}");
     }
 
     #[test]

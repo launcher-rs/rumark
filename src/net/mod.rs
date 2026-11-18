@@ -25,14 +25,38 @@ const IMAGE_WORKER_THREADS: usize = 4;
 /// 远端图片响应体上限：错配或恶意的 URL 不应把任意大的正文读进内存。
 const MAX_IMAGE_RESPONSE_BYTES: u64 = 32 * 1024 * 1024;
 
+/// 图片请求的浏览器 UA（渲染加载与导出抓取共用）。
+const IMAGE_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36";
+
 /// 安装全局 HTTP 客户端供图片加载使用。
 pub(crate) fn install_http_client(cx: &mut App) {
-    match HttpTransportClient::new(
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
-    ) {
+    match HttpTransportClient::new(IMAGE_USER_AGENT) {
         Ok(client) => cx.set_http_client(Arc::new(client)),
         Err(error) => eprintln!("failed to install HTTP client for image loading: {error}"),
     }
+}
+
+/// 同步抓取远程图片字节（导出嵌图用，仅限后台线程调用）。
+///
+/// 复用渲染侧的请求头、超时与响应体上限；非 2xx 视为失败。
+#[cfg(any(feature = "export-pdf", feature = "export-docx"))]
+pub(crate) fn fetch_image_bytes_blocking(url: &str) -> anyhow::Result<Vec<u8>> {
+    let client = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .connect_timeout(IMAGE_CONNECT_TIMEOUT)
+        .timeout(IMAGE_REQUEST_TIMEOUT)
+        .build()?;
+    let response = client
+        .get(url)
+        .headers(default_image_request_headers(IMAGE_USER_AGENT)?)
+        .send()?;
+    if !response.status().is_success() {
+        anyhow::bail!(
+            "remote image request failed with status {}",
+            response.status()
+        );
+    }
+    read_capped_response(response)
 }
 
 /// 判断图片来源是否为远端 HTTP 地址。

@@ -5,7 +5,11 @@
 
 ## 1. 工作区状态与改动分组
 
-2026-11-14 一轮**代码审查的修复批次尚未提交**（`git status` 可见 12 个改动文件）：查找回车双扫描与替换后搜索键失效、PDF CJK 字体重复解析、偏好校验和只读前 4 KiB、文件树截断上限被削弱且嵌套截断丢失、另存后无改动也重新序列化、撤销字节裁剪可能清空历史；另补了粘贴图片落盘单测（原 3.1）与原子写沿用原文件 Unix 权限位（原 2.3，含 `#[cfg(unix)]` 断言测试，Windows 开发机不会编译到）。**手动渲染回归（原 3.2）已做**：用 `docs/render-sample.md` 逐屏截图核对引用内空行、脚注内空行缩进、列表组空段落折叠、H1/H2 细灰下划线、H6 灰阶、表格对齐与竖线转义、脚注/任务列表/提示块，并用临时文档确认图片 / Mermaid / 公式聚焦后「源码 + 渲染同屏」正常；未见回归。表格整块命中（点单元格进编辑、点框选中整块）由 `selection.rs` 两个单测覆盖。提交后把本段改回「工作区干净」。验证基线已跑通：fmt / clippy（0 警告）/ 全量 976 passed / 最小构建。
+2026-11-18 **导出嵌图修复（已提交）**：HTML/PDF/DOCX 导出此前丢图——共享块模型 `Inline::Image` 只留 alt 丢 URL，PDF/DOCX 渲染 `[图片：alt]` 占位；HTML 的 `<img src>` 原样输出，相对路径图换个目录即失效。修复：`Inline::Image` 保留 `url`、`ExportOptions` 增加 `base_dir`（取 `image_paste_root_dir`，与粘贴落盘语义一致）；新增 `export/image.rs` 统一解析 data URI/本地/远程来源（32MB 上限、解码长边 2000px 降采样）；HTML 事件流把本地图替换为 data URI（远程保留原地址）；DOCX 解码转 PNG 按版心宽缩放（EMU，小图不放大、高钳页高六成）`Run::add_image`；PDF 段落/列表按图片切分流，RGBA8 `RawImage` + `add_image`/`UseXobject`（dpi=72 二次缩放）嵌图并处理跨页。`image` 0.25 提为可选直接依赖挂 `export-pdf`/`export-docx`（本就在依赖树，无新增编译负担）；printpdf 不开 `images` feature（无该 feature 时走 raw+FlateDecode+SMask 路径）。加载失败一律回退占位文本，不中断导出。验收：新增 8 个单测（URL 保留、本地加载、HTML 内嵌、DOCX media/blip、PDF XObject、缺图回退）全量 992+ passed；实测产物浏览器目检——HTML 复制到无图目录三处图直显、PDF 查看器三处图按版心嵌入、DOCX 解包 media 为合法 PNG 且 extent=3048000×1905000 EMU（320×200px）。标题/表格内图片仍走 alt 占位（v1 取舍）。
+
+2026-11-18 **工作区干净**：开源准备已提交（`eb0525c` 社区文件 + 移除内部迁移代码，`05a890e` CI / 发布工作流）。此前 2026-11-14 那批代码审查修复（查找回车双扫描与替换后搜索键失效、PDF CJK 字体重复解析、偏好校验和只读前 4 KiB、文件树截断上限被削弱且嵌套截断丢失、另存后无改动也重新序列化、撤销字节裁剪可能清空历史）连同粘贴图片落盘单测与原子写沿用原文件 Unix 权限位（含 `#[cfg(unix)]` 断言，Windows 开发机不会编译到）均已提交。**手动渲染回归已做**：用 `docs/render-sample.md` 逐屏截图核对引用内空行、脚注内空行缩进、列表组空段落折叠、H1/H2 细灰下划线、H6 灰阶、表格对齐与竖线转义、脚注/任务列表/提示块，并用临时文档确认图片 / Mermaid / 公式聚焦后「源码 + 渲染同屏」正常；未见回归。表格整块命中（点单元格进编辑、点框选中整块）由 `selection.rs` 两个单测覆盖。
+
+2026-11-18 **补齐 CI 与换行约定**：新增 `.gitattributes`（`*.rs` 索引存 LF、检出到工作区转 CRLF，二进制资源标 `binary`），把 AGENTS.md / CONTRIBUTING.md 的「`.rs` 必须 CRLF 无 BOM」落到 git 层——此前 CONTRIBUTING 声称由 `.gitattributes` 保证，实际该文件并不存在（本机 `core.autocrlf=true` 掩盖了这一点）。`ci.yml` 的 clippy 全部改为 `--all-targets`，与 README / CONTRIBUTING 的本地校验口径一致（原来不 lint 测试代码）。验证基线（本机跑 CI 等价命令）：`cargo fmt --check` 通过、`cargo clippy --all-targets -- -D warnings` 0 警告、全量 983 passed、`cargo check --no-default-features` 与 `cargo build --release` 通过。
 
 2026-11-13 的**性能与体验审查 backlog（第 3.3 节）已收口并提交**（见 `git log --oneline -3`）。首个提交 `0abf8f4` 是派生数据缓存层；后续提交覆盖步骤 1～9 的余下优化、两个正确性修复（任务复选框绕过 setter、跨块复制把词内 `_` 误转义成 `\_`）与步骤 9 的应用层图片缓存。步骤 7/10 中的异步化子集未做，理由见 3.3 节「剩余」。
 
@@ -101,7 +105,7 @@
 ```pwsh
 cargo fmt --check
 cargo clippy -p rumark --all-targets          # 期望 0 warning
-cargo test -p rumark                          # 当前基线 968 passed
+cargo test -p rumark                          # 当前基线 992 passed
 cargo check -p rumark --no-default-features   # 期望 5 个已知 warning
 git diff --check -- 'src/*.rs' 'AGENTS.md'    # 期望无输出
 ```
