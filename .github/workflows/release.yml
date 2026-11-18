@@ -116,9 +116,9 @@ jobs:
           fi
           gh release edit latest --title "最新构建（手动触发，滚动更新）" --notes "编译档：$PROF（size 体积最小，release 速度优先）。
 
-滚动更新：全平台触发删旧建新；单平台触发只替换该平台附件，不碰其他的。
-每个平台一个包：rumark-<平台>.zip（Windows）/ .tar.gz（Linux/macOS），解压即用，含可执行文件、README 和许可证。
-说明：Windows 为主力验证平台；Linux/macOS 为交叉尝试编译，未在真机完整验证，遇到问题欢迎提 Issue。"
+          滚动更新：全平台触发删旧建新；单平台触发只替换该平台附件，不碰其他的。
+          每个平台一个包：rumark-<平台>.zip（Windows）/ .tar.gz（Linux/macOS），解压即用，含可执行文件、README 和许可证。
+          说明：Windows 为主力验证平台；Linux/macOS 为交叉尝试编译，未在真机完整验证，遇到问题欢迎提 Issue。"
 
   build:
     name: build (${{ matrix.name }})
