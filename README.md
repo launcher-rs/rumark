@@ -1,5 +1,9 @@
 # 拾墨 Rumark
 
+[![CI](https://img.shields.io/github/actions/workflow/status/launcher-rs/rumark/ci.yml?branch=main&label=CI)](https://github.com/launcher-rs/rumark/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/launcher-rs/rumark?label=Release)](https://github.com/launcher-rs/rumark/releases)
+[![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE-APACHE)
+
 基于 `rgpui` 的块式 Markdown 编辑器：所见即所得渲染编辑与 Markdown 源码编辑两种模式，原生桌面 UI。
 
 ## 快速开始
