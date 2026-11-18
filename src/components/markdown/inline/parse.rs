@@ -143,8 +143,12 @@ impl InlineNormalizer {
 
         let text = token.ch.to_string();
         let start = self.normalized_len;
-        for boundary in token.source_range.start..=token.source_range.end {
-            self.visible_to_normalized[boundary] = start + (boundary - token.source_range.start);
+        for (offset, slot) in self.visible_to_normalized
+            [token.source_range.start..=token.source_range.end]
+            .iter_mut()
+            .enumerate()
+        {
+            *slot = start + offset;
         }
         self.normalized_len += text.len();
 
@@ -179,9 +183,11 @@ impl InlineNormalizer {
     ) {
         let normalized_start = self.normalized_len;
         let source_len = source_range.len().max(1);
-        for boundary in source_range.start..=source_range.end {
-            let mapped = text.len() * (boundary - source_range.start) / source_len;
-            self.visible_to_normalized[boundary] = normalized_start + mapped;
+        for (offset, slot) in self.visible_to_normalized[source_range.start..=source_range.end]
+            .iter_mut()
+            .enumerate()
+        {
+            *slot = normalized_start + text.len() * offset / source_len;
         }
         self.normalized_len += text.len();
 
@@ -671,9 +677,7 @@ fn parse_footnote_reference(
         push_merged_fragment(&mut builder.fragments, fragment);
     }
 
-    for boundary in tokens[end_index].source_range.end..=tokens[end_index].source_range.end {
-        builder.visible_to_normalized[boundary] = normalized_end;
-    }
+    builder.visible_to_normalized[tokens[end_index].source_range.end] = normalized_end;
 
     Some(end_index + 1)
 }
@@ -703,9 +707,9 @@ fn parse_inline_link(
     let normalized_start = builder.normalized_len;
     let label_len = label_result.tree.plain_len();
 
-    for boundary in tokens[index].source_range.start..=tokens[index].source_range.end {
-        builder.visible_to_normalized[boundary] = normalized_start;
-    }
+    builder.visible_to_normalized
+        [tokens[index].source_range.start..=tokens[index].source_range.end]
+        .fill(normalized_start);
 
     let mut local_boundary = 0usize;
     for token in label_tokens {
@@ -719,9 +723,8 @@ fn parse_inline_link(
 
     let normalized_end = normalized_start + label_len;
     for token in &tokens[label_end..=located.end_index] {
-        for boundary in token.source_range.start..=token.source_range.end {
-            builder.visible_to_normalized[boundary] = normalized_end;
-        }
+        builder.visible_to_normalized[token.source_range.start..=token.source_range.end]
+            .fill(normalized_end);
     }
 
     for mut fragment in label_result.tree.fragments {
@@ -761,9 +764,9 @@ fn parse_autolink(
     let normalized_start = builder.normalized_len;
     let target_len = target.len();
 
-    for boundary in tokens[index].source_range.start..=tokens[index].source_range.end {
-        builder.visible_to_normalized[boundary] = normalized_start;
-    }
+    builder.visible_to_normalized
+        [tokens[index].source_range.start..=tokens[index].source_range.end]
+        .fill(normalized_start);
 
     let mut local_boundary = 0usize;
     for token in target_tokens {
@@ -776,9 +779,9 @@ fn parse_autolink(
     }
 
     let normalized_end = normalized_start + target_len;
-    for boundary in tokens[end_index].source_range.start..=tokens[end_index].source_range.end {
-        builder.visible_to_normalized[boundary] = normalized_end;
-    }
+    builder.visible_to_normalized
+        [tokens[end_index].source_range.start..=tokens[end_index].source_range.end]
+        .fill(normalized_end);
 
     for fragment in fragments {
         builder.normalized_len += fragment.text.len();
