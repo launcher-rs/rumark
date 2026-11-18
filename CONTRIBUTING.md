@@ -63,6 +63,8 @@ cargo test -p mermaid-rs-renderer
 - 提交信息使用中文,格式:`feat: / fix: / docs: / chore: / refactor: / test:` + 简短描述
 - 一个 PR 只做一件事,避免混入无关改动
 - PR 描述中说明改动动机和验证方式
+- 面向用户的变化(新功能、修复、行为变更)请同步写入 [CHANGELOG.md](CHANGELOG.md) 的「未发布」段,条目使用中文、面向用户描述;发布说明由工作流从 CHANGELOG 自动提取
+- 解释性内容(提交信息、文档、注释、Issue / PR 回复)一律使用中文
 
 ## 报告问题
 
