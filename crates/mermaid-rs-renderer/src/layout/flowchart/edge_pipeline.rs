@@ -749,7 +749,11 @@ fn flowchart_routing_performance_profile(
     // graphs. The tier makes the tradeoff explicit: exact search for small
     // diagrams, bounded fast scoring for dense medium diagrams, and linear caps
     // for very large diagrams so worst-case routing remains predictable.
-    let (tier, side_search) = if edge_count <= 64 {
+    // rumark: Exact（逐候选网格 A* 试路由）档的适用上限从上游的 64 条边收紧到
+    // 24 条边——24~64 条边的中型图落在 Exact 档时端口分配 + 走线在 UI 线程上
+    // 可达秒级（issue #84 卡顿来源之一），改走 Bounded 快速档（fast_route、
+    // 无网格试路由）。小图仍保留 Exact 的质量。
+    let (tier, side_search) = if edge_count <= 24 {
         let offset_candidates = if edge_count <= 32 { 4 } else { 3 };
         (
             FlowchartRoutingTier::Exact,
@@ -3038,6 +3042,9 @@ mod tests {
         );
     }
 
+    // rumark: 上游断言 40 条边的复合图走 Exact 档。Exact 档对 24~64 条边的图
+    // 会产生秒级端口分配耗时（issue #84 卡顿来源），已把 Exact 上限收紧到
+    // 24 条边：小复合图仍走 Exact，中型复合图走 Bounded 快速档。
     #[test]
     fn routing_profile_uses_exact_search_for_small_compound_flowcharts() {
         let mut graph = Graph::new();
@@ -3054,14 +3061,27 @@ mod tests {
         let profile = performance
             .side_search
             .expect("compound flowcharts should use route-scored side search");
-        assert_eq!(performance.tier, FlowchartRoutingTier::Exact);
-        assert_eq!(performance.global_route_passes, 2);
-        assert_eq!(performance.negotiated_congestion_passes, 2);
-        assert_eq!(profile.max_candidates, 5);
+        assert_eq!(performance.tier, FlowchartRoutingTier::Bounded);
+        assert_eq!(performance.global_route_passes, 1);
+        assert_eq!(performance.negotiated_congestion_passes, 1);
+        assert_eq!(profile.max_candidates, 4);
         assert_eq!(profile.port_offset_candidates, 3);
-        assert_eq!(profile.max_refined_edges, None);
-        assert!(!profile.fast_route);
-        assert!(profile.use_grid);
+        assert!(!profile.use_grid, "Bounded 档的端口试路由不应使用网格 A*");
+
+        // 小复合图（≤24 条边）仍应走 Exact 档保留精确质量。
+        let mut small = Graph::new();
+        small.edges = (0..20).map(|_| edge("a", "b")).collect();
+        small.subgraphs.push(Subgraph {
+            id: Some("cluster".to_string()),
+            label: "cluster".to_string(),
+            nodes: vec!["a".to_string()],
+            direction: None,
+            icon: None,
+        });
+        let small_profile = flowchart_routing_performance_profile(&small, 12, false);
+        assert_eq!(small_profile.tier, FlowchartRoutingTier::Exact);
+        assert_eq!(small_profile.side_search.map(|p| p.max_candidates), Some(5));
+        assert_eq!(small_profile.global_route_passes, 2);
     }
 
     #[test]
