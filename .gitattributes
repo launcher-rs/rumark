@@ -1,0 +1,11 @@
+# 换行约定（见 AGENTS.md / CONTRIBUTING.md）：索引里统一存 LF，
+# 检出到工作区时 `.rs` 转成 CRLF，各平台贡献者的源码换行保持一致，
+# 也避免 Windows 上 core.autocrlf=false 时把 CRLF 提交进仓库。
+*.rs text eol=crlf
+
+# 二进制资源不做换行转换，也不参与文本 diff。
+*.ico binary
+*.png binary
+*.ttf binary
+*.otf binary
+*.ttc binary

@@ -1,7 +1,7 @@
 # 持续集成：push / PR / 手动触发，先静态检查再三平台构建冒烟。
 #
 # 两个 job：
-#   lint      —— Linux 上跑 `cargo fmt --check` + `cargo clippy -- -D warnings`（公共代码的格式与 lint）；
+#   lint      —— Linux 上跑 `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings`（格式与 lint，含测试代码）；
 #   build     —— 三平台 release 构建 → `--version/--help` 冒烟 → 单测 → 最小构建验证。
 #
 # 依赖装法与 release.yml 保持一致（rgpui Linux 后端要 Wayland/X11 头文件），
@@ -53,9 +53,9 @@ jobs:
         shell: bash
         run: cargo fmt --check
 
-      - name: 静态检查（cargo clippy -- -D warnings）
+      - name: 静态检查（cargo clippy --all-targets -- -D warnings）
         shell: bash
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
   # 构建 + 冒烟 + 单测：三平台并行，谁都不等谁。
   build:
@@ -93,10 +93,12 @@ jobs:
 
       # Windows 专属代码的 lint：依赖与后面的 release 构建同 profile，可直接复用编译结果。
       # 必须排在 cargo build --release 之前，先让 clippy 把依赖编出来，构建时就不用重来。
-      - name: 静态检查（cargo clippy --release，仅 Windows）
+      # 带 `--all-targets`（与 CONTRIBUTING 的本地校验一致），顺带把测试代码与
+      # dev-dependencies 编出来，后面的 cargo test 不再重编。
+      - name: 静态检查（cargo clippy --release --all-targets，仅 Windows）
         if: runner.os == 'Windows'
         shell: pwsh
-        run: cargo clippy --release -- -D warnings
+        run: cargo clippy --release --all-targets -- -D warnings
 
       - name: 构建（cargo build --release）
         shell: bash
@@ -126,6 +128,8 @@ jobs:
         run: cargo test --release --bins
 
       # 最小构建验证：确保 --no-default-features 也能通过。
+      # 这里不加 `-D warnings`：该档位有 5 个既有 warning（code_highlight.rs 里未按
+      # `code-highlight-core` 门控的几处），只要求编译通过。
       - name: 最小构建检查（cargo check --no-default-features）
         shell: bash
         run: cargo check --no-default-features
