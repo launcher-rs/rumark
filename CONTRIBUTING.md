@@ -55,7 +55,7 @@ cd ../mermaid-renderer && cargo test
 - **HTML 导出**:原始 HTML 必须经 `sanitize_html_fragment` 清洗
 - **内部标识**:不要修改 `rumark` / `rumark-light` 主题 id、`rumark::...` action 命名空间、`rs.launcher.Rumark` 应用标识 —— 改名会破坏已存用户配置
 - **依赖**:新增重型依赖前先说明理由;tree-sitter 版本全部 pin 死(`=x.y.z`),升级需整组对齐
-- **Mermaid 渲染库**:`mermaid-renderer` 已拆到独立仓(上游 0.3.1 分叉,MIT),以 git 依赖引入;改布局代码请在该仓提交、以 `fork:` 注释标注改动点,并跑它的测试套件,再回本仓 `cargo update -p mermaid-renderer`
+- **Mermaid 渲染库**:`mermaid-renderer` 在独立仓 [launcher-rs/mermaid-renderer](https://github.com/launcher-rs/mermaid-renderer) 维护(上游 0.3.1 分叉,MIT),已发布 crates.io;改布局代码请在该仓提交、以 `fork:` 注释标注改动点、跑其测试套件并升级版本
 - **换行符**:所有 `.rs` 文件必须为 CRLF 无 BOM(项目通过 `.gitattributes` 保证)
 
 ## 提交规范

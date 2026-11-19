@@ -34,9 +34,9 @@ directories = "6"
 ratex-layout = "0.1.9"
 ratex-parser = "0.1.9"
 ratex-svg = { version = "0.1.9", features = ["embed-fonts", "standalone"] }
-# Mermaid 渲染库已拆分为独立仓（launcher-rs/mermaid-renderer），以 git 依赖引入。
-# 本地改动请在该仓提交，再回本仓执行 `cargo update -p mermaid-renderer` 更新锁文件。
-mermaid-renderer = { git = "https://github.com/launcher-rs/mermaid-renderer", branch = "main" }
+# Mermaid 渲染库由独立仓 launcher-rs/mermaid-renderer 维护，已发布到 crates.io。
+# 本地联调：在 [patch.crates-io] 里临时指向旁边 checkout 的该仓，不要长期改回 git 依赖。
+mermaid-renderer = "0.1"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "default-tls"] }
 sys-locale = "0.3"
 docx-rs = { version = "0.4", optional = true }
