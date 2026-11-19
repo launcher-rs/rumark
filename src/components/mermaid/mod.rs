@@ -15,7 +15,7 @@ const MERMAID_SCALE_PER_EXTRA_LINE: f32 = 0.035;
 const MERMAID_MAX_SCALE: f32 = 1.75;
 const MERMAID_FONT_FAMILY: &str =
     "Microsoft YaHei, PingFang SC, Noto Sans CJK SC, WenQuanYi Micro Hei, sans-serif";
-const MERMAID_RENDERER_CACHE_VERSION: u32 = 14;
+const MERMAID_RENDERER_CACHE_VERSION: u32 = 15;
 
 /// Mermaid 围栏代码块的起始围栏元数据。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

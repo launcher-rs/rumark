@@ -724,6 +724,12 @@ fn normalize_class_method_signature(entry: &str) -> String {
     if rest.is_empty() {
         return trimmed.to_string();
     }
+    // rumark: mermaid 的方法后缀标记——`$` 静态、`*` 抽象——属于签名本身，
+    // 不能当作返回类型用 ` : ` 连接（此前 `+保存(实体)$` 会被拆成
+    // `+保存(实体) : $`）。
+    if rest == "$" || rest == "*" {
+        return format!("{}{}", sig, rest);
+    }
     if rest.starts_with(':') {
         return format!("{} {}", sig, rest);
     }
@@ -6882,6 +6888,27 @@ A["foo & bar"] & B --> C"#;
         assert!(lines[3].contains("name"));
         assert_eq!(lines[4], "---");
         assert!(lines[5].contains("getName"));
+    }
+
+    // rumark: `$`/`*` 是方法签名后缀标记（静态/抽象），不应被当作返回类型
+    // 用 ` : ` 连接。
+    #[test]
+    fn parse_class_method_static_and_abstract_suffixes() {
+        let input = "classDiagram\nclass C {\n+保存(实体)$\n+加载(编号)*\n+查询(id) 结果\n}";
+        let parsed = parse_mermaid(input).unwrap();
+        let label = &parsed.graph.nodes.get("C").unwrap().label;
+        assert!(
+            label.lines().any(|l| l == "+保存(实体)$"),
+            "静态标记应紧贴签名: {label:?}"
+        );
+        assert!(
+            label.lines().any(|l| l == "+加载(编号)*"),
+            "抽象标记应紧贴签名: {label:?}"
+        );
+        assert!(
+            label.lines().any(|l| l.contains("+查询(id) : 结果")),
+            "真正的返回类型仍应连接返回值: {label:?}"
+        );
     }
 
     #[test]

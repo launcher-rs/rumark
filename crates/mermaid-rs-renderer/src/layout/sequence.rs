@@ -242,6 +242,13 @@ pub(super) fn compute_sequence_layout(
             if let Some(label) = &edge.end_label {
                 row_h = row_h.max(measure_sequence_text(label, theme, config).height);
             }
+            // rumark: 自消息的钩形箭头向下延伸 note_gap_x*1.4，行距必须给钩形留出
+            // 空间——否则紧随其后的分组分隔线（y = 上一行 y + font*0.9）会被钩形
+            // 与标签穿过。
+            if edge.from == edge.to {
+                let hook_drop = geometry.note_gap_x * 1.4;
+                row_h = row_h.max(hook_drop + theme.font_size * 1.8);
+            }
             base_spacing.max(row_h + theme.font_size * 1.25)
         })
         .collect();
@@ -479,7 +486,18 @@ pub(super) fn compute_sequence_layout(
                     .get(prev_end.saturating_sub(1))
                     .copied()
                     .unwrap_or(first_y);
-                dividers.push(base_y + divider_offset);
+                let mut divider_y = base_y + divider_offset;
+                // rumark: 分隔线前的消息若是自消息，其钩形箭头下探超过分隔线
+                // 默认偏移，分隔线需下移让位，避免与钩形/标签交叠。
+                if prev_end > 0
+                    && graph
+                        .edges
+                        .get(prev_end - 1)
+                        .is_some_and(|e| e.from == e.to)
+                {
+                    divider_y = divider_y.max(base_y + geometry.note_gap_x * 1.4 + 4.0);
+                }
+                dividers.push(divider_y);
             }
 
             let mut section_labels = Vec::new();
