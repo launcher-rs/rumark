@@ -55,18 +55,35 @@ pub(crate) fn open_editor_window(
     markdown: String,
     file_path: Option<PathBuf>,
 ) -> WindowHandle<Editor> {
+    const DEFERRED_LOAD_THRESHOLD: usize = 128 * 1024;
+    let (initial_markdown, deferred_markdown) = if markdown.len() >= DEFERRED_LOAD_THRESHOLD {
+        (
+            cx.global::<I18nManager>()
+                .snapshot()
+                .t("message_loading_document", &[]),
+            Some(markdown),
+        )
+    } else {
+        (markdown, None)
+    };
+    let deferred = deferred_markdown.is_some();
+    let initial_file_path = if deferred { None } else { file_path.clone() };
+    let deferred_path = file_path;
     let bounds = Bounds::centered(None, size(px(1080.), px(720.)), cx);
     let handle = cx
         .open_window(rumark_window_options(bounds), move |_window, cx| {
-            cx.new(move |cx| Editor::from_markdown(cx, markdown, file_path))
+            cx.new(move |cx| Editor::from_markdown(cx, initial_markdown, initial_file_path))
         })
         .unwrap();
 
     handle
-        .update(cx, |editor, window, cx| {
+        .update(cx, move |editor, window, cx| {
             window.activate_window();
             editor.force_install_close_guard(cx, window);
             show_pending_config_recovery(cx, window);
+            if let Some(markdown) = deferred_markdown {
+                editor.defer_large_document_load(markdown, deferred_path, cx);
+            }
         })
         .expect("newly opened editor window should be updateable");
 

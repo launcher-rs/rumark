@@ -2806,6 +2806,89 @@ async fn reference_style_link_in_root_paragraph_resolves_document_wide(cx: &mut 
     });
 }
 
+/// 引用定义被移除后必须把已解析的快捷引用还原成字面文本。
+/// 快捷引用解析后可见文本不含 `[`，只能靠 `InlineLink::Reference` 标记
+/// 命中候选检查；此用例守住引用候选判断不能只看 `[`。
+#[rgpui::test]
+async fn removing_link_definition_reverts_shortcut_reference(cx: &mut TestAppContext) {
+    let editor = cx.new(|cx| {
+        Editor::from_markdown(
+            cx,
+            "[shortcut]\n\n[shortcut]: https://example.com".to_string(),
+            None,
+        )
+    });
+
+    editor.read_with(cx, |editor, cx| {
+        let block = editor.document.first_root().expect("root block").clone();
+        assert_eq!(
+            block.read(cx).inline_link_at(0),
+            Some("https://example.com"),
+            "初始应解析为引用链接"
+        );
+    });
+
+    // 定义集合清空后，已解析的快捷引用应还原为字面文本。
+    // 直接对块重设运行时上下文，隔离编辑器派生缓存的影响。
+    let block = editor.read_with(cx, |editor, _cx| {
+        editor.document.first_root().expect("root block").clone()
+    });
+    block.update(cx, |block, _cx| {
+        block.set_runtime_context(
+            None,
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        );
+    });
+    assert_eq!(
+        block.read_with(cx, |block, _cx| block.inline_link_at(0).map(str::to_string)),
+        None,
+        "定义移除后不应再是链接"
+    );
+    assert_eq!(
+        block.read_with(cx, |block, _cx| block.rendered_text().to_string()),
+        "[shortcut][shortcut]",
+        "定义移除后应还原为字面 Markdown（解析过的快捷引用按完整形式序列化）"
+    );
+}
+
+/// 大型文档安静载入路径仍须解析引用：逐块写上下文时不发重绘通知，
+/// 但状态本身必须同步写入，首次渲染即可正确解析链接/脚注。
+#[rgpui::test]
+async fn quiet_runtime_sync_from_source_still_resolves_references(cx: &mut TestAppContext) {
+    let markdown = [
+        "[reference link][ref-link] and footnote.[^note]",
+        "",
+        "[ref-link]: https://example.com",
+        "[^note]: a note",
+    ]
+    .join("\n");
+    // 常规文档已含引用链接；再走一次大型载入的安静同步路径，
+    // 确认逐块不请求重绘不会破坏已写入的运行时状态。
+    let editor = cx.new(|cx| Editor::from_markdown(cx, markdown.clone(), None));
+    editor.update(cx, |editor, cx| {
+        let source: std::sync::Arc<str> = std::sync::Arc::from(markdown.as_str());
+        editor.rebuild_image_runtimes_from_source(&source, cx);
+    });
+
+    editor.read_with(cx, |editor, cx| {
+        let block = editor.document.first_root().expect("root block").clone();
+        assert_eq!(
+            block.read(cx).inline_link_at(0),
+            Some("https://example.com"),
+            "安静路径同步后引用链接仍应解析"
+        );
+        assert!(
+            editor
+                .link_reference_definitions
+                .get("ref-link")
+                .is_some_and(|def| def.destination == "https://example.com"),
+            "安静路径应提取出引用定义"
+        );
+    });
+}
+
 #[rgpui::test]
 async fn reference_style_link_in_table_cell_resolves_document_wide(cx: &mut TestAppContext) {
     let markdown = [

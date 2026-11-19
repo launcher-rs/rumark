@@ -40,6 +40,8 @@ mod image_menu;
 mod persistence;
 /// 文档读取入口：启动、菜单打开与拖放打开共用同一套 BOM / 编码处理。
 pub(crate) use persistence::{read_error_detail, read_markdown_file};
+#[cfg(test)]
+mod perf;
 mod render;
 mod selection;
 mod source_map;
@@ -65,6 +67,14 @@ pub(crate) struct PendingLinkOpen {
     pub(crate) open_target: String,
 }
 
+/// 正在分批构建的大型文档；块实体在载入完成前不挂入可编辑树。
+struct PendingDocumentLoad {
+    lines: Vec<String>,
+    next_line: usize,
+    root_blocks: Vec<Entity<Block>>,
+    file_path: Option<PathBuf>,
+}
+
 /// 顶层控制器，持有编辑器级状态并把树变更委托给 [`DocumentTree`]。
 ///
 /// 编辑器订阅每个子块发出的 [`BlockEvent`](crate::components::BlockEvent)。
@@ -82,18 +92,24 @@ pub struct Editor {
     pending_save: bool,
     pending_save_as: bool,
     pending_open_link: Option<PendingLinkOpen>,
+    pending_document_load: Option<PendingDocumentLoad>,
+    document_loading: bool,
     pending_window_edited: bool,
     pending_window_title_refresh: bool,
     document_dirty: bool,
     file_path: Option<PathBuf>,
     scroll_handle: ScrollHandle,
     last_scroll_viewport_size: Option<Size<Pixels>>,
-    /// 上一帧可见块标识，用于检测结构编辑；仅当行/块映射未变时刷新高度缓存。
-    prev_visible_block_ids: Vec<EntityId>,
+    /// 上一帧文档树修订号，用于只在结构变化后刷新高度缓存。
+    prev_render_tree_revision: Option<u64>,
     /// 按行缓存的占用高度（行高加尾部 gap），以行首块为键。与滚动无关，
     /// 不像原始绘制位置那样随滚动变化，因此按其累加和做窗口化始终正确。
     /// 绘制行时填充；未知行用最小高度估计。
     row_stride_cache: HashMap<EntityId, f32>,
+    /// 行高前缀索引，滚动帧只更新新测量行并对数查询窗口边界。
+    row_stride_index: window_layout::StrideIndex,
+    /// 可复用的渲染行计划；滚动帧不再逐块读取元数据重新分组。
+    render_rows_cache: Option<Arc<render::RenderRowsCache>>,
     /// 缓存占用高度时的内容列宽。行在列宽变化时会重排，因此丢弃异宽条目。
     row_stride_width: Option<f32>,
     /// 上一帧挂载区间在滚动容器子节点中的位置。
@@ -147,6 +163,9 @@ pub struct Editor {
     pending_undo_capture: Option<UndoCapture>,
     last_selection_snapshot: SelectionUndoSnapshot,
     last_stable_source_text: Arc<str>,
+    /// 大文档文字输入期间延后刷新全篇历史快照与来源映射。
+    stable_snapshot_stale: bool,
+    last_document_edit: Option<Instant>,
     history_restore_in_progress: bool,
     image_reference_definitions: Arc<ImageReferenceDefinitions>,
     link_reference_definitions: Arc<LinkReferenceDefinitions>,
@@ -245,6 +264,7 @@ struct UndoEntry {
 #[derive(Clone, Debug)]
 struct UndoCapture {
     snapshot: UndoEntry,
+    block_version: Option<(EntityId, u64)>,
 }
 
 /// 可见块顺序下的跨块选区端点。
@@ -338,14 +358,18 @@ impl Editor {
             pending_save: false,
             pending_save_as: false,
             pending_open_link: None,
+            pending_document_load: None,
+            document_loading: false,
             pending_window_edited: false,
             pending_window_title_refresh: false,
             document_dirty: false,
             file_path,
             scroll_handle: ScrollHandle::new(),
             last_scroll_viewport_size: None,
-            prev_visible_block_ids: Vec::new(),
+            prev_render_tree_revision: None,
             row_stride_cache: HashMap::new(),
+            row_stride_index: window_layout::StrideIndex::default(),
+            render_rows_cache: None,
             row_stride_width: None,
             prev_mounted_run: None,
             close_guard_installed: false,
@@ -384,6 +408,8 @@ impl Editor {
             pending_undo_capture: None,
             last_selection_snapshot: Self::empty_selection_snapshot(),
             last_stable_source_text: Arc::from(normalized),
+            stable_snapshot_stale: false,
+            last_document_edit: None,
             history_restore_in_progress: false,
             image_reference_definitions: Arc::default(),
             link_reference_definitions: Arc::default(),
@@ -406,7 +432,102 @@ impl Editor {
                 .is_some_and(|block| block.read(cx).kind() != BlockKind::MermaidBlock)
         });
         editor.active_entity_id = editor.pending_focus;
+        // 常规构造保留稳定快照初始化；大文档窗口先构造轻量占位符，成本很低。
         editor.refresh_stable_document_snapshot(cx);
         editor
+    }
+
+    /// 延后载入大型文档，先让窗口显示可见的加载提示并完成首帧。
+    pub(crate) fn defer_large_document_load(
+        &mut self,
+        markdown: String,
+        file_path: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        self.document_loading = true;
+        let editor = cx.entity().downgrade();
+        cx.spawn(async move |_this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(100))
+                .await;
+            if editor
+                .update(cx, move |this, cx| {
+                    this.begin_pending_document_load(markdown, file_path, cx);
+                })
+                .is_err()
+            {
+                return;
+            }
+
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(2))
+                    .await;
+                let finished = editor
+                    .update(cx, |this, cx| this.load_next_document_chunk(cx))
+                    .unwrap_or(true);
+                if finished {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// 切分大型文档并开始分批构造块；未完成前只展示加载占位块。
+    fn begin_pending_document_load(
+        &mut self,
+        markdown: String,
+        file_path: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        let normalized = markdown.replace("\r\n", "\n").replace('\r', "\n");
+        self.pending_document_load = Some(PendingDocumentLoad {
+            lines: normalized.split('\n').map(ToOwned::to_owned).collect(),
+            next_line: 0,
+            root_blocks: Vec::new(),
+            file_path,
+        });
+        self.pending_focus = None;
+        self.active_entity_id = None;
+        cx.notify();
+    }
+
+    /// 在一次 UI 更新中解析有限数量的根块，返回是否已全部载入。
+    fn load_next_document_chunk(&mut self, cx: &mut Context<Self>) -> bool {
+        const ROOT_BLOCKS_PER_CHUNK: usize = 32;
+        let Some(pending) = self.pending_document_load.as_ref() else {
+            return true;
+        };
+        let (blocks, next_line) = Self::build_root_blocks_chunk(
+            cx,
+            &pending.lines,
+            pending.next_line,
+            ROOT_BLOCKS_PER_CHUNK,
+        );
+        let is_complete = next_line >= pending.lines.len();
+
+        let pending = self
+            .pending_document_load
+            .as_mut()
+            .expect("载入任务在同一实体更新中保持存在");
+        pending.root_blocks.extend(blocks);
+        pending.next_line = next_line;
+        if !is_complete {
+            return false;
+        }
+
+        let pending = self
+            .pending_document_load
+            .take()
+            .expect("已完成任务应仍存在");
+        let source = pending.lines.join("\n");
+        self.replace_document_from_root_blocks(
+            pending.root_blocks,
+            pending.file_path,
+            Arc::from(source),
+            cx,
+        );
+        true
     }
 }

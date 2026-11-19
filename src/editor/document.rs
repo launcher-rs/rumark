@@ -988,6 +988,16 @@ impl Editor {
         Self::build_blocks_from_lines_internal(cx, &lines, true)
     }
 
+    /// 从指定行游标分批构造根块，返回新块与下一批起点。
+    pub(super) fn build_root_blocks_chunk(
+        cx: &mut Context<Self>,
+        lines: &[String],
+        start: usize,
+        max_root_blocks: usize,
+    ) -> (Vec<Entity<super::Block>>, usize) {
+        Self::build_blocks_from_lines_limited(cx, lines, start, true, max_root_blocks)
+    }
+
     /// 用运行时块按行构建文档（仅运行时可安全编辑的语法落为原生块）。
     ///
     /// 运行时编辑器可安全编辑的语法才创建原生块；更复杂的合法
@@ -1005,10 +1015,28 @@ impl Editor {
         lines: &[String],
         allow_root_footnote_definitions: bool,
     ) -> Vec<Entity<super::Block>> {
-        let mut roots = Vec::new();
-        let mut index = 0;
+        Self::build_blocks_from_lines_limited(
+            cx,
+            lines,
+            0,
+            allow_root_footnote_definitions,
+            usize::MAX,
+        )
+        .0
+    }
 
-        while index < lines.len() {
+    /// 按有限根块数量构造文档片段，列表只在完整项边界暂停。
+    fn build_blocks_from_lines_limited(
+        cx: &mut Context<Self>,
+        lines: &[String],
+        start: usize,
+        allow_root_footnote_definitions: bool,
+        max_root_blocks: usize,
+    ) -> (Vec<Entity<super::Block>>, usize) {
+        let mut roots = Vec::new();
+        let mut index = start;
+
+        while index < lines.len() && roots.len() < max_root_blocks {
             let line = &lines[index];
             if line.trim().is_empty() {
                 let blank_start = index;
@@ -1120,7 +1148,8 @@ impl Editor {
             }
 
             if parse_list_marker(line).is_some() {
-                let (blocks, next_index) = Self::collect_list_blocks(cx, lines, index);
+                let remaining = max_root_blocks.saturating_sub(roots.len());
+                let (blocks, next_index) = Self::collect_list_blocks(cx, lines, index, remaining);
                 roots.extend(blocks);
                 index = next_index;
                 continue;
@@ -1185,7 +1214,7 @@ impl Editor {
             index = paragraph.1;
         }
 
-        roots
+        (roots, index)
     }
 
     /// 收集连续行组成的段落块与下一行下标。
@@ -1397,7 +1426,8 @@ impl Editor {
                 {
                     append_quote_separator_children(&mut children, pending_blank_lines, cx);
                 }
-                let (list_blocks, consumed) = Self::collect_list_blocks(cx, lines, index);
+                let (list_blocks, consumed) =
+                    Self::collect_list_blocks(cx, lines, index, usize::MAX);
                 if list_blocks
                     .iter()
                     .any(|block| block.read(cx).kind() == BlockKind::RawMarkdown)
@@ -1610,7 +1640,8 @@ impl Editor {
             }
 
             if parse_list_marker(line).is_some() {
-                let (list_blocks, consumed) = Self::collect_list_blocks(cx, lines, index);
+                let (list_blocks, consumed) =
+                    Self::collect_list_blocks(cx, lines, index, usize::MAX);
                 if list_blocks
                     .iter()
                     .any(|block| block.read(cx).kind() == BlockKind::RawMarkdown)
@@ -1690,11 +1721,12 @@ impl Editor {
         cx: &mut Context<Self>,
         lines: &[String],
         start: usize,
+        max_items: usize,
     ) -> (Vec<Entity<super::Block>>, usize) {
         let mut roots = Vec::new();
         let mut index = start;
 
-        while index < lines.len() {
+        while index < lines.len() && roots.len() < max_items {
             let Some(marker) = parse_list_marker(&lines[index]) else {
                 break;
             };
@@ -1721,7 +1753,7 @@ impl Editor {
 
                     if parse_list_marker(&anchor_dedented[0]).is_some() {
                         let (children, consumed) =
-                            Self::collect_list_blocks(cx, &anchor_dedented, 0);
+                            Self::collect_list_blocks(cx, &anchor_dedented, 0, usize::MAX);
                         attach_child_blocks(&block, children, cx);
                         body_index += consumed;
                         pending_blank_lines = 0;

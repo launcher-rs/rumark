@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Result;
 use rgpui::*;
@@ -219,18 +220,40 @@ impl Editor {
         file_path: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) {
+        self.pending_document_load = None;
+        self.document_loading = false;
         let normalized = markdown.replace("\r\n", "\n").replace('\r', "\n");
-        let mut roots = Self::build_root_blocks_from_markdown(cx, &normalized);
+        let roots = Self::build_root_blocks_from_markdown(cx, &normalized);
+        self.replace_document_from_root_blocks(roots, file_path, Arc::from(normalized), cx);
+        self.refresh_stable_document_snapshot(cx);
+    }
+
+    /// 用已构造的根块替换文档并重置编辑器状态。
+    pub(super) fn replace_document_from_root_blocks(
+        &mut self,
+        mut roots: Vec<Entity<Block>>,
+        file_path: Option<PathBuf>,
+        stable_source: Arc<str>,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_document_load = None;
+        let was_deferred_load = self.document_loading;
         if roots.is_empty() {
             roots.push(Self::new_block(cx, BlockRecord::paragraph(String::new())));
         }
 
+        self.document_loading = false;
+        self.stable_snapshot_stale = was_deferred_load;
+        self.last_document_edit = was_deferred_load.then(Instant::now);
         self.file_path = file_path;
         self.view_mode = ViewMode::Rendered;
         self.document.replace_roots(roots, cx);
         self.table_cells.clear();
-        self.rebuild_table_runtimes(cx);
-        self.rebuild_image_runtimes(cx);
+        if was_deferred_load {
+            self.rebuild_table_runtimes_from_source(&stable_source, cx);
+        } else {
+            self.rebuild_table_runtimes(cx);
+        }
 
         self.document_dirty = false;
         self.pending_window_edited = false;
@@ -245,7 +268,6 @@ impl Editor {
         self.dismiss_contextual_overlays(cx);
         self.table_axis_preview = None;
         self.table_axis_selection = None;
-        self.sync_table_axis_visuals(cx);
         self.clear_cross_block_selection(cx);
 
         self.pending_scroll_active_block_into_view = true;
@@ -259,9 +281,9 @@ impl Editor {
         self.redo_history.clear();
         self.pending_undo_capture = None;
         self.last_selection_snapshot = Self::empty_selection_snapshot();
-        self.last_stable_source_text = Arc::from(normalized);
+        self.last_stable_source_text = stable_source;
         self.history_restore_in_progress = false;
-        self.refresh_stable_document_snapshot(cx);
+        // 当前 Markdown 已直接保存为稳定快照，避免载入结束时又强制生成整篇映射。
         self.sync_workspace_after_document_path_change(cx);
         cx.notify();
     }

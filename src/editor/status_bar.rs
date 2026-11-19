@@ -93,6 +93,23 @@ impl Editor {
     /// 变化时重算，选中字数只在指纹或选区状态变化时重算。空闲帧（仅光标
     /// 闪烁）命中缓存后不做任何全文扫描。
     pub(super) fn status_stats(&self, cx: &App) -> StatusStats {
+        if self.stable_snapshot_stale || self.should_defer_large_document_refresh() {
+            if let Some(cached) = self.status_stats_cache.borrow().as_ref() {
+                return cached.clone();
+            }
+
+            // 首帧尚无精确状态时，直接用载入文本统计字数，避免触发整篇来源映射。
+            return StatusStats {
+                fingerprint: 0,
+                view_mode: self.view_mode,
+                total_words: word_count(&self.last_stable_source_text),
+                cursor_offset: 0,
+                cursor_position: (1, 1),
+                selection_key: 0,
+                selection_words: None,
+            };
+        }
+
         // 派生数据一次取用即拿到内容指纹与两种视图文本，避免同帧重复计算指纹。
         let derived = self.derived_document(cx);
         let fingerprint = derived.fingerprint();

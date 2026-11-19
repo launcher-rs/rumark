@@ -1833,8 +1833,18 @@ impl Editor {
         event: &BlockEvent,
         cx: &mut Context<Self>,
     ) {
+        if self.document_loading {
+            return;
+        }
         if let BlockEvent::PrepareUndo { kind } = event {
-            self.prepare_undo_capture_from_stable_snapshot(*kind);
+            if self.stable_snapshot_stale
+                && (!matches!(*kind, crate::components::UndoKind::CoalescibleText)
+                    || !self.should_defer_large_document_refresh()
+                    || self.text_history_merge_window_elapsed())
+            {
+                self.refresh_stable_document_snapshot(cx);
+            }
+            self.prepare_undo_capture_from_stable_snapshot(*kind, &block, cx);
             return;
         }
 

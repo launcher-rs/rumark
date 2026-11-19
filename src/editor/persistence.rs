@@ -284,6 +284,9 @@ impl Editor {
 
     /// 保存文档：有路径直接写，无路径走另存弹框。
     pub(crate) fn save_document(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.document_loading {
+            return;
+        }
         if let Some(path) = self.file_path.clone() {
             let should_close_after_save = self.pending_close_after_save;
             if self.save_to_existing_path(&path, window, cx) {
@@ -301,6 +304,9 @@ impl Editor {
 
     /// 另存文档：始终弹框选择路径。
     pub(crate) fn save_document_as(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.document_loading {
+            return;
+        }
         self.save_document_via_prompt(window, cx);
     }
 

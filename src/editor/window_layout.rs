@@ -2,6 +2,87 @@
 
 use super::*;
 
+/// 行足迹的 Fenwick 前缀索引，单行高度更新与视口边界查询均为对数复杂度。
+#[derive(Default)]
+pub(super) struct StrideIndex {
+    values: Vec<f32>,
+    tree: Vec<f32>,
+}
+
+impl StrideIndex {
+    /// 行数。
+    pub(super) fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    /// 用当前行高重建索引。
+    pub(super) fn rebuild(&mut self, values: Vec<f32>) {
+        self.values = values;
+        self.tree = vec![0.0; self.values.len() + 1];
+        for index in 1..self.tree.len() {
+            self.tree[index] += self.values[index - 1].max(0.0);
+            let parent = index + index.isolate_lowest_one();
+            if parent < self.tree.len() {
+                self.tree[parent] += self.tree[index];
+            }
+        }
+    }
+
+    /// 更新单行足迹并回写前缀树。
+    pub(super) fn update(&mut self, index: usize, value: f32) {
+        let Some(slot) = self.values.get_mut(index) else {
+            return;
+        };
+        let value = value.max(0.0);
+        let delta = value - *slot;
+        *slot = value;
+        let mut node = index + 1;
+        while node < self.tree.len() {
+            self.tree[node] += delta;
+            node += node.isolate_lowest_one();
+        }
+    }
+
+    /// 前 `count` 行的高度。
+    pub(super) fn prefix_height(&self, count: usize) -> f32 {
+        let mut index = count.min(self.values.len());
+        let mut sum = 0.0;
+        while index > 0 {
+            sum += self.tree[index];
+            index &= index - 1;
+        }
+        sum
+    }
+
+    /// 返回满足前缀与目标关系的最大行数；严格模式只允许前缀小于目标。
+    fn prefix_partition(&self, target: f32, strict: bool) -> usize {
+        let n = self.values.len();
+        let mut bit = 1usize;
+        while bit.saturating_mul(2) <= n {
+            bit *= 2;
+        }
+        let mut index = 0usize;
+        let mut sum = 0.0;
+        while bit > 0 {
+            let next = index + bit;
+            if next <= n {
+                let candidate = sum + self.tree[next];
+                let may_skip = if strict {
+                    candidate < target
+                } else {
+                    candidate <= target
+                };
+                if may_skip {
+                    index = next;
+                    sum = candidate;
+                }
+            }
+            bit >>= 1;
+        }
+        index
+    }
+}
+
 impl Editor {
     /// 按视口高度与滚动范围计算滚动条几何。
     pub(super) fn scrollbar_geometry(
@@ -68,6 +149,7 @@ impl Editor {
     /// 选择要挂载的连续行区间；被裁行变为占位符，聚焦行始终挂载，落在区间外时独立成岛。
     /// `strides[i]` 为第 `i` 行的占用高度（高度加尾部间隙）；因与滚动无关，对其累加即可按当前滚动偏移定位每行。
     /// 未实测行用下界估计；当估计值小于滚动偏移时挂载尾部区间，保证窗口永不落在占位符上。纯函数，可无头单测。
+    #[cfg(test)]
     pub(super) fn rendered_window(
         strides: &[f32],
         scroll_y: f32,
@@ -131,6 +213,77 @@ impl Editor {
         if let Some(focus_row) = focus_row.map(|row| row.min(n - 1)) {
             let focus_top: f32 = strides[..focus_row].iter().map(|s| s.max(0.0)).sum();
             let focus_bottom = focus_top + strides[focus_row].max(0.0);
+            if focus_row < run_start {
+                focus_island = Some(FocusHighlight {
+                    row: focus_row,
+                    lead_h: focus_top,
+                });
+                top_h = top_of_start - focus_bottom;
+            } else if focus_row >= run_end {
+                focus_island = Some(FocusHighlight {
+                    row: focus_row,
+                    lead_h: focus_top - bottom_of_end,
+                });
+                bottom_h = total - focus_bottom;
+            }
+        }
+
+        ViewportWindow {
+            run_start,
+            run_end,
+            top_h: top_h.max(0.0),
+            bottom_h: bottom_h.max(0.0),
+            focus_island: focus_island.map(|island| FocusHighlight {
+                lead_h: island.lead_h.max(0.0),
+                ..island
+            }),
+        }
+    }
+
+    /// 用 Fenwick 前缀索引定位挂载范围，避免每帧线性累加全部行高。
+    pub(super) fn rendered_window_indexed(
+        strides: &StrideIndex,
+        scroll_y: f32,
+        viewport_height: f32,
+        overdraw: f32,
+        focus_row: Option<usize>,
+    ) -> ViewportWindow {
+        let n = strides.values.len();
+        if n == 0 {
+            return ViewportWindow {
+                run_start: 0,
+                run_end: 0,
+                top_h: 0.0,
+                bottom_h: 0.0,
+                focus_island: None,
+            };
+        }
+
+        let band_top = scroll_y - overdraw;
+        let band_bottom = scroll_y + viewport_height + overdraw;
+        let mut run_start = strides.prefix_partition(band_top, true).min(n);
+        let mut run_end = strides
+            .prefix_partition(band_bottom, false)
+            .saturating_add(1)
+            .min(n);
+        let mut top_of_start = strides.prefix_height(run_start);
+        let mut bottom_of_end = strides.prefix_height(run_end);
+        let total = strides.prefix_height(n);
+
+        if run_start >= run_end {
+            run_end = n;
+            bottom_of_end = total;
+            let floor = (total - viewport_height - overdraw).max(0.0);
+            run_start = strides.prefix_partition(floor, false).min(n - 1);
+            top_of_start = strides.prefix_height(run_start);
+        }
+
+        let mut top_h = top_of_start;
+        let mut bottom_h = total - bottom_of_end;
+        let mut focus_island = None;
+        if let Some(focus_row) = focus_row.map(|row| row.min(n - 1)) {
+            let focus_top = strides.prefix_height(focus_row);
+            let focus_bottom = strides.prefix_height(focus_row + 1);
             if focus_row < run_start {
                 focus_island = Some(FocusHighlight {
                     row: focus_row,
@@ -312,6 +465,9 @@ impl Editor {
 
     /// 在渲染与源码视图之间切换并重建文档块。
     pub(crate) fn toggle_view_mode(&mut self, cx: &mut Context<Self>) {
+        if self.document_loading {
+            return;
+        }
         self.end_block_pointer_selection_sessions(cx);
         let selection_snapshot = self.capture_source_selection_snapshot(cx);
         self.clear_cross_block_selection(cx);
@@ -353,6 +509,7 @@ impl Editor {
 
     /// 标记文档为脏并排队到下一渲染帧刷新窗口标题与编辑状态。
     pub(super) fn mark_dirty(&mut self, cx: &mut Context<Self>) {
+        self.last_document_edit = Some(Instant::now());
         if !self.document_dirty {
             self.document_dirty = true;
             self.pending_window_edited = true;

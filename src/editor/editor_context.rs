@@ -1,6 +1,7 @@
 //! 块运行时上下文同步：引用定义、图片、脚注与焦点查询。
 
 use super::*;
+use crate::components::{parse_image_reference_definitions, parse_link_reference_definitions};
 
 impl Editor {
     /// 从编辑器状态推导当前编辑目标块标识。
@@ -101,6 +102,21 @@ impl Editor {
         base_dir: Option<&Path>,
         cx: &mut Context<Self>,
     ) {
+        self.sync_runtime_context_for_block_inner(block, base_dir, true, cx);
+    }
+
+    /// 同步单个块的运行时上下文，`notify` 控制是否请求重绘。
+    ///
+    /// 大体量文档首次载入时，这些块刚被创建、尚未挂载，也不可能有观察者，
+    /// 逐块 `cx.notify()` 只会产生与块数成正比的重绘调度开销；载入完成时
+    /// 编辑器会统一 `notify` 一次，因此这里可以安静地写入上下文。
+    fn sync_runtime_context_for_block_inner(
+        &self,
+        block: &Entity<Block>,
+        base_dir: Option<&Path>,
+        notify: bool,
+        cx: &mut Context<Self>,
+    ) {
         let next_base_dir = base_dir.map(Path::to_path_buf);
         let image_reference_definitions = self.image_reference_definitions.clone();
         let link_reference_definitions = self.link_reference_definitions.clone();
@@ -112,7 +128,9 @@ impl Editor {
                 link_reference_definitions.clone(),
                 footnote_registry.clone(),
             );
-            cx.notify();
+            if notify {
+                cx.notify();
+            }
         });
     }
 
@@ -206,14 +224,46 @@ impl Editor {
 
     /// 重建图片/链接引用定义并同步所有可见块的运行时上下文。
     pub(super) fn rebuild_image_runtimes(&mut self, cx: &mut Context<Self>) {
-        let base_dir = self.image_base_dir();
         let derived = self.derived_document(cx);
         self.image_reference_definitions = derived.image_references.clone();
         self.link_reference_definitions = derived.link_references.clone();
+        self.sync_runtime_contexts(cx);
+    }
+
+    /// 从载入时已有的源码提取引用定义，避免首帧前生成整篇来源映射。
+    ///
+    /// 大型文档首次载入专用：所有块刚创建、尚未挂载，逐块通知没有观察者，
+    /// 因此安静写入运行时上下文，由载入完成处的一次统一通知负责重绘。
+    pub(super) fn rebuild_image_runtimes_from_source(
+        &mut self,
+        source: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.image_reference_definitions = Arc::new(parse_image_reference_definitions(source));
+        self.link_reference_definitions = Arc::new(parse_link_reference_definitions(source));
+        self.sync_runtime_contexts_inner(false, cx);
+    }
+
+    /// 同步当前引用定义与脚注注册表到全部运行时块。
+    fn sync_runtime_contexts(&mut self, cx: &mut Context<Self>) {
+        self.sync_runtime_contexts_inner(true, cx);
+    }
+
+    /// 同步全部运行时块，`notify` 控制逐块是否请求重绘。
+    ///
+    /// 安静模式只用于大型文档首次载入：整批块尚未挂载，逐步通知没有意义，
+    /// 载入完成处已有一次统一通知。
+    fn sync_runtime_contexts_inner(&mut self, notify: bool, cx: &mut Context<Self>) {
+        let base_dir = self.image_base_dir();
         self.rebuild_footnote_registry(cx);
         let visible = self.document.visible_blocks().to_vec();
         for visible_block in visible {
-            self.sync_runtime_context_for_block(&visible_block.entity, base_dir.as_deref(), cx);
+            self.sync_runtime_context_for_block_inner(
+                &visible_block.entity,
+                base_dir.as_deref(),
+                notify,
+                cx,
+            );
             if visible_block.entity.read(cx).kind() != BlockKind::Table {
                 continue;
             }
@@ -221,11 +271,16 @@ impl Editor {
                 continue;
             };
             for cell in runtime.header {
-                self.sync_runtime_context_for_block(&cell, base_dir.as_deref(), cx);
+                self.sync_runtime_context_for_block_inner(&cell, base_dir.as_deref(), notify, cx);
             }
             for row in runtime.rows {
                 for cell in row {
-                    self.sync_runtime_context_for_block(&cell, base_dir.as_deref(), cx);
+                    self.sync_runtime_context_for_block_inner(
+                        &cell,
+                        base_dir.as_deref(),
+                        notify,
+                        cx,
+                    );
                 }
             }
         }

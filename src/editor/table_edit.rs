@@ -87,6 +87,20 @@ impl Editor {
 
     /// 重建所有可见表格的运行时并同步行列高亮。
     pub(super) fn rebuild_table_runtimes(&mut self, cx: &mut Context<Self>) {
+        self.rebuild_table_runtimes_inner(None, cx);
+    }
+
+    /// 用已有 Markdown 初始化表格上下文，避免载入结束时构造全文映射。
+    pub(super) fn rebuild_table_runtimes_from_source(
+        &mut self,
+        source: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.rebuild_table_runtimes_inner(Some(source), cx);
+    }
+
+    /// 重建表格运行时，并按需使用已有源码同步引用上下文。
+    fn rebuild_table_runtimes_inner(&mut self, source: Option<&str>, cx: &mut Context<Self>) {
         self.table_cells.clear();
         self.table_axis_preview = None;
         let visible = self.document.visible_blocks().to_vec();
@@ -103,7 +117,11 @@ impl Editor {
                 self.install_table_runtime_for_block(&visible.entity, &table, cx);
             }
         }
-        self.rebuild_image_runtimes(cx);
+        if let Some(source) = source {
+            self.rebuild_image_runtimes_from_source(source, cx);
+        } else {
+            self.rebuild_image_runtimes(cx);
+        }
         self.sync_table_axis_visuals(cx);
     }
 

@@ -1,6 +1,7 @@
 //! 编辑器窗口渲染：居中可滚动块列、未保存对话框、自定义滚动条
 //! 与延迟操作（焦点、滚动、保存、窗口标题）。
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rgpui::*;
@@ -88,6 +89,15 @@ enum RowPlan {
         variant: CalloutVariant,
         segments: Vec<RowSegment>,
     },
+}
+
+/// 可见块对应的行分组索引，按文档树结构修订缓存。
+pub(super) struct RenderRowsCache {
+    revision: u64,
+    plans: Vec<RowPlan>,
+    starts: Vec<usize>,
+    top_gaps: Vec<f32>,
+    first_ids: Vec<EntityId>,
 }
 
 impl RowPlan {
@@ -851,13 +861,129 @@ impl Editor {
     }
 }
 
+impl Editor {
+    /// 读取或重建文档行计划，普通滚动帧直接复用已缓存索引。
+    fn cached_render_rows(
+        &mut self,
+        cx: &mut Context<Self>,
+        dimensions: &ThemeDimensions,
+    ) -> Arc<RenderRowsCache> {
+        let revision = self.document.revision();
+        if let Some(cache) = self.render_rows_cache.as_ref()
+            && cache.revision == revision
+        {
+            return cache.clone();
+        }
+
+        let block_count = self.document.visible_block_count();
+        let spacing_for = |index: usize| -> RowSpacingInfo {
+            self.document.visible_blocks()[index]
+                .entity
+                .read_with(cx, |block, _cx| RowSpacingInfo::from_block(block))
+        };
+        let mut plans = Vec::new();
+        let mut previous_row_spacing: Option<RowSpacingInfo> = None;
+        let mut index = 0usize;
+        while index < block_count {
+            let first_spacing = spacing_for(index);
+            let top_gap =
+                rendered_row_top_gap(previous_row_spacing, first_spacing, dimensions.block_gap);
+
+            if let (Some(callout_anchor), Some(callout_variant)) =
+                (first_spacing.callout_anchor, first_spacing.callout_variant)
+            {
+                let mut segments = Vec::new();
+                let mut group_end = index;
+                while group_end < block_count
+                    && spacing_for(group_end).callout_anchor == Some(callout_anchor)
+                {
+                    let row_spacing = spacing_for(group_end);
+                    if let Some(footnote_anchor) = row_spacing.footnote_anchor {
+                        let footnote_start = group_end;
+                        let mut footnote_end = group_end;
+                        while footnote_end < block_count
+                            && spacing_for(footnote_end).callout_anchor == Some(callout_anchor)
+                            && spacing_for(footnote_end).footnote_anchor == Some(footnote_anchor)
+                        {
+                            footnote_end += 1;
+                        }
+                        segments.push(RowSegment::FootnoteGroup {
+                            start: footnote_start,
+                            end: footnote_end,
+                        });
+                        group_end = footnote_end;
+                    } else {
+                        segments.push(RowSegment::Block(group_end));
+                        group_end += 1;
+                    }
+                }
+                plans.push(RowPlan::Callout {
+                    start: index,
+                    top_gap,
+                    variant: callout_variant,
+                    segments,
+                });
+                previous_row_spacing = Some(spacing_for(group_end - 1));
+                index = group_end;
+                continue;
+            }
+
+            if let Some(footnote_anchor) = first_spacing.footnote_anchor {
+                let mut group_end = index;
+                while group_end < block_count
+                    && spacing_for(group_end).footnote_anchor == Some(footnote_anchor)
+                {
+                    group_end += 1;
+                }
+                plans.push(RowPlan::Footnote {
+                    start: index,
+                    end: group_end,
+                    top_gap,
+                });
+                previous_row_spacing = Some(spacing_for(group_end - 1));
+                index = group_end;
+                continue;
+            }
+
+            plans.push(RowPlan::Single {
+                block: index,
+                top_gap,
+            });
+            previous_row_spacing = Some(first_spacing);
+            index += 1;
+        }
+
+        let starts: Vec<usize> = plans.iter().map(RowPlan::start).collect();
+        let top_gaps: Vec<f32> = plans.iter().map(RowPlan::top_gap).collect();
+        let first_ids = starts
+            .iter()
+            .map(|&start| self.document.visible_block_entity_id(start))
+            .collect();
+        let cache = Arc::new(RenderRowsCache {
+            revision,
+            plans,
+            starts,
+            top_gaps,
+            first_ids,
+        });
+        self.render_rows_cache = Some(cache.clone());
+        cache
+    }
+}
+
 impl Render for Editor {
     /// 渲染编辑器窗口（含菜单栏、文档列、对话框与延迟同步）。
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.install_close_guard(cx, window);
         self.apply_pending_focus(window, cx);
         self.apply_pending_scroll_into_view(window, cx);
-        self.last_selection_snapshot = self.capture_source_selection_snapshot(cx);
+        if self.should_defer_large_document_refresh() {
+            self.stable_snapshot_stale = true;
+        } else if self.stable_snapshot_stale {
+            // 首次精确映射按需刷新，空闲重绘和滚动不触发全篇派生。
+        } else {
+            self.last_selection_snapshot = self.capture_source_selection_snapshot(cx);
+        }
         self.sync_pending_save(window, cx);
         self.sync_pending_save_as(window, cx);
         self.sync_pending_open_link(window, cx);
@@ -894,91 +1020,10 @@ impl Render for Editor {
                 || self.scrollbar_hovered
                 || Instant::now() <= self.scrollbar_visible_until);
 
-        // 分组与结构快照分阶段短暂借用文档：长文档每帧不再克隆与块数等长的实体句柄。
-        let block_count = self.document.visible_block_count();
-        // 间距元数据按需读取，而非预收集为与可见块等长的向量，
-        // 长文档下每帧可省数十 KB 分配，单块读取仅为廉价不可变锁加七字段拷贝。
-        let spacing_for = |index: usize| -> RowSpacingInfo {
-            self.document.visible_blocks()[index]
-                .entity
-                .read_with(cx, |block, _cx| RowSpacingInfo::from_block(block))
-        };
-        // 每行先只登记分组计划：分组只需逐块间距元数据，元素留到窗口确定后再构建。
-        let mut row_plans: Vec<RowPlan> = Vec::new();
-        let mut previous_row_spacing: Option<RowSpacingInfo> = None;
-        let mut index = 0usize;
-        while index < block_count {
-            let first_spacing = spacing_for(index);
-            let top_gap = rendered_row_top_gap(previous_row_spacing, first_spacing, d.block_gap);
-
-            if let (Some(callout_anchor), Some(callout_variant)) =
-                (first_spacing.callout_anchor, first_spacing.callout_variant)
-            {
-                let mut segments: Vec<RowSegment> = Vec::new();
-                let mut group_end = index;
-                while group_end < block_count
-                    && spacing_for(group_end).callout_anchor == Some(callout_anchor)
-                {
-                    let row_spacing = spacing_for(group_end);
-                    if let Some(footnote_anchor) = row_spacing.footnote_anchor {
-                        let footnote_start = group_end;
-                        let mut footnote_end = group_end;
-                        while footnote_end < block_count
-                            && spacing_for(footnote_end).callout_anchor == Some(callout_anchor)
-                            && spacing_for(footnote_end).footnote_anchor == Some(footnote_anchor)
-                        {
-                            footnote_end += 1;
-                        }
-                        segments.push(RowSegment::FootnoteGroup {
-                            start: footnote_start,
-                            end: footnote_end,
-                        });
-                        group_end = footnote_end;
-                        continue;
-                    }
-                    segments.push(RowSegment::Block(group_end));
-                    group_end += 1;
-                }
-
-                row_plans.push(RowPlan::Callout {
-                    start: index,
-                    top_gap,
-                    variant: callout_variant,
-                    segments,
-                });
-                previous_row_spacing = Some(spacing_for(group_end - 1));
-                index = group_end;
-                continue;
-            }
-
-            if let Some(footnote_anchor) = first_spacing.footnote_anchor {
-                let mut group_end = index;
-                while group_end < block_count
-                    && spacing_for(group_end).footnote_anchor == Some(footnote_anchor)
-                {
-                    group_end += 1;
-                }
-
-                row_plans.push(RowPlan::Footnote {
-                    start: index,
-                    end: group_end,
-                    top_gap,
-                });
-                previous_row_spacing = Some(spacing_for(group_end - 1));
-                index = group_end;
-                continue;
-            }
-
-            row_plans.push(RowPlan::Single {
-                block: index,
-                top_gap,
-            });
-            previous_row_spacing = Some(first_spacing);
-            index += 1;
-        }
-        // 行首块下标与前导边距由计划派生，供焦点行定位与占位高度使用。
-        let row_starts: Vec<usize> = row_plans.iter().map(RowPlan::start).collect();
-        let row_top_gaps: Vec<f32> = row_plans.iter().map(RowPlan::top_gap).collect();
+        let row_cache = self.cached_render_rows(cx, d);
+        let row_plans = &row_cache.plans;
+        let row_starts = &row_cache.starts;
+        let row_top_gaps = &row_cache.top_gaps;
 
         // 聚焦行恒挂载以防光标失焦，表格单元格映射到其所属表格块的行。
         let focus_row = self
@@ -998,21 +1043,11 @@ impl Render for Editor {
             });
 
         // 以行首块为键缓存行足迹。
-        let row_first_ids: Vec<EntityId> = row_starts
-            .iter()
-            .map(|&start| self.document.visible_block_entity_id(start))
-            .collect();
+        let row_first_ids = &row_cache.first_ids;
 
-        // 结构编辑后行号与上帧对不上，跳过下方缓存刷新，块键条目仍有效。
-        let structural_change = block_count != self.prev_visible_block_ids.len()
-            || (0..block_count.min(self.prev_visible_block_ids.len())).any(|index| {
-                self.document.visible_block_entity_id(index) != self.prev_visible_block_ids[index]
-            });
-        if structural_change {
-            self.prev_visible_block_ids = (0..block_count)
-                .map(|index| self.document.visible_block_entity_id(index))
-                .collect();
-        }
+        // 结构修订号可直接判断行映射是否变化，避免每帧逐块比较实体标识。
+        let structural_change = self.prev_render_tree_revision != Some(row_cache.revision);
+        self.prev_render_tree_revision = Some(row_cache.revision);
 
         // 足迹仅对其测量时的列宽有效。首帧尚无滚动边界，列宽塌到一像素底线，
         // 每块每行一字换行，保留该测量会使文档尺寸永久错误。
@@ -1020,6 +1055,18 @@ impl Render for Editor {
         if width_changed {
             self.row_stride_cache.clear();
             self.row_stride_width = Some(centered_width);
+        }
+
+        // 行结构或列宽变化时重建一次高度索引；普通滚动帧不再分配、遍历整条高度数组。
+        let estimate = d.block_min_height.max(1.0);
+        if structural_change || width_changed || self.row_stride_index.len() != row_first_ids.len()
+        {
+            self.row_stride_index.rebuild(
+                row_first_ids
+                    .iter()
+                    .map(|id| self.row_stride_cache.get(id).copied().unwrap_or(estimate))
+                    .collect(),
+            );
         }
 
         // 滚动容器记录每个挂载子项的布局边界，相邻顶部差恰为一行足迹，
@@ -1046,17 +1093,11 @@ impl Render for Editor {
                     let stride = f32::from(next_bounds.top() - bounds.top());
                     if stride > 0.0 && stride.is_finite() {
                         self.row_stride_cache.insert(*row_id, stride);
+                        self.row_stride_index.update(row, stride);
                     }
                 }
             }
         }
-
-        // 未测量行用最小块高作下界，使窗口多挂载而非落在占位上。
-        let estimate = d.block_min_height.max(1.0);
-        let strides: Vec<f32> = row_first_ids
-            .iter()
-            .map(|id| self.row_stride_cache.get(id).copied().unwrap_or(estimate))
-            .collect();
 
         // 仅当缓存超过存活行时，按块更替裁剪缓存。
         if self.row_stride_cache.len() > row_first_ids.len().saturating_mul(2) {
@@ -1064,8 +1105,8 @@ impl Render for Editor {
             self.row_stride_cache.retain(|id, _| live.contains(id));
         }
 
-        let render_window = Self::rendered_window(
-            &strides,
+        let render_window = Self::rendered_window_indexed(
+            &self.row_stride_index,
             current_scroll_y,
             viewport_height,
             OVERDRAW_PX,

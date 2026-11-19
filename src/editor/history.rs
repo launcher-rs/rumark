@@ -86,16 +86,24 @@ impl Editor {
         }
         self.pending_undo_capture = Some(UndoCapture {
             snapshot: self.capture_history_entry(kind, cx),
+            block_version: None,
         });
     }
 
     /// 从稳定快照准备一次挂起的撤销捕获。
-    pub(super) fn prepare_undo_capture_from_stable_snapshot(&mut self, kind: UndoKind) {
+    pub(super) fn prepare_undo_capture_from_stable_snapshot(
+        &mut self,
+        kind: UndoKind,
+        block: &Entity<Block>,
+        cx: &App,
+    ) {
         if self.history_restore_in_progress || self.pending_undo_capture.is_some() {
             return;
         }
+        let block_version = Some((block.entity_id(), block.read(cx).record.content_version()));
         self.pending_undo_capture = Some(UndoCapture {
             snapshot: self.capture_stable_history_entry(kind),
+            block_version,
         });
     }
 
@@ -103,6 +111,26 @@ impl Editor {
     pub(super) fn refresh_stable_document_snapshot(&mut self, cx: &App) {
         self.last_selection_snapshot = self.capture_source_selection_snapshot(cx);
         self.last_stable_source_text = self.current_document_source_arc(cx);
+        self.stable_snapshot_stale = false;
+        self.last_document_edit = None;
+    }
+
+    /// 大文档连续输入时暂缓昂贵的全篇快照刷新，输入停顿后再统一计算。
+    pub(super) fn should_defer_large_document_refresh(&self) -> bool {
+        const LARGE_DOCUMENT_BLOCKS: usize = 256;
+        const INPUT_IDLE_DELAY: Duration = Duration::from_millis(300);
+        self.document.visible_block_count() >= LARGE_DOCUMENT_BLOCKS
+            && self
+                .last_document_edit
+                .is_some_and(|edited| edited.elapsed() < INPUT_IDLE_DELAY)
+    }
+
+    /// 连续输入历史已超出合并窗口时，下一次输入前必须先固化当前文本。
+    pub(super) fn text_history_merge_window_elapsed(&self) -> bool {
+        self.undo_history.last().is_some_and(|entry| {
+            matches!(entry.kind, UndoKind::CoalescibleText)
+                && entry.timestamp.elapsed() > Self::UNDO_COALESCE_WINDOW
+        })
     }
 
     /// 收尾挂起的撤销捕获：无变化丢弃，相邻输入按时间窗合并。
@@ -113,9 +141,43 @@ impl Editor {
         }
 
         let Some(pending) = self.pending_undo_capture.take() else {
+            if self.should_defer_large_document_refresh() {
+                self.stable_snapshot_stale = true;
+                return;
+            }
             self.refresh_stable_document_snapshot(cx);
             return;
         };
+
+        let block_changed = pending.block_version.is_some_and(|(entity_id, version)| {
+            self.document
+                .block_entity_by_id(entity_id)
+                .is_some_and(|block| block.read(cx).record.content_version() != version)
+        });
+        if matches!(pending.snapshot.kind, UndoKind::CoalescibleText)
+            && self.document.visible_block_count() >= 256
+            && block_changed
+        {
+            self.redo_history.clear();
+            let should_merge = self.undo_history.last().is_some_and(|entry| {
+                matches!(entry.kind, UndoKind::CoalescibleText)
+                    && pending
+                        .snapshot
+                        .timestamp
+                        .saturating_duration_since(entry.timestamp)
+                        <= Self::UNDO_COALESCE_WINDOW
+            });
+            if !should_merge {
+                self.undo_history.push(pending.snapshot);
+                Self::trim_history(
+                    &mut self.undo_history,
+                    Self::UNDO_LIMIT,
+                    Self::HISTORY_BYTES_LIMIT,
+                );
+            }
+            self.stable_snapshot_stale = true;
+            return;
+        }
 
         // 直接复用派生缓存的共享文本做比较，避免为「有无变化」再拷贝整篇源码。
         let current_source = self.current_document_source_arc(cx);

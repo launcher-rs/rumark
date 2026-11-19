@@ -756,6 +756,30 @@ impl InlineTextTree {
             .any(|fragment| fragment.footnote.is_some())
     }
 
+    /// 是否可能受链接引用定义变化影响。
+    ///
+    /// 引用式链接（完整 `[标签][ref]`、折叠 `[标签][]`、快捷 `[标签]`）
+    /// 在未解析时都含字面 `[`；解析后则带 [`InlineLink::Reference`] 标记。
+    /// 两种情况任一命中即为候选；都不命中的块可安全跳过昂贵重解析。
+    pub(crate) fn has_link_reference_candidate(&self) -> bool {
+        self.fragments.iter().any(|fragment| {
+            fragment.text.contains('[')
+                || matches!(fragment.link, Some(InlineLink::Reference { .. }))
+        })
+    }
+
+    /// 片段中是否出现独立图片标记 `![`。
+    ///
+    /// `parse_standalone_image` 要求文本以 `![` 开头，因此不含该标记的块
+    /// 不可能解析出独立图片；用它做保守预筛，避免每块都分配可见文本与
+    /// Markdown 两份字符串。快捷图片引用的 `![` 来自图片语法本身，同样
+    /// 落在可见文本里，故不会漏判。
+    pub(crate) fn has_image_marker(&self) -> bool {
+        self.fragments
+            .iter()
+            .any(|fragment| fragment.text.contains("!["))
+    }
+
     /// 应用脚注引用状态。
     pub(crate) fn apply_footnote_reference_state(
         &mut self,

@@ -71,6 +71,13 @@ impl Block {
 
     /// 取用于运行时的独立图片标记。
     fn standalone_image_markdown_for_runtime(&self) -> Option<String> {
+        // `parse_standalone_image` 要求文本以 `![` 开头；先按片段检查两个
+        // 候选来源的起始标记，绝大多数块都可直接返回，省下可见文本与
+        // Markdown 两份字符串分配（大文档每块都会走到这里）。
+        if !self.record.title.has_image_marker() {
+            return None;
+        }
+
         let visible = self.record.title.plain_text();
         if parse_standalone_image(&visible).is_some() {
             return Some(visible);

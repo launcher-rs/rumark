@@ -606,6 +606,13 @@ impl Block {
             return;
         }
 
+        // 先保存新定义，供后续编辑解析使用；但只有含引用候选的块才需要
+        // 把标题序列化再全量重解析。绝大多数块没有 `[`，可跳过这段重活。
+        self.link_reference_definitions = link_reference_definitions;
+        if self.uses_raw_text_editing() || !self.record.title.has_link_reference_candidate() {
+            return;
+        }
+
         let selected_markdown = (!self.uses_raw_text_editing())
             .then(|| self.current_range_to_markdown_range(self.selected_range.clone()));
         let marked_markdown = (!self.uses_raw_text_editing())
@@ -618,11 +625,6 @@ impl Block {
         let selection_reversed = self.selection_reversed;
         let collapsed_affinity = self.current_collapsed_caret_affinity();
         let had_projection = self.projection.is_some();
-
-        self.link_reference_definitions = link_reference_definitions;
-        if self.uses_raw_text_editing() {
-            return;
-        }
 
         let markdown = self.record.title.serialize_markdown();
         let next_title = InlineTextTree::from_markdown_with_link_references(

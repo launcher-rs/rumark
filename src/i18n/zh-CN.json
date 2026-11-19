@@ -46,6 +46,7 @@
   "dialog_add_language_prompt": "选择语言配置文件",
   "dialog_add_theme_prompt": "选择主题包文件",
   "message_open_failed": "打开失败",
+  "message_loading_document": "正在加载大型文档…",
   "message_file_not_utf8": "这个文件不是 UTF-8 编码，拾墨只能打开 UTF-8 文本：\n{path}\n\n请用编辑器把它另存为 UTF-8 后再打开。",
   "message_recent_missing_title": "最近文件不存在",
   "message_recent_missing_message": "此最近文件已经不存在，已从记录中移除：\n{path}",
