@@ -57,7 +57,7 @@ cargo test -p rumark
 
 - 最小编译验证：`cargo check -p rumark --no-default-features`。
 - 单测聚焦：`cargo test -p rumark <模块路径::测试名>`。
-- 本仓是 cargo workspace；`crates/mermaid-rs-renderer` 为自维护 vendor 的 Mermaid 渲染库（基于上游 0.3.1 裁剪与修复），其回归测试用 `cargo test -p mermaid-rs-renderer` 单独运行。
+- 本仓是 cargo workspace（唯一成员是根包 rumark）；Mermaid 渲染库已拆分为独立仓 [launcher-rs/mermaid-renderer](https://github.com/launcher-rs/mermaid-renderer)，以 git 依赖引入，其回归测试在该仓用 `cargo test` 单独运行。
 
 ## 参考
 

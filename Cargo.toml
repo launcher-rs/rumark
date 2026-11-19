@@ -1,7 +1,7 @@
-# workspace 根：rumark 主 crate 自身是根包成员，另有自维护 vendor 的渲染 crate。
+# workspace 根：rumark 主 crate 自身是根包成员。
 # [profile.*] 只能在 workspace 根定义，保留在本文件。
 [workspace]
-members = [".", "crates/mermaid-rs-renderer"]
+members = ["."]
 resolver = "3"
 
 [package]
@@ -34,8 +34,9 @@ directories = "6"
 ratex-layout = "0.1.9"
 ratex-parser = "0.1.9"
 ratex-svg = { version = "0.1.9", features = ["embed-fonts", "standalone"] }
-# 自维护 vendor 的 Mermaid 渲染库（裁剪版），见 crates/mermaid-rs-renderer/README.md。
-mermaid-rs-renderer = { path = "crates/mermaid-rs-renderer", version = "0.3.1" }
+# Mermaid 渲染库已拆分为独立仓（launcher-rs/mermaid-renderer），以 git 依赖引入。
+# 本地改动请在该仓提交，再回本仓执行 `cargo update -p mermaid-renderer` 更新锁文件。
+mermaid-renderer = { git = "https://github.com/launcher-rs/mermaid-renderer", branch = "main" }
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "default-tls"] }
 sys-locale = "0.3"
 docx-rs = { version = "0.4", optional = true }

@@ -183,7 +183,7 @@ fn render_mermaid_raw(source: &str) -> anyhow::Result<String> {
     if !looks_like_supported_mermaid_source(source) {
         return Err(anyhow::anyhow!("unsupported Mermaid diagram"));
     }
-    let mut options = mermaid_rs_renderer::RenderOptions::default();
+    let mut options = mermaid_renderer::RenderOptions::default();
     options.theme.font_family = MERMAID_FONT_FAMILY.to_string();
     let (svg, _) = render_mermaid_svg_with_layout(source, &options)?;
     if svg.contains("class=\"error-text\"") || svg.contains("Syntax error in text") {
@@ -193,21 +193,21 @@ fn render_mermaid_raw(source: &str) -> anyhow::Result<String> {
 }
 
 /// 渲染 Mermaid，并额外返回布局供回归用例检查。
-/// 状态图的正交折线圆角由 vendored 渲染库直接输出（见 crates/mermaid-rs-renderer）。
+/// 状态图的正交折线圆角由 Mermaid 渲染库直接输出（见 launcher-rs/mermaid-renderer）。
 fn render_mermaid_svg_with_layout(
     source: &str,
-    options: &mermaid_rs_renderer::RenderOptions,
-) -> anyhow::Result<(String, mermaid_rs_renderer::Layout)> {
-    let parsed = mermaid_rs_renderer::parse_mermaid_strict(source)
-        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    options: &mermaid_renderer::RenderOptions,
+) -> anyhow::Result<(String, mermaid_renderer::Layout)> {
+    let parsed =
+        mermaid_renderer::parse_mermaid_strict(source).map_err(|err| anyhow::anyhow!("{err}"))?;
     let mut layout_config = options.layout.clone();
-    if parsed.graph.kind == mermaid_rs_renderer::DiagramKind::State {
+    if parsed.graph.kind == mermaid_renderer::DiagramKind::State {
         layout_config.node_spacing = 110.0;
         layout_config.rank_spacing = 80.0;
         layout_config.flowchart.auto_spacing.enabled = false;
     }
-    let layout = mermaid_rs_renderer::compute_layout(&parsed.graph, &options.theme, &layout_config);
-    let svg = mermaid_rs_renderer::render_svg(&layout, &options.theme, &layout_config);
+    let layout = mermaid_renderer::compute_layout(&parsed.graph, &options.theme, &layout_config);
+    let svg = mermaid_renderer::render_svg(&layout, &options.theme, &layout_config);
     Ok((svg, layout))
 }
 
@@ -878,7 +878,7 @@ mod tests {
     #[test]
     fn renders_chinese_state_diagram_with_platform_font_stack() {
         let source = "stateDiagram-v2\n    [*] --> 待付款\n    待付款 --> 已付款 : 用户发起支付\n    待付款 --> 已取消 : 超时未支付自动关闭\n    已付款 --> 已发货 : 商家操作发货\n    已发货 --> 已收货 : 用户确认收货\n    已收货 --> 交易完成\n    state 已取消 <<choice>>\n    已取消 --> 退款中 : 用户申请退款\n    退款中 --> 退款完成 : 退款审核通过\n    退款完成 --> [*]\n    交易完成 --> [*]";
-        let mut options = mermaid_rs_renderer::RenderOptions::default();
+        let mut options = mermaid_renderer::RenderOptions::default();
         options.theme.font_family = MERMAID_FONT_FAMILY.to_string();
         let (svg, layout) =
             render_mermaid_svg_with_layout(source, &options).expect("中文状态图应成功渲染");
