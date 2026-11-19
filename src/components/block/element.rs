@@ -927,6 +927,12 @@ impl Element for TextBlockElement {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let theme = rgpui::Theme::global(cx).clone();
+        // 大文档建树阶段会延迟代码高亮；首次真正布局可见代码块时再请求，
+        // 派发到后台线程池计算，滚动帧本身不执行 tree-sitter。
+        if self.input.read(cx).kind().is_code_block() {
+            self.input
+                .update(cx, |block, cx| block.ensure_code_highlight(cx));
+        }
         let input = self.input.read(cx);
         let shared_text = input.shared_display_text();
         let is_placeholder = self.is_placeholder;

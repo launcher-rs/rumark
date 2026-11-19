@@ -619,11 +619,28 @@ impl InlineTextTree {
         markdown: &str,
         reference_definitions: &LinkReferenceDefinitions,
     ) -> Self {
-        let mut tree = Self::plain(markdown)
-            .normalize_inline_syntax_with_link_references(reference_definitions)
-            .tree;
-        tree.normalize_code_spans();
-        tree.normalize_soft_breaks();
+        #[cfg(test)]
+        let parse_started = std::time::Instant::now();
+
+        // 绝大多数段落、标题和通知文本不含任何行内标记。完整归一化会为每个
+        // 字符分配 token、逐边界写映射并递归检查分隔符，是大文档 parse 阶段
+        // 的主要开销。若不存在任何可能的行内语法触发符，plain 树与完整解析
+        // 结果等价，可直接走快路；软换行折叠仍按原语义执行。
+        let fast_path = !has_inline_syntax_trigger(markdown);
+        let tree = if fast_path {
+            let mut tree = Self::plain(markdown);
+            tree.normalize_soft_breaks();
+            tree
+        } else {
+            let mut tree = Self::plain(markdown)
+                .normalize_inline_syntax_with_link_references(reference_definitions)
+                .tree;
+            tree.normalize_code_spans();
+            tree.normalize_soft_breaks();
+            tree
+        };
+        #[cfg(test)]
+        record_inline_parse(parse_started.elapsed(), fast_path);
         tree
     }
 
@@ -964,6 +981,65 @@ impl InlineTextTree {
             markdown_to_visible,
         }
     }
+}
+
+/// 是否存在任何可能被行内解析器消费的语法触发符。
+///
+/// 这里的集合故意保守：只要可能出现的语法就回退到完整解析，宁可少走快路，
+/// 也不能把 `**粗体**`、`[链接]`、HTML 实体、Emoji 短代码等误判为纯文本。
+fn has_inline_syntax_trigger(markdown: &str) -> bool {
+    let bytes = markdown.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' | b'*' | b'_' | b'~' | b'^' | b'`' | b'<' | b'[' | b'$' | b'&' => return true,
+            b':' if has_emoji_shortcode_candidate(bytes, index) => return true,
+            _ => {}
+        }
+        index += 1;
+    }
+    false
+}
+
+/// 判断 `:` 处是否形如 `:shortcode:`，用于保守识别 Emoji 短代码。
+///
+/// 短代码名只包含 ASCII 字母数字、`_`、`-`、`+`。普通文本里的 `http://`、
+/// `Note: message` 不会命中，这样带 URL 的许可证段落仍能走纯文本快路。
+fn has_emoji_shortcode_candidate(bytes: &[u8], colon_index: usize) -> bool {
+    let mut cursor = colon_index + 1;
+    while cursor < bytes.len()
+        && (bytes[cursor].is_ascii_alphanumeric() || matches!(bytes[cursor], b'_' | b'-' | b'+'))
+    {
+        cursor += 1;
+    }
+    cursor > colon_index + 1 && bytes.get(cursor) == Some(&b':')
+}
+
+// 性能归因探针：只在测试构建编译，用于把大文档 parse 阶段拆成自有 inline 解析
+// 与其他建树开销。生产构建没有这些计数器和计时调用。
+#[cfg(test)]
+thread_local! {
+    static INLINE_PARSE_NS: std::cell::Cell<u128> = const { std::cell::Cell::new(0) };
+    static INLINE_PARSE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static INLINE_FAST_PATHS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_inline_parse(elapsed: std::time::Duration, fast_path: bool) {
+    INLINE_PARSE_NS.with(|ns| ns.set(ns.get() + elapsed.as_nanos()));
+    INLINE_PARSE_CALLS.with(|calls| calls.set(calls.get() + 1));
+    if fast_path {
+        INLINE_FAST_PATHS.with(|fast| fast.set(fast.get() + 1));
+    }
+}
+
+/// 读取并清零 inline 解析统计：`(调用次数, 快路次数, 累计毫秒)`。
+#[cfg(test)]
+pub(crate) fn take_inline_parse_stats() -> (usize, usize, f64) {
+    let ns = INLINE_PARSE_NS.with(|ns| ns.replace(0));
+    let calls = INLINE_PARSE_CALLS.with(|calls| calls.replace(0));
+    let fast = INLINE_FAST_PATHS.with(|fast| fast.replace(0));
+    (calls, fast, ns as f64 / 1_000_000.0)
 }
 
 impl InlineTextTree {

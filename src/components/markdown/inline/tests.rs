@@ -1390,3 +1390,50 @@ fn escaped_backtick_in_code() {
     assert!(!cache.style_at(0).code);
     assert_eq!(tree.serialize_markdown(), "\\`not code\\`");
 }
+
+fn slow_inline_parse(source: &str) -> InlineTextTree {
+    let definitions = LinkReferenceDefinitions::default();
+    let mut tree = InlineTextTree::plain(source)
+        .normalize_inline_syntax_with_link_references(&definitions)
+        .tree;
+    tree.normalize_code_spans();
+    tree.normalize_soft_breaks();
+    tree
+}
+
+#[test]
+fn plain_text_fast_path_matches_full_parser() {
+    for source in [
+        "",
+        "plain ascii text",
+        "中文普通段落，没有行内标记。",
+        "line one\nline two",
+        "line one  \nline two",
+        "https://example.com/path with text",
+        "version 1.2.3, build 42",
+    ] {
+        let fast = InlineTextTree::from_markdown(source);
+        let slow = slow_inline_parse(source);
+
+        assert_eq!(fast.plain_text(), slow.plain_text(), "source: {source:?}");
+        assert_eq!(
+            fast.serialize_markdown(),
+            slow.serialize_markdown(),
+            "source: {source:?}"
+        );
+        assert_eq!(
+            fast.render_cache().spans(),
+            slow.render_cache().spans(),
+            "source: {source:?}"
+        );
+    }
+}
+
+#[test]
+fn emoji_shortcode_still_uses_full_parser() {
+    let tree = InlineTextTree::from_markdown("release :rocket: today");
+    assert_eq!(tree.plain_text(), "release 🚀 today");
+
+    let literal = InlineTextTree::from_markdown("http://example.com:8080/path");
+    assert_eq!(literal.plain_text(), "http://example.com:8080/path");
+}

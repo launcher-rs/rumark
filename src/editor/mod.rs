@@ -58,6 +58,12 @@ mod tree;
 mod window_layout;
 mod workspace;
 
+/// 每个载入批次构建的根块数量。
+///
+/// 保持较小批次以让出 UI；实测把批次放大到 256 并不会降低 rgpui 的
+/// 实体更新总成本，反而会增加单批工作。
+pub(crate) const ROOT_BLOCKS_PER_CHUNK: usize = 32;
+
 use self::workspace::WorkspaceState;
 
 /// 延迟到有 `Window` 可用时再执行的链接跳转请求。
@@ -495,7 +501,6 @@ impl Editor {
 
     /// 在一次 UI 更新中解析有限数量的根块，返回是否已全部载入。
     fn load_next_document_chunk(&mut self, cx: &mut Context<Self>) -> bool {
-        const ROOT_BLOCKS_PER_CHUNK: usize = 32;
         let Some(pending) = self.pending_document_load.as_ref() else {
             return true;
         };

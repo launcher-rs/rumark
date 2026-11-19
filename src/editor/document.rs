@@ -18,6 +18,67 @@ use crate::components::{
 };
 use crate::components::{is_mermaid_info_string, parse_display_math_source};
 
+// 性能归因探针：只在测试构建编译，用于拆分建树循环自身的开销。
+#[cfg(test)]
+thread_local! {
+    static NATIVE_BLOCK_NS: std::cell::Cell<u128> = const { std::cell::Cell::new(0) };
+    static NATIVE_BLOCK_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static ROOT_START_NS: std::cell::Cell<u128> = const { std::cell::Cell::new(0) };
+    static ROOT_START_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static BOUNDARY_NS: std::cell::Cell<u128> = const { std::cell::Cell::new(0) };
+    static BOUNDARY_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PARAGRAPH_NS: std::cell::Cell<u128> = const { std::cell::Cell::new(0) };
+    static PARAGRAPH_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_native_block(elapsed: std::time::Duration) {
+    NATIVE_BLOCK_NS.with(|ns| ns.set(ns.get() + elapsed.as_nanos()));
+    NATIVE_BLOCK_CALLS.with(|calls| calls.set(calls.get() + 1));
+}
+
+#[cfg(test)]
+fn record_root_start(elapsed: std::time::Duration) {
+    ROOT_START_NS.with(|ns| ns.set(ns.get() + elapsed.as_nanos()));
+    ROOT_START_CALLS.with(|calls| calls.set(calls.get() + 1));
+}
+
+#[cfg(test)]
+fn record_boundary(elapsed: std::time::Duration) {
+    BOUNDARY_NS.with(|ns| ns.set(ns.get() + elapsed.as_nanos()));
+    BOUNDARY_CALLS.with(|calls| calls.set(calls.get() + 1));
+}
+
+#[cfg(test)]
+fn record_paragraph(elapsed: std::time::Duration) {
+    PARAGRAPH_NS.with(|ns| ns.set(ns.get() + elapsed.as_nanos()));
+    PARAGRAPH_CALLS.with(|calls| calls.set(calls.get() + 1));
+}
+
+/// 读取并清零建树归因统计：
+/// `(块构造次数, 块构造ms, 根块判定次数, 根块判定ms, 段落边界判定次数, 段落边界判定ms, 段落收集次数, 段落收集ms)`。
+#[cfg(test)]
+pub(crate) fn take_document_parse_stats() -> (usize, f64, usize, f64, usize, f64, usize, f64) {
+    let block_ns = NATIVE_BLOCK_NS.with(|ns| ns.replace(0));
+    let block_calls = NATIVE_BLOCK_CALLS.with(|calls| calls.replace(0));
+    let root_ns = ROOT_START_NS.with(|ns| ns.replace(0));
+    let root_calls = ROOT_START_CALLS.with(|calls| calls.replace(0));
+    let boundary_ns = BOUNDARY_NS.with(|ns| ns.replace(0));
+    let boundary_calls = BOUNDARY_CALLS.with(|calls| calls.replace(0));
+    let paragraph_ns = PARAGRAPH_NS.with(|ns| ns.replace(0));
+    let paragraph_calls = PARAGRAPH_CALLS.with(|calls| calls.replace(0));
+    (
+        block_calls,
+        block_ns as f64 / 1_000_000.0,
+        root_calls,
+        root_ns as f64 / 1_000_000.0,
+        boundary_calls,
+        boundary_ns as f64 / 1_000_000.0,
+        paragraph_calls,
+        paragraph_ns as f64 / 1_000_000.0,
+    )
+}
+
 /// 解析出的围栏代码块起始标记元数据。
 ///
 /// 起始围栏同时记录标记字符与其连续长度，
@@ -130,6 +191,20 @@ fn line_contains_matching_backtick_run(line: &str, run_len: usize) -> bool {
 
 /// 判断段落能否跨越空行边界延续（未闭合行内代码可延续）。
 fn paragraph_can_continue_through_boundary(
+    paragraph_lines: &[String],
+    lines: &[String],
+    boundary_index: usize,
+) -> bool {
+    #[cfg(test)]
+    let started = std::time::Instant::now();
+    let result =
+        paragraph_can_continue_through_boundary_inner(paragraph_lines, lines, boundary_index);
+    #[cfg(test)]
+    record_boundary(started.elapsed());
+    result
+}
+
+fn paragraph_can_continue_through_boundary_inner(
     paragraph_lines: &[String],
     lines: &[String],
     boundary_index: usize,
@@ -714,6 +789,15 @@ fn collect_list_item_region(lines: &[String], start: usize, marker_indent_column
 
 /// 判断该行是否像根块的起始行。
 fn looks_like_root_block_start(lines: &[String], index: usize) -> bool {
+    #[cfg(test)]
+    let started = std::time::Instant::now();
+    let result = looks_like_root_block_start_inner(lines, index);
+    #[cfg(test)]
+    record_root_start(started.elapsed());
+    result
+}
+
+fn looks_like_root_block_start_inner(lines: &[String], index: usize) -> bool {
     let line = &lines[index];
     if line.trim().is_empty() {
         return true;
@@ -759,7 +843,7 @@ fn build_code_block(
 ) -> Entity<super::Block> {
     Editor::new_block(
         cx,
-        BlockRecord::new(
+        BlockRecord::with_deferred_code_highlight(
             BlockKind::CodeBlock { language },
             InlineTextTree::plain(content),
         ),
@@ -868,6 +952,19 @@ fn collect_comment_block(
 
 /// 构造指定类型的原生行内块实体。
 fn native_block(
+    cx: &mut Context<Editor>,
+    kind: BlockKind,
+    markdown: String,
+) -> Entity<super::Block> {
+    #[cfg(test)]
+    let started = std::time::Instant::now();
+    let result = native_block_inner(cx, kind, markdown);
+    #[cfg(test)]
+    record_native_block(started.elapsed());
+    result
+}
+
+fn native_block_inner(
     cx: &mut Context<Editor>,
     kind: BlockKind,
     markdown: String,
@@ -1223,14 +1320,30 @@ impl Editor {
         lines: &[String],
         start: usize,
     ) -> (Entity<super::Block>, usize) {
+        #[cfg(test)]
+        let started = std::time::Instant::now();
+        let result = Self::collect_paragraph_block_inner(cx, lines, start);
+        #[cfg(test)]
+        record_paragraph(started.elapsed());
+        result
+    }
+
+    fn collect_paragraph_block_inner(
+        cx: &mut Context<Self>,
+        lines: &[String],
+        start: usize,
+    ) -> (Entity<super::Block>, usize) {
         let mut paragraph_lines = vec![lines[start].to_string()];
+        let mut paragraph_has_backtick = lines[start].contains('`');
         let mut index = start + 1;
         while index < lines.len() {
             if (lines[index].trim().is_empty() || looks_like_root_block_start(lines, index))
-                && !paragraph_can_continue_through_boundary(&paragraph_lines, lines, index)
+                && (!paragraph_has_backtick
+                    || !paragraph_can_continue_through_boundary(&paragraph_lines, lines, index))
             {
                 break;
             }
+            paragraph_has_backtick |= lines[index].contains('`');
             paragraph_lines.push(lines[index].to_string());
             index += 1;
         }

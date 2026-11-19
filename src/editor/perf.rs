@@ -76,22 +76,56 @@ async fn large_document_baseline(cx: &mut TestAppContext) {
             Editor::from_markdown(cx, "placeholder".to_string(), None)
         });
 
+        // 清零归因探针，确保只统计当前文件的建树阶段。
+        let _ = crate::components::take_inline_parse_stats();
+        let _ = crate::components::take_highlight_time_ms();
+        let _ = super::document::take_document_parse_stats();
+
         let t = Instant::now();
         let mut roots = Vec::new();
         let mut pos = 0usize;
+        let mut chunk_work_ms = 0.0f64;
+        let mut chunk_count = 0usize;
+        let mut update_ms = 0.0f64;
+        let mut extend_ms = 0.0f64;
         loop {
+            let update_started = Instant::now();
             let (blocks, next) = cx.update(|_window, cx| {
                 editor.update(cx, |_editor, cx| {
-                    Editor::build_root_blocks_chunk(cx, &lines, pos, 32)
+                    let chunk_started = Instant::now();
+                    let result = Editor::build_root_blocks_chunk(
+                        cx,
+                        &lines,
+                        pos,
+                        super::ROOT_BLOCKS_PER_CHUNK,
+                    );
+                    chunk_work_ms += elapsed_ms(chunk_started);
+                    result
                 })
             });
+            update_ms += elapsed_ms(update_started);
+            chunk_count += 1;
+            let extend_started = Instant::now();
             roots.extend(blocks);
+            extend_ms += elapsed_ms(extend_started);
             if next >= lines.len() {
                 break;
             }
             pos = next;
         }
         let parse_ms = elapsed_ms(t);
+        let (inline_calls, inline_fast, inline_ms) = crate::components::take_inline_parse_stats();
+        let highlight_ms = crate::components::take_highlight_time_ms();
+        let (
+            native_blocks,
+            native_ms,
+            root_checks,
+            root_check_ms,
+            boundary_checks,
+            boundary_ms,
+            paragraph_collects,
+            paragraph_collect_ms,
+        ) = super::document::take_document_parse_stats();
         let root_count = roots.len();
 
         // 模拟 defer_large_document_load 的完成态：直接复用载入文本，不强制整篇映射。
@@ -123,7 +157,7 @@ async fn large_document_baseline(cx: &mut TestAppContext) {
         let visible = editor.read_with(cx, |editor, _cx| editor.document.visible_block_count());
 
         eprintln!(
-            "[perf] {}\n  bytes={} lines={} roots={} visible={}\n  read={:.1}ms parse={:.1}ms install={:.1}ms derived={:.1}ms save={:.1}ms",
+            "[perf] {}\n  bytes={} lines={} roots={} visible={}\n  read={:.1}ms parse={:.1}ms install={:.1}ms derived={:.1}ms save={:.1}ms\n  inline_calls={} inline_fast={} inline_ms={:.1}ms highlight_ms={:.1}ms\n  native_blocks={} native_ms={:.1}ms root_checks={} root_check_ms={:.1}ms boundary_checks={} boundary_ms={:.1}ms paragraph_collects={} paragraph_collect_ms={:.1}ms\n  chunks={} chunk_work_ms={:.1}ms update_ms={:.1}ms extend_ms={:.1}ms other_parse_ms={:.1}ms",
             path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
             bytes,
             line_count,
@@ -134,6 +168,23 @@ async fn large_document_baseline(cx: &mut TestAppContext) {
             install_ms,
             derived_ms,
             save_ms,
+            inline_calls,
+            inline_fast,
+            inline_ms,
+            highlight_ms,
+            native_blocks,
+            native_ms,
+            root_checks,
+            root_check_ms,
+            boundary_checks,
+            boundary_ms,
+            paragraph_collects,
+            paragraph_collect_ms,
+            chunk_count,
+            chunk_work_ms,
+            update_ms,
+            extend_ms,
+            (parse_ms - inline_ms - highlight_ms).max(0.0),
         );
     }
 }

@@ -16,6 +16,59 @@ impl Block {
         self.code_highlight.as_ref()
     }
 
+    /// 请求后台计算代码块高亮；供首次布局可见块时调用。
+    ///
+    /// 语法高亮由 tree-sitter 完成，单个大代码块可能耗时数十毫秒。若放在
+    /// 布局帧内同步执行，会让滚动出现尖峰；这里派发到后台线程池，完成后再
+    /// 回填结果并通知重绘。尚未回填期间按无高亮渲染，不影响内容正确性。
+    pub(crate) fn ensure_code_highlight(&mut self, cx: &mut Context<Self>) {
+        let Some(language) = (match &self.record.kind {
+            BlockKind::CodeBlock { language } => Some(language.clone()),
+            _ => None,
+        }) else {
+            self.code_highlight = None;
+            self.code_highlight_key = None;
+            self.code_highlight_pending_key = None;
+            return;
+        };
+
+        let key = (language.clone(), self.record.content_version());
+        if self.code_highlight_key.as_ref() == Some(&key)
+            || self.code_highlight_pending_key.as_ref() == Some(&key)
+        {
+            return;
+        }
+
+        let source = self.render_cache.plain_text().to_string();
+        self.code_highlight_pending_key = Some(key.clone());
+        let pending_key = key;
+        self.code_highlight_task = Some(cx.spawn(
+            async move |this: WeakEntity<Block>, cx: &mut AsyncApp| {
+                let language = language.map(|value| value.to_string());
+                let result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        crate::components::markdown::highlight::highlight_code_block_async(
+                            language, source,
+                        )
+                        .await
+                    })
+                    .await;
+                let _ = update_entity_forgiving(&this, cx, move |block, cx| {
+                    // 请求已被更新的内容版本取代（或已取消）时丢弃过期结果；
+                    // 首次回填前 code_highlight_key 为空，不能用它判断有效性。
+                    if block.code_highlight_pending_key.as_ref() != Some(&pending_key) {
+                        return;
+                    }
+                    block.code_highlight_pending_key = None;
+                    block.code_highlight_key = Some(pending_key);
+                    block.code_highlight = result;
+                    cx.notify();
+                });
+            },
+        ));
+    }
+
     /// 同步代码高亮。
     ///
     /// 高亮只由语言与块内容决定；内容版本号未变时（光标移动、滚动、同一次
@@ -39,6 +92,9 @@ impl Block {
         self.code_highlight =
             highlight_code_block(language.as_deref(), self.render_cache.plain_text());
         self.code_highlight_key = Some(key);
+        // 同步物化了更新版本的结果；在途的后台任务是旧版本，回填时按
+        // pending 失配丢弃，不得覆盖这份新结果。
+        self.code_highlight_pending_key = None;
     }
 
     /// 取代码语言文本。

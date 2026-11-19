@@ -2798,6 +2798,68 @@ async fn code_block_cache_builds_rust_highlight_spans(cx: &mut TestAppContext) {
 }
 
 #[rgpui::test]
+async fn deferred_code_highlight_waits_until_renderer_requests_it(cx: &mut TestAppContext) {
+    let cx = cx.add_empty_window();
+    let block = cx.new(|cx| {
+        Block::with_record(
+            cx,
+            BlockRecord::with_deferred_code_highlight(
+                BlockKind::CodeBlock {
+                    language: Some("rust".into()),
+                },
+                InlineTextTree::plain("fn main() {}\n"),
+            ),
+        )
+    });
+
+    assert!(
+        block.read_with(cx, |block, _cx| block.code_highlight_result().is_none()),
+        "建树阶段不应运行 tree-sitter"
+    );
+
+    block.update(cx, |block, cx| block.ensure_code_highlight(cx));
+    cx.run_until_parked();
+    let highlight = block
+        .read_with(cx, |block, _cx| block.code_highlight_result().cloned())
+        .expect("ensure 后应生成高亮");
+    assert_eq!(highlight.language, HighlightLanguage::Rust);
+}
+
+#[rgpui::test]
+async fn deferred_highlight_discards_stale_result_after_edit(cx: &mut TestAppContext) {
+    let cx = cx.add_empty_window();
+    let block = cx.new(|cx| {
+        Block::with_record(
+            cx,
+            BlockRecord::with_deferred_code_highlight(
+                BlockKind::CodeBlock {
+                    language: Some("rust".into()),
+                },
+                InlineTextTree::plain("fn main() {}\n"),
+            ),
+        )
+    });
+
+    // 派发后台高亮（键为内容版本 0），任务完成前内容被编辑并同步物化新版本。
+    block.update(cx, |block, cx| block.ensure_code_highlight(cx));
+    block.update(cx, |block, _cx| {
+        block
+            .record
+            .set_title(InlineTextTree::plain("let changed = true;\n"));
+        block.refresh_render_cache();
+    });
+    cx.run_until_parked();
+
+    // 在途的旧版本结果不得覆盖同步物化的新结果，失效键必须停留在新版本。
+    let key = block.read_with(cx, |block, _cx| block.code_highlight_key.clone());
+    assert_eq!(
+        key.map(|(_, version)| version),
+        Some(block.read_with(cx, |block, _cx| block.record.content_version())),
+        "后台回填不应把失效键回退到旧内容版本"
+    );
+}
+
+#[rgpui::test]
 async fn code_block_cache_updates_when_language_changes(cx: &mut TestAppContext) {
     let block = cx.new(|cx| {
         Block::with_record(

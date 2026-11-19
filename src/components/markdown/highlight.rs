@@ -642,6 +642,16 @@ pub(crate) fn highlight_code_block(
     language: Option<&str>,
     source: &str,
 ) -> Option<HighlightResult> {
+    #[cfg(test)]
+    let highlight_started = std::time::Instant::now();
+    let result = highlight_code_block_inner(language, source);
+    #[cfg(test)]
+    record_highlight_time(highlight_started.elapsed());
+    result
+}
+
+#[cfg_attr(not(feature = "code-highlight-core"), allow(unused_variables))]
+fn highlight_code_block_inner(language: Option<&str>, source: &str) -> Option<HighlightResult> {
     let key = resolve_code_language_key(language)?;
 
     #[cfg(feature = "code-highlight-core")]
@@ -694,6 +704,31 @@ pub(crate) fn highlight_code_block(
         language: key,
         spans: Vec::new(),
     })
+}
+
+// 性能归因探针：统计建树期间实际落入 tree-sitter 高亮的时间。
+#[cfg(test)]
+thread_local! {
+    static HIGHLIGHT_TIME_NS: std::cell::Cell<u128> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_highlight_time(elapsed: std::time::Duration) {
+    HIGHLIGHT_TIME_NS.with(|ns| ns.set(ns.get() + elapsed.as_nanos()));
+}
+
+/// 读取并清零高亮累计耗时（毫秒）。
+#[cfg(test)]
+pub(crate) fn take_highlight_time_ms() -> f64 {
+    HIGHLIGHT_TIME_NS.with(|ns| ns.replace(0)) as f64 / 1_000_000.0
+}
+
+/// 在后台线程计算代码高亮，供块实体按需调用。
+pub(crate) async fn highlight_code_block_async(
+    language: Option<String>,
+    source: String,
+) -> Option<HighlightResult> {
+    highlight_code_block(language.as_deref(), &source)
 }
 
 /// 追加高亮区间并合并相邻同类区间。

@@ -115,6 +115,10 @@ pub struct Block {
     code_highlight: Option<HighlightResult>,
     /// 当前高亮结果对应的失效键（语言 + 块内容版本号），未变时直接复用。
     code_highlight_key: Option<(Option<SharedString>, u64)>,
+    /// 已在后台计算、尚未回填的高亮键；避免滚动帧重复派发任务。
+    code_highlight_pending_key: Option<(Option<SharedString>, u64)>,
+    /// 后台高亮任务句柄。
+    code_highlight_task: Option<Task<()>>,
     pub children: Vec<Entity<Block>>,
     pub focus_handle: FocusHandle,
     pub(crate) code_language_focus_handle: FocusHandle,
@@ -225,11 +229,14 @@ impl Block {
     pub fn with_record(cx: &mut Context<Self>, record: BlockRecord) -> Self {
         let edit_mode = EditMode::for_kind(&record.kind);
         let render_cache = record.title.render_cache();
+        let defer_code_highlight = record.defer_code_highlight;
         let mut block = Self {
             record,
             render_cache,
             code_highlight: None,
             code_highlight_key: None,
+            code_highlight_pending_key: None,
+            code_highlight_task: None,
             children: Vec::new(),
             focus_handle: cx.focus_handle(),
             code_language_focus_handle: cx.focus_handle(),
@@ -299,7 +306,9 @@ impl Block {
             numbered_list_restart_requested: false,
             quote_reparse_requested: false,
         };
-        block.sync_code_highlight();
+        if !defer_code_highlight {
+            block.sync_code_highlight();
+        }
         block.refresh_cached_display_text();
         block
     }

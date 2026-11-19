@@ -490,6 +490,8 @@ pub struct BlockRecord {
     pub raw_fallback: Option<String>,
     /// 是否为链接/图片引用定义块（`[label]: url`）。渲染视图隐藏，源码视图保留。
     pub reference_definition: bool,
+    /// 大文档载入时延迟代码高亮：建块阶段不跑 tree-sitter，进入视口时再算。
+    pub(crate) defer_code_highlight: bool,
     /// 内容修订号：任何影响序列化结果的变更都递增，供编辑器派生缓存判定失效。
     /// 红线：内容变更必须走 `set_title`/`set_kind`/`set_table`，直接赋值字段会让缓存陈旧。
     content_version: u64,
@@ -508,9 +510,17 @@ impl BlockRecord {
             content: Vec::new(),
             raw_fallback: None,
             reference_definition: false,
+            defer_code_highlight: false,
             content_version: 0,
         };
         record.sync_raw_fallback();
+        record
+    }
+
+    /// 创建延迟高亮的代码块记录，用于大文档分批建树。
+    pub(crate) fn with_deferred_code_highlight(kind: BlockKind, title: InlineTextTree) -> Self {
+        let mut record = Self::new(kind, title);
+        record.defer_code_highlight = true;
         record
     }
 
