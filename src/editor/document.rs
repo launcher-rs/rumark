@@ -1006,18 +1006,28 @@ fn starts_with_standalone_image_child_paragraph(lines: &[String]) -> bool {
 }
 
 /// 把 Markdown 片段追加到块标题末尾。
-fn append_markdown_to_block(
+/// 把列表项续行缓冲一次性解析并入块标题。
+///
+/// 续行文本必须整段解析：逐行解析会让跨行的代码段、未闭合标记在行边界
+/// 被定型为字面文本，后续载入的引用重解析再把残缺序列化改写成损坏的链接。
+/// 缓冲只在块边界处排空（条目结束、提升判定），缓冲内部是完整的行内文本
+/// 单元，解析结果与一次完整构建一致。
+fn flush_pending_item_text(
     block: &Entity<super::Block>,
-    separator: &str,
-    markdown: &str,
+    pending_parts: &mut Vec<(String, String)>,
     cx: &mut Context<Editor>,
 ) {
+    if pending_parts.is_empty() {
+        return;
+    }
+    let mut joined = String::new();
+    for (separator, text) in pending_parts.drain(..) {
+        joined.push_str(&separator);
+        joined.push_str(&text);
+    }
     block.update(cx, |block, _cx| {
         let mut title = block.record.title.clone();
-        if !separator.is_empty() {
-            title.push_tree(InlineTextTree::plain(separator.to_string()));
-        }
-        title.push_tree(InlineTextTree::from_markdown(markdown));
+        title.push_tree(InlineTextTree::from_markdown(&joined));
         block.record.set_title(title);
         block.sync_edit_mode_from_kind();
         block.refresh_render_cache();
@@ -1091,8 +1101,16 @@ impl Editor {
         lines: &[String],
         start: usize,
         max_root_blocks: usize,
+        carries_previous_list_item: bool,
     ) -> (Vec<Entity<super::Block>>, usize) {
-        Self::build_blocks_from_lines_limited(cx, lines, start, true, max_root_blocks)
+        Self::build_blocks_from_lines_limited(
+            cx,
+            lines,
+            start,
+            true,
+            max_root_blocks,
+            carries_previous_list_item,
+        )
     }
 
     /// 用运行时块按行构建文档（仅运行时可安全编辑的语法落为原生块）。
@@ -1118,17 +1136,23 @@ impl Editor {
             0,
             allow_root_footnote_definitions,
             usize::MAX,
+            false,
         )
         .0
     }
 
     /// 按有限根块数量构造文档片段，列表只在完整项边界暂停。
+    ///
+    /// `carries_previous_list_item` 表示 `start` 之前的内容是否以列表项根块
+    /// 结尾（分批构建时由上一批传入），空行保留规则据此与一次完整构建对齐；
+    /// 一次完整构建传入假值即可。
     fn build_blocks_from_lines_limited(
         cx: &mut Context<Self>,
         lines: &[String],
         start: usize,
         allow_root_footnote_definitions: bool,
         max_root_blocks: usize,
+        carries_previous_list_item: bool,
     ) -> (Vec<Entity<super::Block>>, usize) {
         let mut roots = Vec::new();
         let mut index = start;
@@ -1142,19 +1166,29 @@ impl Editor {
                 }
 
                 let blank_run_len = index - blank_start;
-                let previous_root_is_list_item = roots
-                    .last()
-                    .map(|block: &Entity<super::Block>| block.read(cx).kind().is_list_item())
-                    .unwrap_or(false);
+                // 分批构建时每批的 roots 都从空开始，不能再用 `roots.is_empty()`
+                // 判断文档开头；只有从第 0 行开始的批次才适用开头空行全保留规则。
+                // "上一根块是列表项"同理需要跨批携带，否则列表组分隔空行在
+                // 批次边界处数量漂移，分批树与一次完整构建不一致。
+                let previous_root_is_list_item = if roots.is_empty() {
+                    carries_previous_list_item
+                } else {
+                    roots
+                        .last()
+                        .map(|block: &Entity<super::Block>| block.read(cx).kind().is_list_item())
+                        .unwrap_or(false)
+                };
+                let at_document_start = start == 0 && roots.is_empty();
                 let next_root_is_list_item = lines
                     .get(index)
                     .is_some_and(|line| parse_list_marker(line).is_some());
-                let preserved_empty_blocks =
-                    if roots.is_empty() || (previous_root_is_list_item && next_root_is_list_item) {
-                        blank_run_len
-                    } else {
-                        blank_run_len.saturating_sub(1)
-                    };
+                let preserved_empty_blocks = if at_document_start
+                    || (previous_root_is_list_item && next_root_is_list_item)
+                {
+                    blank_run_len
+                } else {
+                    blank_run_len.saturating_sub(1)
+                };
 
                 for _ in 0..preserved_empty_blocks {
                     roots.push(native_block(cx, BlockKind::Paragraph, String::new()));
@@ -1845,7 +1879,10 @@ impl Editor {
             };
 
             let item_end = collect_list_item_region(lines, index, marker.indent_columns);
-            let block = native_block(cx, marker.kind.clone(), marker.text);
+            // 标题先留空，首行内容进入待解析缓冲；缓冲在条目结束时一次性解析，
+            // 保证跨行代码段等行内结构按完整文本解析（见 flush_pending_item_text）。
+            let block = native_block(cx, marker.kind.clone(), String::new());
+            let mut pending_parts = vec![(String::new(), marker.text)];
             let mut body_index = index + 1;
             let mut pending_blank_lines = 0usize;
             let mut fallback_raw = false;
@@ -2019,12 +2056,23 @@ impl Editor {
                         continue;
                     }
 
+                    // “提升为子段落”判定需要知道块内是否已有行内文本；此刻
+                    // 缓冲尚未排空，用缓冲内容代替标题树判定。
+                    let pending_has_text = pending_parts.iter().any(|(_, text)| !text.is_empty());
+                    let inline_markdown_for_image = if pending_parts.is_empty() {
+                        block.read(cx).record.title_to_markdown()
+                    } else {
+                        pending_parts
+                            .iter()
+                            .map(|(separator, text)| format!("{separator}{text}"))
+                            .collect::<String>()
+                    };
                     let should_promote_plain_child = pending_blank_lines > 0
                         || saw_child
-                        || block.read(cx).rendered_text().is_empty()
-                        || parse_standalone_image(&block.read(cx).record.title_to_markdown())
-                            .is_some();
+                        || (!pending_has_text && block.read(cx).rendered_text().is_empty())
+                        || parse_standalone_image(&inline_markdown_for_image).is_some();
                     if should_promote_plain_child {
+                        flush_pending_item_text(&block, &mut pending_parts, cx);
                         let (paragraph, consumed) =
                             Self::collect_paragraph_block(cx, &anchor_dedented, 0);
                         attach_child_blocks(&block, vec![paragraph], cx);
@@ -2054,16 +2102,12 @@ impl Editor {
                 }
 
                 let trimmed = line.trim_start_matches([' ', '\t']);
-                append_markdown_to_block(
-                    &block,
-                    if pending_blank_lines > 0 {
-                        "\n\n"
-                    } else {
-                        "\n"
-                    },
-                    trimmed,
-                    cx,
-                );
+                let separator = if pending_blank_lines > 0 {
+                    "\n\n"
+                } else {
+                    "\n"
+                };
+                pending_parts.push((separator.to_string(), trimmed.to_string()));
                 pending_blank_lines = 0;
                 body_index += 1;
             }
@@ -2071,6 +2115,7 @@ impl Editor {
             if fallback_raw {
                 roots.push(raw_block(cx, lines[index..item_end].join("\n")));
             } else {
+                flush_pending_item_text(&block, &mut pending_parts, cx);
                 roots.push(block);
             }
             index = item_end;

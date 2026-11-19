@@ -64,6 +64,13 @@ mod workspace;
 /// 实体更新总成本，反而会增加单批工作。
 pub(crate) const ROOT_BLOCKS_PER_CHUNK: usize = 32;
 
+/// 单次载入 tick 的时间预算（毫秒）。
+///
+/// Windows 系统定时器默认约 15.6ms 才传递一次过期，逐批 sleep 会让分批载入
+/// 被放大近一个数量级；每个 tick 连续处理批次直到耗尽该预算再让出主线程，
+/// 既显著减少 tick 总数，也保证单次更新远小于一帧的预算以维持输入响应。
+pub(crate) const DOCUMENT_LOAD_BUDGET_MS: u64 = 8;
+
 use self::workspace::WorkspaceState;
 
 /// 延迟到有 `Window` 可用时再执行的链接跳转请求。
@@ -78,6 +85,11 @@ struct PendingDocumentLoad {
     lines: Vec<String>,
     next_line: usize,
     root_blocks: Vec<Entity<Block>>,
+    /// 已构建内容中最后一个根块是否为列表项。
+    ///
+    /// 批次边界的空行保留规则依赖上一根块的类型；不携带该上下文会让分批
+    /// 构建出的块树与一次完整构建不一致（列表组分隔空行数量漂移）。
+    previous_root_is_list_item: bool,
     file_path: Option<PathBuf>,
 }
 
@@ -470,7 +482,21 @@ impl Editor {
                     .timer(Duration::from_millis(2))
                     .await;
                 let finished = editor
-                    .update(cx, |this, cx| this.load_next_document_chunk(cx))
+                    .update(cx, |this, cx| {
+                        // Windows 默认定时器粒度约 15.6ms，逐批等待会把 2ms 批间隔
+                        // 放大近一个数量级（万级块文档载入实测 4.4s）。改为按时间
+                        // 预算在一次更新里连续处理多个批次再让出主线程，tick 数
+                        // 随预算成倍减少，UI 仍保持可响应。
+                        let budget_start = Instant::now();
+                        let mut finished = false;
+                        while !finished
+                            && budget_start.elapsed()
+                                < Duration::from_millis(DOCUMENT_LOAD_BUDGET_MS)
+                        {
+                            finished = this.load_next_document_chunk(cx);
+                        }
+                        finished
+                    })
                     .unwrap_or(true);
                 if finished {
                     break;
@@ -492,6 +518,7 @@ impl Editor {
             lines: normalized.split('\n').map(ToOwned::to_owned).collect(),
             next_line: 0,
             root_blocks: Vec::new(),
+            previous_root_is_list_item: false,
             file_path,
         });
         self.pending_focus = None;
@@ -509,6 +536,7 @@ impl Editor {
             &pending.lines,
             pending.next_line,
             ROOT_BLOCKS_PER_CHUNK,
+            pending.previous_root_is_list_item,
         );
         let is_complete = next_line >= pending.lines.len();
 
@@ -518,6 +546,9 @@ impl Editor {
             .expect("载入任务在同一实体更新中保持存在");
         pending.root_blocks.extend(blocks);
         pending.next_line = next_line;
+        if let Some(last) = pending.root_blocks.last() {
+            pending.previous_root_is_list_item = last.read(cx).kind().is_list_item();
+        }
         if !is_complete {
             return false;
         }

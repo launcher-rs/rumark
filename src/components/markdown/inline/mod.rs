@@ -307,8 +307,17 @@ pub enum InlineLink {
         destination: String,
         title: Option<String>,
     },
-    /// 引用式链接，由 `[label][ref]` 语法解析。
-    Reference { label: String, destination: String },
+    /// 引用式链接，由 `[label][ref]`、`[label][]` 或 `[label]` 语法解析。
+    ///
+    /// `ref_bracket` 保留源码 `][...]` 尾段的原样内容，序列化时据此还原：
+    /// `None` 为快捷形式（还原 `[text]`），`Some("")` 为折叠形式
+    /// （还原 `[text][]`），`Some(ref)` 为完整形式（还原 `[text][ref]`）。
+    /// `label` 是参与定义解析与链接编辑的引用标签。
+    Reference {
+        label: String,
+        destination: String,
+        ref_bracket: Option<String>,
+    },
     /// 自动链接目标，来自 `<scheme:target>` 或类邮箱语法。
     Autolink { target: String },
 }
@@ -363,7 +372,13 @@ impl InlineLink {
     pub(crate) fn middle_marker(&self) -> Option<&'static str> {
         match self {
             Self::Inline { .. } => Some("]("),
-            Self::Reference { .. } => Some("]["),
+            Self::Reference {
+                ref_bracket: Some(_),
+                ..
+            } => Some("]["),
+            Self::Reference {
+                ref_bracket: None, ..
+            } => None,
             Self::Autolink { .. } => None,
         }
     }
@@ -375,6 +390,20 @@ impl InlineLink {
                 Some(format_inline_link_target(destination, title.as_deref()))
             }
             Self::Reference { label, .. } => Some(label.clone()),
+            Self::Autolink { .. } => None,
+        }
+    }
+
+    /// 取序列化时 `]` 前的原样内容。
+    ///
+    /// 行内链接是目标串（`](target)`），引用式链接是 `][ref]` 的标签部分
+    /// （快捷形式为 `None`，还原为 `[text]`），自动链接没有这段。
+    pub(crate) fn serialized_bracket_text(&self) -> Option<String> {
+        match self {
+            Self::Inline { destination, title } => {
+                Some(format_inline_link_target(destination, title.as_deref()))
+            }
+            Self::Reference { ref_bracket, .. } => ref_bracket.clone(),
             Self::Autolink { .. } => None,
         }
     }
@@ -915,14 +944,14 @@ impl InlineTextTree {
             if let Some(link) = link {
                 let run_visible_len = run_map.visible_to_markdown.len().saturating_sub(1);
                 let link_start = output.len();
-                let editable_text = link.editable_text();
+                let bracket_text = link.serialized_bracket_text();
                 output.push_str(link.open_marker());
                 output.push_str(run_map.markdown());
                 if let Some(middle_marker) = link.middle_marker() {
                     output.push_str(middle_marker);
                 }
-                if let Some(editable_text) = editable_text.as_deref() {
-                    output.push_str(editable_text);
+                if let Some(bracket_text) = bracket_text.as_deref() {
+                    output.push_str(bracket_text);
                 }
                 output.push_str(link.close_marker());
                 let link_end = output.len();
@@ -947,7 +976,7 @@ impl InlineTextTree {
 
                 let suffix_start = label_markdown_end;
                 let suffix_len = link.middle_marker().map(str::len).unwrap_or(0)
-                    + editable_text.as_ref().map(String::len).unwrap_or(0)
+                    + bracket_text.as_ref().map(String::len).unwrap_or(0)
                     + link.close_marker().len();
                 for local in 0..=suffix_len {
                     markdown_to_visible[suffix_start + local] = visible_cursor + run_visible_len;

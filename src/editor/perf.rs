@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use rgpui::{TestAppContext, point, px};
+use rgpui::{TestAppContext, WindowExt, point, px};
 
 use super::Editor;
 use crate::i18n::I18nManager;
@@ -88,6 +88,7 @@ async fn large_document_baseline(cx: &mut TestAppContext) {
         let mut chunk_count = 0usize;
         let mut update_ms = 0.0f64;
         let mut extend_ms = 0.0f64;
+        let mut prev_is_list = false;
         loop {
             let update_started = Instant::now();
             let (blocks, next) = cx.update(|_window, cx| {
@@ -98,6 +99,7 @@ async fn large_document_baseline(cx: &mut TestAppContext) {
                         &lines,
                         pos,
                         super::ROOT_BLOCKS_PER_CHUNK,
+                        prev_is_list,
                     );
                     chunk_work_ms += elapsed_ms(chunk_started);
                     result
@@ -106,6 +108,9 @@ async fn large_document_baseline(cx: &mut TestAppContext) {
             update_ms += elapsed_ms(update_started);
             chunk_count += 1;
             let extend_started = Instant::now();
+            if let Some(last) = blocks.last() {
+                prev_is_list = cx.read(|app| last.read(app).kind().is_list_item());
+            }
             roots.extend(blocks);
             extend_ms += elapsed_ms(extend_started);
             if next >= lines.len() {
@@ -264,12 +269,16 @@ async fn large_document_install_profile(cx: &mut TestAppContext) {
 
         let mut roots = Vec::new();
         let mut pos = 0usize;
+        let mut prev_is_list = false;
         loop {
             let (blocks, next) = cx.update(|_window, cx| {
                 editor.update(cx, |_editor, cx| {
-                    Editor::build_root_blocks_chunk(cx, &lines, pos, 32)
+                    Editor::build_root_blocks_chunk(cx, &lines, pos, 32, prev_is_list)
                 })
             });
+            if let Some(last) = blocks.last() {
+                prev_is_list = cx.read(|app| last.read(app).kind().is_list_item());
+            }
             roots.extend(blocks);
             if next >= lines.len() {
                 break;
@@ -334,12 +343,16 @@ async fn large_document_runtime_profile(cx: &mut TestAppContext) {
         });
         let mut roots = Vec::new();
         let mut pos = 0usize;
+        let mut prev_is_list = false;
         loop {
             let (blocks, next) = cx.update(|_window, cx| {
                 editor.update(cx, |_editor, cx| {
-                    Editor::build_root_blocks_chunk(cx, &lines, pos, 32)
+                    Editor::build_root_blocks_chunk(cx, &lines, pos, 32, prev_is_list)
                 })
             });
+            if let Some(last) = blocks.last() {
+                prev_is_list = cx.read(|app| last.read(app).kind().is_list_item());
+            }
             roots.extend(blocks);
             if next >= lines.len() {
                 break;
@@ -427,12 +440,16 @@ async fn large_document_from_source_profile(cx: &mut TestAppContext) {
         });
         let mut roots = Vec::new();
         let mut pos = 0usize;
+        let mut prev_is_list = false;
         loop {
             let (blocks, next) = cx.update(|_window, cx| {
                 editor.update(cx, |_editor, cx| {
-                    Editor::build_root_blocks_chunk(cx, &lines, pos, 32)
+                    Editor::build_root_blocks_chunk(cx, &lines, pos, 32, prev_is_list)
                 })
             });
+            if let Some(last) = blocks.last() {
+                prev_is_list = cx.read(|app| last.read(app).kind().is_list_item());
+            }
             roots.extend(blocks);
             if next >= lines.len() {
                 break;
@@ -465,6 +482,177 @@ async fn large_document_from_source_profile(cx: &mut TestAppContext) {
             path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
             parse_refs_ms,
             from_source_ms,
+        );
+    }
+}
+
+/// 关闭链路基线：冷/热保存序列化、完整落盘、脏文档弹窗、窗口销毁（实体级联释放）。
+#[rgpui::test]
+#[ignore = "性能基线：关闭链路"]
+async fn large_document_close_profile(cx: &mut TestAppContext) {
+    init_perf_app(cx);
+    // 常驻一个空窗口，避免样张窗口移除后触发 LastWindowClosed 退出影响后续迭代。
+    cx.add_empty_window();
+    for path in bench_files() {
+        if !path.exists() {
+            continue;
+        }
+        let markdown = match super::read_markdown_file(&path) {
+            Ok(text) => text,
+            Err(_) => continue,
+        };
+        let (editor, cx) = cx
+            .add_window_view(|_window, cx| Editor::from_markdown(cx, markdown, Some(path.clone())));
+
+        // 1. 冷保存序列化：保存并关闭的主 CPU 开销（全篇派生 + 序列化）。
+        let t = Instant::now();
+        let _text = editor.read_with(cx, |editor, cx| editor.serialized_document_text(cx));
+        let cold_serialize_ms = elapsed_ms(t);
+
+        // 2. 热保存序列化（命中派生缓存）。
+        let t = Instant::now();
+        let _text = editor.read_with(cx, |editor, cx| editor.serialized_document_text(cx));
+        let warm_serialize_ms = elapsed_ms(t);
+
+        // 3. 完整保存到临时文件（序列化 + 原子写盘 + sync_all）。
+        let temp_dir = std::env::temp_dir().join("rumark-close-bench");
+        std::fs::create_dir_all(&temp_dir).ok();
+        let temp_path = temp_dir.join(
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("bench.md"),
+        );
+        let t = Instant::now();
+        let saved = cx.update(|window, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.save_to_existing_path(&temp_path, window, cx)
+            })
+        });
+        let save_to_disk_ms = elapsed_ms(t);
+
+        // 4. 脏文档点击关闭：弹确认框路径（含对话框首个渲染帧）。
+        let t = Instant::now();
+        cx.update(|window, cx| {
+            editor.update(cx, |editor, _cx| editor.document_dirty = true);
+            editor.update(cx, |editor, cx| {
+                let _ = editor.on_window_should_close(window, cx);
+            });
+            window.draw(cx).clear(cx);
+        });
+        let dirty_dialog_ms = elapsed_ms(t);
+        cx.update(|window, cx| {
+            editor.update(cx, |editor, cx| editor.hide_unsaved_changes_dialog(cx));
+            editor.update(cx, |editor, _cx| editor.document_dirty = false);
+            // 用框架路径真正移除对话框对象，避免其闭包继续持有编辑器实体强引用，
+            // 否则第 5 步的窗口销毁无法级联释放块实体，teardown 计时失真。
+            window.close_dialog(cx);
+            window.draw(cx).clear(cx);
+        });
+
+        // 5. 干净文档点击关闭：检查放行 + 窗口销毁 + 全部块实体级联释放。
+        //    先释放测试持有的实体引用，让窗口移除能真正级联 drop 整棵树。
+        drop(editor);
+        let t = Instant::now();
+        cx.update(|window, cx| {
+            window.remove_window();
+            let _ = cx;
+        });
+        cx.run_until_parked();
+        let teardown_ms = elapsed_ms(t);
+
+        eprintln!(
+            "[perf-close] {}\n  cold_serialize={:.1}ms warm_serialize={:.1}ms save_to_disk={:.1}ms(saved={}) dirty_dialog={:.1}ms teardown={:.1}ms",
+            path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+            cold_serialize_ms,
+            warm_serialize_ms,
+            save_to_disk_ms,
+            saved,
+            dirty_dialog_ms,
+            teardown_ms,
+        );
+    }
+}
+
+/// 真实样张对拍：分批构建的块树（含安装后序列化结果）必须与一次完整构建一致。
+///
+/// 批次边界落在空行/列表组分隔处时，空行保留规则依赖跨批上下文；该用例用
+/// 真实文件分布守护这条对齐关系，样张缺失即跳过。
+#[rgpui::test]
+#[ignore = "需要本机样张（RUMARK_BENCH_FILES），缺失即跳过"]
+async fn chunked_build_matches_full_parse_on_samples(cx: &mut TestAppContext) {
+    init_perf_app(cx);
+    cx.add_empty_window();
+    for path in bench_files() {
+        if !path.exists() {
+            continue;
+        }
+        let markdown = match super::read_markdown_file(&path) {
+            Ok(text) => text,
+            Err(_) => continue,
+        };
+        let normalized = markdown.replace("\r\n", "\n").replace('\r', "\n");
+        let lines: Vec<String> = normalized.split('\n').map(ToOwned::to_owned).collect();
+
+        let (editor, cx) = cx.add_window_view(|_window, cx| {
+            Editor::from_markdown(cx, "placeholder".to_string(), None)
+        });
+        let mut roots = Vec::new();
+        let mut pos = 0usize;
+        let mut prev_is_list = false;
+        loop {
+            let (blocks, next) = cx.update(|_window, cx| {
+                editor.update(cx, |_editor, cx| {
+                    Editor::build_root_blocks_chunk(
+                        cx,
+                        &lines,
+                        pos,
+                        super::ROOT_BLOCKS_PER_CHUNK,
+                        prev_is_list,
+                    )
+                })
+            });
+            if let Some(last) = blocks.last() {
+                prev_is_list = cx.read(|app| last.read(app).kind().is_list_item());
+            }
+            roots.extend(blocks);
+            if next >= lines.len() {
+                break;
+            }
+            pos = next;
+        }
+        let source = Arc::from(normalized.as_str());
+        cx.update(|_window, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.document_loading = true;
+                editor.replace_document_from_root_blocks(roots, None, source, cx);
+            });
+        });
+        // 注意与参照比较的是安装后的可见块数（含子块），根块数不含列表项子块。
+        let chunked_visible =
+            editor.read_with(cx, |editor, _cx| editor.document.visible_block_count());
+
+        let (reference_count, reference_serialized) = {
+            let (reference, refcx) = cx
+                .add_window_view(|_window, cx| Editor::from_markdown(cx, normalized.clone(), None));
+            let count =
+                reference.read_with(refcx, |editor, _cx| editor.document.visible_block_count());
+            let text = reference.read_with(refcx, |editor, cx| editor.serialized_document_text(cx));
+            (count, text)
+        };
+        let chunked_serialized =
+            editor.read_with(cx, |editor, cx| editor.serialized_document_text(cx));
+
+        assert_eq!(
+            chunked_visible,
+            reference_count,
+            "{} 分批构建的可见块数应与完整构建一致",
+            path.display()
+        );
+        assert_eq!(
+            chunked_serialized,
+            reference_serialized,
+            "{} 分批构建的序列化结果应与完整构建一致",
+            path.display()
         );
     }
 }

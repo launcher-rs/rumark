@@ -1006,10 +1006,9 @@ fn parses_collapsed_reference_style_links_with_definitions() {
 
     assert_eq!(tree.plain_text(), "collapsed reference");
     assert_eq!(tree.render_cache().link_at(0), Some("https://example.org"));
-    assert_eq!(
-        tree.serialize_markdown(),
-        "[collapsed reference][collapsed reference]"
-    );
+    // 折叠形式 `[text][]` 序列化必须还原原样；展开成完整形式会改写用户源码，
+    // 大文档分批载入的引用重同步还会把这种改写写进保存文件。
+    assert_eq!(tree.serialize_markdown(), "[collapsed reference][]");
 }
 
 #[test]
@@ -1022,10 +1021,34 @@ fn parses_shortcut_reference_style_links_with_definitions() {
 
     assert_eq!(tree.plain_text(), "shortcut reference");
     assert_eq!(tree.render_cache().link_at(0), Some("https://example.net"));
-    assert_eq!(
-        tree.serialize_markdown(),
-        "[shortcut reference][shortcut reference]"
+    // 快捷引用 `[label]` 序列化必须还原原样形式；此前总是输出完整形式
+    // `[label][label]`，大文档分批载入的引用重同步会把这种改写写进保存文件。
+    assert_eq!(tree.serialize_markdown(), "[shortcut reference]");
+}
+
+#[test]
+fn reference_link_forms_round_trip_faithfully() {
+    let definitions = super::super::link::parse_link_reference_definitions(
+        "[full ref]: https://example.net\n[text]: https://example.net",
     );
+
+    let full = InlineTextTree::from_markdown_with_link_references("[text][full ref]", &definitions);
+    assert_eq!(full.serialize_markdown(), "[text][full ref]");
+
+    let collapsed = InlineTextTree::from_markdown_with_link_references("[text][]", &definitions);
+    assert_eq!(collapsed.plain_text(), "text");
+    assert_eq!(
+        collapsed.render_cache().link_at(0),
+        Some("https://example.net")
+    );
+    assert_eq!(collapsed.serialize_markdown(), "[text][]");
+
+    let shortcut = InlineTextTree::from_markdown_with_link_references("[text]", &definitions);
+    assert_eq!(
+        shortcut.render_cache().link_at(0),
+        Some("https://example.net")
+    );
+    assert_eq!(shortcut.serialize_markdown(), "[text]");
 }
 
 #[test]

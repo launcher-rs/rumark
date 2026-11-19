@@ -982,7 +982,7 @@ fn locate_inline_link(
             let link_label = if raw_label.is_empty() {
                 tokens_to_string(&tokens[index + 1..label_end])
             } else {
-                raw_label
+                raw_label.clone()
             };
             let normalized_label =
                 crate::components::markdown::image::normalize_link_label(&link_label)?;
@@ -994,6 +994,9 @@ fn locate_inline_link(
                 link: InlineLink::Reference {
                     label: link_label,
                     destination,
+                    // 完整/折叠形式都带 `][...]` 尾段；折叠的源码尾段是空串，
+                    // 解析用标签已折叠为链接文本。
+                    ref_bracket: Some(raw_label),
                 },
             })
         }
@@ -1009,6 +1012,8 @@ fn locate_inline_link(
                 link: InlineLink::Reference {
                     label: raw_label,
                     destination,
+                    // `[label]` 快捷形式没有 `][...]` 尾段，序列化还原原样。
+                    ref_bracket: None,
                 },
             })
         }

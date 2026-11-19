@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rgpui::{
     AnyWindowHandle, AppContext, ClickEvent, KeyDownEvent, Keystroke, ParentElement, Styled,
@@ -2848,8 +2848,8 @@ async fn removing_link_definition_reverts_shortcut_reference(cx: &mut TestAppCon
     );
     assert_eq!(
         block.read_with(cx, |block, _cx| block.rendered_text().to_string()),
-        "[shortcut][shortcut]",
-        "定义移除后应还原为字面 Markdown（解析过的快捷引用按完整形式序列化）"
+        "[shortcut]",
+        "定义移除后应还原为字面 Markdown（快捷引用按原样形式序列化）"
     );
 }
 
@@ -5011,4 +5011,67 @@ async fn image_menu_embeds_local_image_as_base64(cx: &mut TestAppContext) {
     });
 
     let _ = fs::remove_file(image_path);
+}
+
+/// 驱动延迟载入完整闭环，并断言分批构建结果与一次完整构建一致。
+///
+/// 批次如何合并（见 `DOCUMENT_LOAD_BUDGET_MS`）不应影响最终块树与序列化
+/// 结果；`from_markdown` 参照编辑器提供逐块对照基准。
+fn assert_deferred_load_matches_reference(cx: &mut TestAppContext, markdown: &str) {
+    let (reference, refcx) =
+        cx.add_window_view(|_window, cx| Editor::from_markdown(cx, markdown.to_string(), None));
+    let expected = reference.read_with(refcx, |editor, _cx| editor.document.visible_block_count());
+    let (editor, cx) = cx
+        .add_window_view(|_window, cx| Editor::from_markdown(cx, "placeholder".to_string(), None));
+
+    let markdown = markdown.to_string();
+    cx.update(|_window, cx| {
+        editor.update(cx, |editor, cx| {
+            editor.defer_large_document_load(markdown, None, cx);
+        });
+    });
+    assert!(
+        editor.read_with(cx, |editor, _cx| editor.document_loading),
+        "延迟载入开始后应处于加载态"
+    );
+    // 测试时钟不会自动流逝：推进 100ms 启动延迟并驱动载入循环（预算内一批
+    // 处理完全部剩余批次时只需一个 tick，但仍需再推进一步让循环收尾）。
+    cx.executor().advance_clock(Duration::from_millis(150));
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_millis(50));
+    cx.run_until_parked();
+    redraw(cx);
+
+    editor.read_with(cx, |editor, cx| {
+        assert!(!editor.document_loading, "载入循环结束后不应停留在加载态");
+        assert!(editor.pending_document_load.is_none());
+        assert_eq!(editor.document.visible_block_count(), expected);
+        let serialized = editor.serialized_document_text(cx);
+        let reference_text =
+            reference.read_with(cx, |editor, cx| editor.serialized_document_text(cx));
+        assert_eq!(
+            serialized, reference_text,
+            "延迟载入的序列化结果应与同步构建一致"
+        );
+    });
+}
+
+#[rgpui::test]
+async fn deferred_large_document_load_completes_in_budgeted_chunks(cx: &mut TestAppContext) {
+    init_editor_test_app(cx);
+    // 标题密集：批次边界落在空行上，验证文档开头空行全保留规则不再误用于
+    // 批次首（此前每个批次边界都会多出一个空段落块）。
+    let headings = (0..600)
+        .map(|index| format!("# Section {index}"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    assert_deferred_load_matches_reference(cx, &headings);
+
+    // 列表密集：列表组之间由空行分隔，批次边界可能落在组间空行上；验证跨批
+    // 携带的列表项上下文让分隔空行数量与完整构建一致。
+    let lists = (0..200)
+        .map(|index| format!("- item {index}a\n- item {index}b"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    assert_deferred_load_matches_reference(cx, &lists);
 }
