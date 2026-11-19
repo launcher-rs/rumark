@@ -216,10 +216,15 @@ impl Editor {
             }
         }
 
-        self.footnote_registry = Arc::new(FootnoteRegistry {
+        let next_registry = Arc::new(FootnoteRegistry {
             bindings,
             block_occurrences,
         });
+        // 内容一致时保留旧 Arc：块级运行时同步先按指针短路，指针稳定可让
+        // 万级块文档的全量同步避免逐块深度比较注册表。
+        if self.footnote_registry != next_registry {
+            self.footnote_registry = next_registry;
+        }
     }
 
     /// 重建图片/链接引用定义并同步所有可见块的运行时上下文。
@@ -239,8 +244,16 @@ impl Editor {
         source: &str,
         cx: &mut Context<Self>,
     ) {
-        self.image_reference_definitions = Arc::new(parse_image_reference_definitions(source));
-        self.link_reference_definitions = Arc::new(parse_link_reference_definitions(source));
+        // 内容一致时保留旧 Arc（块级同步按指针短路）；重新解析会分配新的
+        // HashMap，无条件替换会让全量同步退化为逐块深度比较。
+        let image_references = Arc::new(parse_image_reference_definitions(source));
+        if self.image_reference_definitions != image_references {
+            self.image_reference_definitions = image_references;
+        }
+        let link_references = Arc::new(parse_link_reference_definitions(source));
+        if self.link_reference_definitions != link_references {
+            self.link_reference_definitions = link_references;
+        }
         self.sync_runtime_contexts_inner(false, cx);
     }
 
@@ -253,7 +266,7 @@ impl Editor {
     ///
     /// 安静模式只用于大型文档首次载入：整批块尚未挂载，逐步通知没有意义，
     /// 载入完成处已有一次统一通知。
-    fn sync_runtime_contexts_inner(&mut self, notify: bool, cx: &mut Context<Self>) {
+    pub(super) fn sync_runtime_contexts_inner(&mut self, notify: bool, cx: &mut Context<Self>) {
         let base_dir = self.image_base_dir();
         self.rebuild_footnote_registry(cx);
         let visible = self.document.visible_blocks().to_vec();

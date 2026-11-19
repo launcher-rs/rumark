@@ -488,8 +488,10 @@ impl Editor {
                 }
                 self.document.replace_roots(roots, cx);
                 self.view_mode = ViewMode::Rendered;
-                self.rebuild_table_runtimes(cx);
-                self.rebuild_image_runtimes(cx);
+                // 刚重建的块与载入完成时的状态一致：引用定义从源码文本直接
+                // 提取并安静写入（不逐块通知），由本次切换结尾的统一通知重绘。
+                // rebuild_table_runtimes_from_source 内部已调用引用同步。
+                self.rebuild_table_runtimes_from_source(&source, cx);
             }
         }
 

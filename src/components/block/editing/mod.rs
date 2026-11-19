@@ -366,7 +366,11 @@ impl Block {
         if self.image_base_dir != base_dir {
             self.image_base_dir = base_dir;
         }
-        if self.image_reference_definitions != image_reference_definitions {
+        if !Arc::ptr_eq(
+            &self.image_reference_definitions,
+            &image_reference_definitions,
+        ) && self.image_reference_definitions != image_reference_definitions
+        {
             self.image_reference_definitions = image_reference_definitions;
         }
         self.sync_link_reference_definitions(link_reference_definitions);
@@ -611,7 +615,17 @@ impl Block {
         &mut self,
         link_reference_definitions: Arc<LinkReferenceDefinitions>,
     ) {
+        // 先走指针短路：编辑器侧保证内容未变时 Arc 指针稳定，万级块文档的
+        // 全量同步在稳态下都是 O(1)，不做定义表深度比较。
+        if Arc::ptr_eq(
+            &self.link_reference_definitions,
+            &link_reference_definitions,
+        ) {
+            return;
+        }
         if self.link_reference_definitions == link_reference_definitions {
+            // 内容一致但指针不同：收下新 Arc 让指针收敛，后续同步走指针短路。
+            self.link_reference_definitions = link_reference_definitions;
             return;
         }
 
@@ -673,7 +687,12 @@ impl Block {
 
     /// 同步脚注注册表。
     fn sync_footnote_registry(&mut self, footnote_registry: Arc<FootnoteRegistry>) {
+        // 指针短路同链接定义：内容一致时由编辑器侧保留旧 Arc，稳态同步 O(1)。
+        if Arc::ptr_eq(&self.footnote_registry, &footnote_registry) {
+            return;
+        }
         if self.footnote_registry == footnote_registry {
+            self.footnote_registry = footnote_registry;
             return;
         }
 

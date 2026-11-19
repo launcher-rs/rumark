@@ -573,7 +573,7 @@ impl Editor {
     /// 默认大小写不敏感；`match_case` 为真时逐字精确比较。逐字符窗口比较
     /// 天然与 `to_lowercase` 的字节长度变化无关，不会 panic，只做有效边界切片。
     /// `whole_word` 为真时要求匹配两侧均非词字符（字母数字或下划线，含中文）。
-    fn compute_find_matches(
+    pub(super) fn compute_find_matches(
         source: &str,
         query: &str,
         match_case: bool,

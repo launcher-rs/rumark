@@ -656,3 +656,303 @@ async fn chunked_build_matches_full_parse_on_samples(cx: &mut TestAppContext) {
         );
     }
 }
+
+/// 交互路径基线：单字符编辑帧、输入停顿快照刷新、视图切换、查找扫描。
+#[rgpui::test]
+#[ignore = "性能基线：交互路径"]
+async fn large_document_interaction_profile(cx: &mut TestAppContext) {
+    init_perf_app(cx);
+    cx.add_empty_window();
+    for path in bench_files() {
+        if !path.exists() {
+            continue;
+        }
+        let markdown = match super::read_markdown_file(&path) {
+            Ok(text) => text,
+            Err(_) => continue,
+        };
+        let normalized = markdown.replace("\r\n", "\n").replace('\r', "\n");
+        let lines: Vec<String> = normalized.split('\n').map(ToOwned::to_owned).collect();
+        let (editor, cx) = cx.add_window_view(|_window, cx| {
+            Editor::from_markdown(cx, "placeholder".to_string(), None)
+        });
+        let mut roots = Vec::new();
+        let mut pos = 0usize;
+        let mut prev_is_list = false;
+        loop {
+            let (blocks, next) = cx.update(|_window, cx| {
+                editor.update(cx, |_editor, cx| {
+                    Editor::build_root_blocks_chunk(
+                        cx,
+                        &lines,
+                        pos,
+                        super::ROOT_BLOCKS_PER_CHUNK,
+                        prev_is_list,
+                    )
+                })
+            });
+            if let Some(last) = blocks.last() {
+                prev_is_list = cx.read(|app| last.read(app).kind().is_list_item());
+            }
+            roots.extend(blocks);
+            if next >= lines.len() {
+                break;
+            }
+            pos = next;
+        }
+        let source = Arc::from(normalized.as_str());
+        cx.update(|_window, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.document_loading = true;
+                editor.replace_document_from_root_blocks(roots, Some(path.clone()), source, cx);
+            });
+        });
+
+        // 1. 单字符编辑帧：向首个可见块追加一个字符并重绘，重复 10 次。
+        let mut edit_frames = Vec::new();
+        for _round in 0..10 {
+            let t = Instant::now();
+            cx.update(|window, cx| {
+                editor.update(cx, |editor, cx| {
+                    let block = editor
+                        .document
+                        .visible_block_at(0)
+                        .expect("首个可见块应存在");
+                    let version = block.read(cx).record.content_version();
+                    let _ = version;
+                    block.update(cx, |block, _cx| {
+                        let title = block.record.title.clone();
+                        let text = title.plain_text();
+                        block.record.set_title(
+                            crate::components::markdown::inline::InlineTextTree::plain(format!(
+                                "{text}x"
+                            )),
+                        );
+                        block.refresh_render_cache();
+                    });
+                    editor.mark_dirty(cx);
+                });
+                window.draw(cx).clear(cx);
+            });
+            cx.run_until_parked();
+            edit_frames.push(elapsed_ms(t));
+        }
+        let edit_avg = edit_frames.iter().sum::<f64>() / edit_frames.len() as f64;
+        let edit_max = edit_frames.iter().cloned().fold(0.0_f64, f64::max);
+
+        // 2. 输入停顿后的稳定快照刷新（撤销基线 + 选区映射 + 派生缓存）。
+        let t = Instant::now();
+        cx.update(|_window, cx| {
+            editor.update(cx, |editor, cx| editor.refresh_stable_document_snapshot(cx));
+        });
+        let idle_refresh_ms = elapsed_ms(t);
+
+        // 3. 视图切换 Rendered → Source（整篇序列化 + 单块装载）+ 首帧。
+        let t = Instant::now();
+        cx.update(|window, cx| {
+            editor.update(cx, |editor, cx| editor.toggle_view_mode(cx));
+            window.draw(cx).clear(cx);
+        });
+        cx.run_until_parked();
+        let to_source_ms = elapsed_ms(t);
+
+        // 4. 视图切换 Source → Rendered（全量重建）+ 首帧。
+        let t = Instant::now();
+        cx.update(|window, cx| {
+            editor.update(cx, |editor, cx| editor.toggle_view_mode(cx));
+            window.draw(cx).clear(cx);
+        });
+        cx.run_until_parked();
+        let to_rendered_ms = elapsed_ms(t);
+
+        // 5. 查找扫描：对派生文本计算一次常见词命中。
+        let t = Instant::now();
+        let matches = editor.read_with(cx, |editor, cx| {
+            let source = editor.current_document_source_arc(cx);
+            let source = source.to_string();
+            Editor::compute_find_matches(&source, "the", false, false)
+        });
+        let find_ms = elapsed_ms(t);
+
+        eprintln!(
+            "[perf-interact] {}\n  edit_frame avg={:.1}ms max={:.1}ms ({} frames) idle_refresh={:.1}ms\n  toggle_to_source={:.1}ms toggle_to_rendered={:.1}ms find_scan={:.1}ms ({} matches)",
+            path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+            edit_avg,
+            edit_max,
+            edit_frames.len(),
+            idle_refresh_ms,
+            to_source_ms,
+            to_rendered_ms,
+            find_ms,
+            matches.len(),
+        );
+    }
+}
+
+/// 细分探针：Source → Rendered 切换各步骤耗时。
+#[rgpui::test]
+#[ignore = "性能探针：视图切换细分"]
+async fn large_document_view_toggle_breakdown(cx: &mut TestAppContext) {
+    init_perf_app(cx);
+    cx.add_empty_window();
+    for path in bench_files() {
+        if !path.exists() {
+            continue;
+        }
+        let markdown = match super::read_markdown_file(&path) {
+            Ok(text) => text,
+            Err(_) => continue,
+        };
+        let (editor, cx) = cx
+            .add_window_view(|_window, cx| Editor::from_markdown(cx, markdown, Some(path.clone())));
+        // 先进入源码模式（一次完整切换），再逐步细分回渲染模式的每一步。
+        cx.update(|window, cx| {
+            editor.update(cx, |editor, cx| editor.toggle_view_mode(cx));
+            window.draw(cx).clear(cx);
+        });
+        cx.run_until_parked();
+
+        let mut source = String::new();
+        let t = Instant::now();
+        cx.update(|_window, cx| {
+            editor.update(cx, |editor, cx| {
+                source = editor.document.raw_source_text(cx);
+            });
+        });
+        let raw_source_ms = elapsed_ms(t);
+
+        let mut roots = Vec::new();
+        let t = Instant::now();
+        let mut build_stats = (0usize, 0usize, 0.0f64);
+        cx.update(|_window, cx| {
+            editor.update(cx, |_editor, cx| {
+                build_stats = crate::components::take_inline_parse_stats();
+                roots = Editor::build_root_blocks_from_markdown(cx, &source);
+                let after = crate::components::take_inline_parse_stats();
+                build_stats = (
+                    after.0 - build_stats.0,
+                    after.1 - build_stats.1,
+                    after.2 - build_stats.2,
+                );
+            });
+        });
+        let build_ms = elapsed_ms(t);
+        let root_count = roots.len();
+
+        let t = Instant::now();
+        cx.update(|_window, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.document.replace_roots(roots, cx);
+            });
+        });
+        let replace_ms = elapsed_ms(t);
+
+        let t = Instant::now();
+        let mut table_stats = (0usize, 0usize, 0.0f64);
+        cx.update(|_window, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.view_mode = super::ViewMode::Rendered;
+                table_stats = crate::components::take_inline_parse_stats();
+                editor.rebuild_table_runtimes(cx);
+                let after = crate::components::take_inline_parse_stats();
+                table_stats = (
+                    after.0 - table_stats.0,
+                    after.1 - table_stats.1,
+                    after.2 - table_stats.2,
+                );
+            });
+        });
+        let table_ms = elapsed_ms(t);
+
+        let t = Instant::now();
+        let mut image_stats = (0usize, 0usize, 0.0f64);
+        cx.update(|_window, cx| {
+            editor.update(cx, |editor, cx| {
+                image_stats = crate::components::take_inline_parse_stats();
+                editor.rebuild_image_runtimes(cx);
+                let after = crate::components::take_inline_parse_stats();
+                image_stats = (
+                    after.0 - image_stats.0,
+                    after.1 - image_stats.1,
+                    after.2 - image_stats.2,
+                );
+            });
+        });
+        let image_ms = elapsed_ms(t);
+
+        // image 步骤内部细分：derived / 脚注注册表 / 安静同步 / 通知同步。
+        let t = Instant::now();
+        cx.update(|_window, cx| {
+            editor.update(cx, |editor, cx| {
+                let _ = editor.derived_document(cx);
+            });
+        });
+        let image_derived_ms = elapsed_ms(t);
+
+        let t = Instant::now();
+        cx.update(|_window, cx| {
+            editor.update(cx, |editor, cx| editor.rebuild_footnote_registry(cx));
+        });
+        let image_footnote_ms = elapsed_ms(t);
+
+        let t = Instant::now();
+        cx.update(|_window, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.sync_runtime_contexts_inner(false, cx)
+            });
+        });
+        let image_quiet_ms = elapsed_ms(t);
+
+        let t = Instant::now();
+        cx.update(|_window, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.sync_runtime_contexts_inner(true, cx)
+            });
+        });
+        let image_notify_ms = elapsed_ms(t);
+
+        let t = Instant::now();
+        cx.update(|_window, cx| {
+            editor.update(cx, |editor, cx| {
+                let snapshot = editor.capture_source_selection_snapshot(cx);
+                editor.apply_selection_snapshot_in_current_mode(&snapshot, cx);
+            });
+        });
+        let selection_ms = elapsed_ms(t);
+
+        let t = Instant::now();
+        cx.update(|_window, cx| {
+            editor.update(cx, |editor, cx| editor.refresh_stable_document_snapshot(cx));
+        });
+        let snapshot_ms = elapsed_ms(t);
+
+        let t = Instant::now();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        cx.run_until_parked();
+        let frame_ms = elapsed_ms(t);
+
+        eprintln!(
+            "[perf-toggle] {}\n  raw_source={:.1}ms build={:.1}ms(roots={}) replace_roots={:.1}ms\n  table={:.1}ms(inline {}次/{:.1}ms) image={:.1}ms(inline {}次/{:.1}ms)\n  image细分: derived={:.1}ms footnote={:.1}ms quiet={:.1}ms notify={:.1}ms\n  selection={:.1}ms snapshot={:.1}ms frame={:.1}ms",
+            path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+            raw_source_ms,
+            build_ms,
+            root_count,
+            replace_ms,
+            table_ms,
+            table_stats.0,
+            table_stats.2,
+            image_ms,
+            image_stats.0,
+            image_stats.2,
+            image_derived_ms,
+            image_footnote_ms,
+            image_quiet_ms,
+            image_notify_ms,
+            selection_ms,
+            snapshot_ms,
+            frame_ms,
+        );
+    }
+}

@@ -101,6 +101,24 @@ impl Editor {
         }
         let image_references = Arc::new(parse_image_reference_definitions(&markdown));
         let link_references = Arc::new(parse_link_reference_definitions(&markdown));
+        // 定义集合与上次派生内容一致时复用旧 Arc：块级运行时同步按指针短路，
+        // 指针稳定可让万级块文档的全量同步从 O(块数 × 定义数) 降到 O(块数)。
+        // 重新解析会分配新的 HashMap，指针必然不同，不复用就会让每次全量
+        // 同步都退化为逐块深度比较（实测 1,505 条定义 × 万级块 ≈ 3.5 秒）。
+        let cache = self.derive_cache.borrow();
+        let image_references = match cache.as_ref() {
+            Some(cached) if *cached.image_references == *image_references => {
+                cached.image_references.clone()
+            }
+            _ => image_references,
+        };
+        let link_references = match cache.as_ref() {
+            Some(cached) if *cached.link_references == *link_references => {
+                cached.link_references.clone()
+            }
+            _ => link_references,
+        };
+        drop(cache);
         DerivedDocument {
             fingerprint,
             markdown,
