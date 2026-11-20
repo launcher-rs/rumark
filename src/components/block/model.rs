@@ -202,6 +202,15 @@ impl BlockKind {
         matches!(self, Self::Quote | Self::Callout(_))
     }
 
+    /// 列表项标记的正文列宽：`- ` 为 2；`1. ` 为数字位数 + 2（`10. ` 为 4）。
+    /// 嵌套子块的序列化缩进以此为步长（CommonMark：子块需缩进到父项正文列）。
+    pub fn marker_content_columns(&self, ordinal: Option<usize>) -> usize {
+        match self {
+            Self::NumberedListItem => ordinal.unwrap_or(1).to_string().len() + 2,
+            _ => 2,
+        }
+    }
+
     /// 渲染为自包含部件且其后无光标位置的块。在渲染文档末尾需要补一个尾段落，让以渲染为主的用户能继续输入，而不必切到源码模式。
     pub fn is_atomic_block(&self) -> bool {
         matches!(
@@ -490,6 +499,13 @@ pub struct BlockRecord {
     pub raw_fallback: Option<String>,
     /// 是否为链接/图片引用定义块（`[label]: url`）。渲染视图隐藏，源码视图保留。
     pub reference_definition: bool,
+    /// 有序列表项在源码中声明的原始编号（如 `3.`）；交互创建的条目为 `None`，
+    /// 由运行时按组内位置从分组起始号续排（起始号同样取自组内首个条目）。
+    pub list_number: Option<u64>,
+    /// 围栏代码块解析时记录的原文围栏变体（围栏字符与长度，如 `('~', 3)` 代表
+    /// `~~~`）。序列化时在仍能安全闭合的前提下原样保留；交互创建的代码块为
+    /// `None`，按内容重算标准围栏。
+    pub code_fence: Option<(char, usize)>,
     /// 大文档载入时延迟代码高亮：建块阶段不跑 tree-sitter，进入视口时再算。
     pub(crate) defer_code_highlight: bool,
     /// 内容修订号：任何影响序列化结果的变更都递增，供编辑器派生缓存判定失效。
@@ -510,11 +526,22 @@ impl BlockRecord {
             content: Vec::new(),
             raw_fallback: None,
             reference_definition: false,
+            list_number: None,
+            code_fence: None,
             defer_code_highlight: false,
             content_version: 0,
         };
         record.sync_raw_fallback();
         record
+    }
+
+    /// 设置有序列表项的原始编号（仅解析载入路径使用）。
+    pub fn set_list_number(&mut self, number: Option<u64>) {
+        if self.list_number != number {
+            self.list_number = number;
+            self.content_version = self.content_version.wrapping_add(1);
+            crate::components::bump_document_content_epoch();
+        }
     }
 
     /// 创建延迟高亮的代码块记录，用于大文档分批建树。
@@ -649,9 +676,13 @@ impl BlockRecord {
         )
     }
 
-    /// 把块序列化为单行 Markdown，含嵌套缩进与有序列表序号。按原文保留的块在深度为 0 时输出回退文本。
-    pub fn markdown_line(&self, depth: usize, list_ordinal: Option<usize>) -> String {
-        let indentation = "  ".repeat(depth);
+    /// 把块序列化为单行 Markdown，含嵌套缩进与有序列表序号。按原文保留的块在
+    /// 列宽为 0 时输出回退文本。
+    ///
+    /// `indent_columns` 为该块自身行的缩进列数（不是层级数）：列表项子块的
+    /// 步长按父项标记正文列宽累计（见 [`BlockKind::marker_content_columns`]）。
+    pub fn markdown_line(&self, indent_columns: usize, list_ordinal: Option<usize>) -> String {
+        let indentation = " ".repeat(indent_columns);
         let title_to_markdown = self.title_markdown_for_output();
         match self.kind {
             BlockKind::Paragraph => indent_multiline(
@@ -676,7 +707,12 @@ impl BlockRecord {
                 &format!("{indentation}      "),
             ),
             BlockKind::NumberedListItem => {
-                let ordinal = list_ordinal.unwrap_or(1);
+                // 运行时序号（含分组起始号）优先；直连序列化（如复制回退）退回
+                // 解析时捕获的原始编号，再退到 1。
+                let ordinal = list_ordinal
+                    .map(|value| value as u64)
+                    .or(self.list_number)
+                    .unwrap_or(1);
                 prefixed_multiline(
                     &title_to_markdown,
                     &format!("{indentation}{ordinal}. "),
@@ -702,7 +738,7 @@ impl BlockRecord {
             | BlockKind::HtmlBlock
             | BlockKind::MathBlock
             | BlockKind::MermaidBlock => {
-                if depth == 0 {
+                if indent_columns == 0 {
                     self.raw_fallback.clone().unwrap_or(title_to_markdown)
                 } else {
                     indent_multiline(
@@ -989,6 +1025,28 @@ mod tests {
     }
 
     #[test]
+    fn marker_content_columns_follow_ordinal_width() {
+        assert_eq!(BlockKind::BulletedListItem.marker_content_columns(None), 2);
+        assert_eq!(
+            BlockKind::TaskListItem { checked: false }.marker_content_columns(None),
+            2
+        );
+        assert_eq!(
+            BlockKind::NumberedListItem.marker_content_columns(Some(1)),
+            3
+        );
+        assert_eq!(
+            BlockKind::NumberedListItem.marker_content_columns(Some(9)),
+            3
+        );
+        assert_eq!(
+            BlockKind::NumberedListItem.marker_content_columns(Some(10)),
+            4
+        );
+        assert_eq!(BlockKind::Paragraph.marker_content_columns(None), 2);
+    }
+
+    #[test]
     fn mermaid_record_edits_body_and_rebuilds_fence() {
         let record = BlockRecord::mermaid("```mermaid\nflowchart LR\nA --> B\n```");
         // title 只存正文，未编辑时序列化原样保留围栏原文。
@@ -1195,17 +1253,17 @@ mod tests {
         let comment = BlockRecord::comment("<!--\ncomment\n-->");
 
         assert_eq!(list.markdown_line(0, None), "- *item*");
-        assert_eq!(list.markdown_line(2, None), "    - *item*");
+        assert_eq!(list.markdown_line(4, None), "    - *item*");
         assert_eq!(task.markdown_line(0, None), "- [x] done");
-        assert_eq!(task.markdown_line(2, None), "    - [x] done");
+        assert_eq!(task.markdown_line(4, None), "    - [x] done");
         assert_eq!(numbered.markdown_line(0, Some(3)), "3. step");
-        assert_eq!(numbered.markdown_line(2, Some(12)), "    12. step");
+        assert_eq!(numbered.markdown_line(4, Some(12)), "    12. step");
         assert_eq!(heading.markdown_line(0, None), "## **title**");
         assert_eq!(quote.markdown_line(0, None), "> quoted text");
-        assert_eq!(quote.markdown_line(2, None), "    > quoted text");
-        assert_eq!(paragraph.markdown_line(1, None), "  plain");
+        assert_eq!(quote.markdown_line(4, None), "    > quoted text");
+        assert_eq!(paragraph.markdown_line(2, None), "  plain");
         assert_eq!(comment.markdown_line(0, None), "<!--\ncomment\n-->");
-        assert_eq!(comment.markdown_line(1, None), "  <!--\n  comment\n  -->");
+        assert_eq!(comment.markdown_line(2, None), "  <!--\n  comment\n  -->");
     }
 
     #[test]

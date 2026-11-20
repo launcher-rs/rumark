@@ -37,11 +37,11 @@ pub(crate) fn render_docx_bytes(
 ) -> anyhow::Result<Vec<u8>> {
     let blocks = parse_blocks(markdown);
     let headings = collect_headings(&blocks);
+    // 有序列表不再共用一个编号实例：每个列表在渲染时注册独立的抽象编号
+    // （起始号取列表声明的 `start`），否则 Word 会把多个列表接续编号。
     let mut doc = Docx::new()
         .add_abstract_numbering(bullet_abstract_numbering())
-        .add_abstract_numbering(decimal_abstract_numbering())
-        .add_numbering(Numbering::new(BULLET_ABSTRACT_ID, BULLET_ABSTRACT_ID))
-        .add_numbering(Numbering::new(DECIMAL_ABSTRACT_ID, DECIMAL_ABSTRACT_ID));
+        .add_numbering(Numbering::new(BULLET_ABSTRACT_ID, BULLET_ABSTRACT_ID));
     if options.include_toc && !headings.is_empty() {
         doc = doc
             .add_paragraph(Paragraph::new().style("Heading1").add_run(body_run("目录")))
@@ -55,6 +55,8 @@ pub(crate) fn render_docx_bytes(
     let mut writer = DocxWriter {
         depth: 0,
         base_dir: options.base_dir.clone(),
+        next_ordered_list_index: 0,
+        ordered_numbering_stack: Vec::new(),
     };
     for block in &blocks {
         doc = writer.push_block(doc, block);
@@ -86,13 +88,16 @@ fn bullet_abstract_numbering() -> AbstractNumbering {
 }
 
 /// 有序列表编号定义（9 级，十进制 `1.` 样式）。
-fn decimal_abstract_numbering() -> AbstractNumbering {
-    let mut numbering = AbstractNumbering::new(DECIMAL_ABSTRACT_ID);
+///
+/// 每个有序列表独立一组：`abstract_id` 唯一，顶层起始号取列表声明的
+/// `start`，子层级仍从 1 起排。
+fn decimal_abstract_numbering(abstract_id: usize, start: u64) -> AbstractNumbering {
+    let mut numbering = AbstractNumbering::new(abstract_id);
     for level in 0..9 {
         numbering = numbering.add_level(
             Level::new(
                 level,
-                Start::new(1),
+                Start::new(if level == 0 { start as usize } else { 1 }),
                 NumberFormat::new("decimal"),
                 LevelText::new("%1."),
                 LevelJc::new("left"),
@@ -141,6 +146,11 @@ fn mono_run(text: &str) -> Run {
 struct DocxWriter {
     depth: u32,
     base_dir: Option<PathBuf>,
+    /// 下一个有序列表的编号定义下标（每个列表一组独立的抽象/具体编号）。
+    next_ordered_list_index: usize,
+    /// 当前渲染中的有序列表编号 id 栈：嵌套列表进入时压栈、退出时弹栈，
+    /// 外层列表的后续条目继续引用自己的编号定义。
+    ordered_numbering_stack: Vec<usize>,
 }
 
 impl DocxWriter {
@@ -217,10 +227,28 @@ impl DocxWriter {
                 self.depth -= 1;
                 doc
             }
-            Block::List { ordered, items, .. } => {
+            Block::List {
+                ordered,
+                start,
+                items,
+            } => {
                 let mut doc = doc;
+                if *ordered {
+                    // 每个有序列表注册一组独立编号（起始号取列表声明的 start），
+                    // 避免多个列表在 Word 中接续编号；嵌套列表压栈/弹栈，
+                    // 外层列表的后续条目继续引用自己的编号定义。
+                    let abstract_id = DECIMAL_ABSTRACT_ID + 1 + self.next_ordered_list_index;
+                    self.next_ordered_list_index += 1;
+                    doc = doc
+                        .add_abstract_numbering(decimal_abstract_numbering(abstract_id, *start))
+                        .add_numbering(Numbering::new(abstract_id, abstract_id));
+                    self.ordered_numbering_stack.push(abstract_id);
+                }
                 for item in items {
                     doc = self.push_list_item(doc, *ordered, item);
+                }
+                if *ordered {
+                    self.ordered_numbering_stack.pop();
                 }
                 doc
             }
@@ -287,7 +315,13 @@ impl DocxWriter {
             match block {
                 Block::Paragraph(inline) => {
                     let numbering = if ordered {
-                        NumberingId::new(DECIMAL_ABSTRACT_ID)
+                        // 有序列表条目引用当前列表自己的编号定义（见 List 分支）。
+                        let list_numbering_id = self
+                            .ordered_numbering_stack
+                            .last()
+                            .copied()
+                            .expect("有序列表条目渲染时编号定义应已注册");
+                        NumberingId::new(list_numbering_id)
                     } else {
                         NumberingId::new(BULLET_ABSTRACT_ID)
                     };
@@ -658,7 +692,7 @@ mod tests {
 
     #[test]
     fn docx_document_xml_carries_headings_lists_and_toc() {
-        let markdown = "# 一级标题\n\n正文**加粗**。\n\n- 甲\n- 乙\n";
+        let markdown = "# 一级标题\n\n正文**加粗**。\n\n- 甲\n- 乙\n\n3. 丙\n4. 丁\n";
         let bytes = render_docx_bytes(markdown, &test_options()).expect("渲染成功");
         let document = unpack_docx_part(&bytes, "word/document.xml");
         assert!(document.contains("一级标题"), "标题文本落盘");
@@ -670,9 +704,17 @@ mod tests {
             "目录域"
         );
         let numbering = unpack_docx_part(&bytes, "word/numbering.xml");
+        assert!(numbering.contains("101"), "无序列表编号定义");
+        // 有序列表按列表注册独立编号定义（首个列表 id = 103），起始号 3 落盘，
+        // 避免 Word 把多个列表接续编号。
+        assert!(numbering.contains("103"), "有序列表独立编号定义");
         assert!(
-            numbering.contains("101") && numbering.contains("102"),
-            "无序/有序编号定义"
+            numbering.contains("w:start w:val=\"3\""),
+            "有序列表起始号落盘：{numbering}"
+        );
+        assert!(
+            document.contains("\"103\""),
+            "有序列表引用独立编号：{document}"
         );
     }
 }

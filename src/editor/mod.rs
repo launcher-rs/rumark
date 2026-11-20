@@ -187,6 +187,9 @@ pub struct Editor {
     snapshot_refresh_task: Option<Task<()>>,
     last_document_edit: Option<Instant>,
     history_restore_in_progress: bool,
+    /// 上次为引用相关块重建树元数据时的树修订号：纯文本编辑不改变引用元数据
+    /// （深度/锚点来自树结构），修订号未变时跳过每键全树重建。
+    quote_metadata_revision: u64,
     image_reference_definitions: Arc<ImageReferenceDefinitions>,
     link_reference_definitions: Arc<LinkReferenceDefinitions>,
     footnote_registry: Arc<FootnoteRegistry>,
@@ -432,6 +435,7 @@ impl Editor {
             snapshot_refresh_task: None,
             last_document_edit: None,
             history_restore_in_progress: false,
+            quote_metadata_revision: 0,
             image_reference_definitions: Arc::default(),
             link_reference_definitions: Arc::default(),
             footnote_registry: Arc::default(),

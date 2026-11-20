@@ -49,6 +49,9 @@ impl VisibleTreeSnapshot {
 #[derive(Clone, Copy)]
 struct InheritedBlockContext {
     list_depth: usize,
+    /// 该层子块行的序列化缩进列数：列表项按自身标记正文列宽累计
+    /// （`1. ` 为 3），引用/提示框内部不再累计（由 `> ` 前缀承担）。
+    source_indent_columns: usize,
     quote_depth: usize,
     quote_group_anchor: Option<uuid::Uuid>,
     visible_quote_group_anchor: Option<uuid::Uuid>,
@@ -63,6 +66,7 @@ impl InheritedBlockContext {
     fn root() -> Self {
         Self {
             list_depth: 0,
+            source_indent_columns: 0,
             quote_depth: 0,
             quote_group_anchor: None,
             visible_quote_group_anchor: None,
@@ -363,15 +367,22 @@ impl DocumentTree {
                 },
             );
 
-            let (block_id, kind, children, is_empty_paragraph) = {
+            let (block_id, kind, children, is_empty_paragraph, affects_global_references) = {
                 let block_ref = block.read(cx);
+                let plain = block_ref.record.title.plain_text();
                 (
                     block_ref.record.id,
                     block_ref.kind(),
                     block_ref.children.clone(),
                     block_ref.kind() == BlockKind::Paragraph
-                        && block_ref.record.title.plain_text().is_empty()
+                        && plain.is_empty()
                         && block_ref.children.is_empty(),
+                    // 引用定义/脚注语法标志随每次树同步刷新：撤销恢复、载入等
+                    // 路径重建的块由此获得准确初值，编辑器据此决定是否重建
+                    // 全局引用集合（events.rs 的 Changed 分支）。
+                    block_ref.kind() == BlockKind::FootnoteDefinition
+                        || plain.contains("]:")
+                        || plain.contains("[^"),
                 )
             };
             let parent_is_list_item = parent_entity
@@ -383,7 +394,19 @@ impl DocumentTree {
                 .map(|child| child.read(cx).record.id)
                 .collect::<Vec<_>>();
             let list_ordinal = if kind.is_numbered_list_item() {
-                numbered_list_ordinal += 1;
+                if numbered_list_ordinal == 0 {
+                    // 新分组：起始号取组内首个条目解析出的原始编号（`3. a` 从 3
+                    // 起排）；交互创建的条目没有原始编号，从 1 起排。组内后续
+                    // 条目按位置续排（CommonMark 只承认首项起始号）。
+                    numbered_list_ordinal = block
+                        .read(cx)
+                        .record
+                        .list_number
+                        .map(|number| number as usize)
+                        .unwrap_or(1);
+                } else {
+                    numbered_list_ordinal += 1;
+                }
                 Some(numbered_list_ordinal)
             } else {
                 numbered_list_ordinal = 0;
@@ -423,12 +446,24 @@ impl DocumentTree {
                 inherited.footnote_anchor
             };
             let child_list_depth = inherited.list_depth + usize::from(kind.is_list_item());
+            // 子块行的缩进列宽：列表项按自身标记正文列宽累计（`1. ` 为 3，
+            // CommonMark 子块缩进语义）；引用/提示框内部不累计，`> ` 前缀已承担
+            // 嵌套层级（与序列化 quote 分支的深度归零约定一致）。
+            let child_source_indent_columns = if kind.is_quote_container() {
+                inherited.source_indent_columns
+            } else if kind.is_footnote_definition() {
+                inherited.source_indent_columns + 4
+            } else {
+                inherited.source_indent_columns
+                    + kind.marker_content_columns(list_ordinal) * usize::from(kind.is_list_item())
+            };
             let list_group_separator_candidate = is_empty_paragraph && previous_was_list_item;
 
             block.update(cx, move |block, _cx| {
                 block.record.parent = parent_id;
                 block.record.content = content.clone();
                 block.render_depth = inherited.list_depth;
+                block.source_indent_columns = inherited.source_indent_columns;
                 block.quote_depth = quote_depth;
                 block.quote_group_anchor = quote_group_anchor;
                 block.visible_quote_depth = visible_quote_depth;
@@ -439,6 +474,7 @@ impl DocumentTree {
                 block.footnote_anchor = footnote_anchor;
                 block.parent_is_list_item = parent_is_list_item;
                 block.list_ordinal = list_ordinal;
+                block.may_affect_global_references = affects_global_references;
                 block.list_group_separator_candidate = list_group_separator_candidate;
             });
 
@@ -451,6 +487,7 @@ impl DocumentTree {
                     Some(block_id),
                     &InheritedBlockContext {
                         list_depth: child_list_depth,
+                        source_indent_columns: child_source_indent_columns,
                         quote_depth,
                         quote_group_anchor,
                         visible_quote_group_anchor: child_visible_quote_group_anchor,
@@ -524,9 +561,13 @@ impl DocumentTree {
     }
 
     /// 收集单个块及其子块的 Markdown 行。
+    ///
+    /// `indent_columns` 为该块自身行的缩进列数（非层级数）：列表项子块按父项
+    /// 标记正文列宽累计（`1. ` 为 3），引用/提示框内部归零由 `> ` 前缀承担。
+    /// 与 `source_map.rs` 的映射遍历、`selection.rs` 的复制回退共用同一约定。
     fn collect_single_block_markdown_lines(
         block_ref: &Block,
-        list_depth: usize,
+        indent_columns: usize,
         cx: &App,
         lines: &mut Vec<String>,
     ) {
@@ -535,7 +576,7 @@ impl DocumentTree {
                 if let Some(table) = block_ref.record.table.as_ref() {
                     // 与代码块、Raw 分支一致：嵌套在列表项里的表格行也要带缩进，
                     // 否则产物会脱离列表（且与源码映射的前缀长度不一致）。
-                    let indentation = "  ".repeat(list_depth);
+                    let indentation = " ".repeat(indent_columns);
                     for line in table_to_markdown_lines(table) {
                         if indentation.is_empty() {
                             lines.push(line);
@@ -546,11 +587,12 @@ impl DocumentTree {
                 }
             }
             BlockKind::CodeBlock { language } => {
-                let indentation = "  ".repeat(list_depth);
+                let indentation = " ".repeat(indent_columns);
                 let lang_str = language.as_ref().map(|s| s.as_ref()).unwrap_or("");
-                let fence = super::persistence::safe_code_fence_with_info(
+                let fence = super::persistence::code_fence_markdown(
                     &block_ref.record.title.plain_text(),
                     language.as_ref().map(|language| language.as_ref()),
+                    block_ref.record.code_fence,
                 );
                 lines.push(format!("{indentation}{fence}{lang_str}"));
                 let content = block_ref.record.title.plain_text();
@@ -562,7 +604,7 @@ impl DocumentTree {
             BlockKind::Quote => {
                 let title_to_markdown =
                     CalloutVariant::escape_quote_header(&block_ref.record.title_to_markdown());
-                let indentation = "  ".repeat(list_depth);
+                let indentation = " ".repeat(indent_columns);
                 if !title_to_markdown.is_empty() || block_ref.children.is_empty() {
                     for line in title_to_markdown.split('\n') {
                         lines.push(format!("{indentation}> {line}"));
@@ -589,7 +631,7 @@ impl DocumentTree {
                 }
             }
             BlockKind::Callout(variant) => {
-                let indentation = "  ".repeat(list_depth);
+                let indentation = " ".repeat(indent_columns);
                 lines.push(format!(
                     "{indentation}> {}",
                     variant.heading_markdown(&block_ref.record.title_to_markdown())
@@ -612,7 +654,7 @@ impl DocumentTree {
                 }
             }
             BlockKind::FootnoteDefinition => {
-                let indentation = "  ".repeat(list_depth);
+                let indentation = " ".repeat(indent_columns);
                 let id = block_ref.record.title.plain_text();
                 if block_ref.children.is_empty() {
                     lines.push(format!("{indentation}[^{}]:", id));
@@ -636,11 +678,11 @@ impl DocumentTree {
 
                     if block_ref.children.len() > 1 {
                         lines.push(String::new());
-                        Self::collect_markdown_lines(&block_ref.children[1..], 2, cx, lines, true);
+                        Self::collect_markdown_lines(&block_ref.children[1..], 4, cx, lines, true);
                     }
                 } else {
                     lines.push(format!("{indentation}[^{}]:", id));
-                    Self::collect_markdown_lines(&block_ref.children, 2, cx, lines, true);
+                    Self::collect_markdown_lines(&block_ref.children, 4, cx, lines, true);
                 }
             }
             BlockKind::RawMarkdown
@@ -648,7 +690,7 @@ impl DocumentTree {
             | BlockKind::HtmlBlock
             | BlockKind::MathBlock
             | BlockKind::MermaidBlock => {
-                let indentation = "  ".repeat(list_depth);
+                let indentation = " ".repeat(indent_columns);
                 let raw_markdown = block_ref
                     .record
                     .raw_fallback
@@ -668,9 +710,14 @@ impl DocumentTree {
                 lines.push(
                     block_ref
                         .record
-                        .markdown_line(list_depth, block_ref.list_ordinal),
+                        .markdown_line(indent_columns, block_ref.list_ordinal),
                 );
-                let child_list_depth = list_depth + 1;
+                // 子块缩进到本项正文列：`- ` 为 2 列，`1. ` 为 3 列、`10. ` 为 4 列
+                // （CommonMark 子块缩进语义，跨渲染器结构一致）。
+                let child_indent_columns = indent_columns
+                    + block_ref
+                        .kind()
+                        .marker_content_columns(block_ref.list_ordinal);
                 for child in &block_ref.children {
                     let child_ref = child.read(cx);
                     if Self::list_child_requires_leading_blank_line(child_ref) {
@@ -678,7 +725,7 @@ impl DocumentTree {
                     }
                     Self::collect_single_block_markdown_lines(
                         child_ref,
-                        child_list_depth,
+                        child_indent_columns,
                         cx,
                         lines,
                     );
@@ -688,12 +735,16 @@ impl DocumentTree {
                 lines.push(
                     block_ref
                         .record
-                        .markdown_line(list_depth, block_ref.list_ordinal),
+                        .markdown_line(indent_columns, block_ref.list_ordinal),
                 );
-                let child_list_depth = list_depth + usize::from(block_ref.kind().is_list_item());
+                let child_indent_columns = indent_columns
+                    + block_ref
+                        .kind()
+                        .marker_content_columns(block_ref.list_ordinal)
+                        * usize::from(block_ref.kind().is_list_item());
                 Self::collect_markdown_lines(
                     &block_ref.children,
-                    child_list_depth,
+                    child_indent_columns,
                     cx,
                     lines,
                     false,
@@ -715,7 +766,7 @@ impl DocumentTree {
     /// 收集一批兄弟块的 Markdown 行（可选兄弟间空行）。
     fn collect_markdown_lines(
         blocks: &[Entity<Block>],
-        depth: usize,
+        indent_columns: usize,
         cx: &App,
         lines: &mut Vec<String>,
         blank_line_between_siblings: bool,
@@ -733,7 +784,7 @@ impl DocumentTree {
             first = false;
 
             let block_ref = block.read(cx);
-            Self::collect_single_block_markdown_lines(block_ref, depth, cx, lines);
+            Self::collect_single_block_markdown_lines(block_ref, indent_columns, cx, lines);
             previous_was_list_item = current_is_list_item;
         }
     }

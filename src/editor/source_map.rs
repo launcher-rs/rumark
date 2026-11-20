@@ -70,14 +70,19 @@ impl Editor {
     }
 
     /// 为代码块内容构建源码映射（含围栏与缩进）。
+    ///
+    /// `variant` 为解析时记录的原文围栏变体，与序列化（tree.rs）取同一
+    /// 围栏计算入口，保证映射与逐行输出逐字一致。
     pub(super) fn build_code_block_content_mapping(
         content: &str,
         indentation: &str,
         language: Option<&SharedString>,
+        variant: Option<(char, usize)>,
     ) -> (String, Vec<usize>, Vec<usize>) {
-        let fence = self::persistence::safe_code_fence_with_info(
+        let fence = self::persistence::code_fence_markdown(
             content,
             language.map(|language| language.as_ref()),
+            variant,
         );
         let fence_open = match language {
             Some(language) => format!("{fence}{language}"),
@@ -140,6 +145,26 @@ impl Editor {
         source_to_content.resize(full.len() + 1, content.len());
         source_to_content[full.len()] = content.len();
 
+        (full, content_to_source, source_to_content)
+    }
+
+    /// 两行形式空围栏（` ```mermaid\n``` `，开闭围栏之间无正文行）的源码映射：
+    /// 只有开围栏行与闭围栏行，长度与序列化严格一致。
+    fn build_empty_fence_mapping(
+        indentation: &str,
+        fence_open: &str,
+        fence_close: &str,
+    ) -> (String, Vec<usize>, Vec<usize>) {
+        let mut full = String::new();
+        full.push_str(indentation);
+        full.push_str(fence_open);
+        full.push('\n');
+        // 正文为空：唯一内容偏移 0 落在闭围栏行首（编辑光标的自然落点）。
+        let content_at = full.len();
+        full.push_str(indentation);
+        full.push_str(fence_close);
+        let content_to_source = vec![content_at];
+        let source_to_content = vec![0; full.len() + 1];
         (full, content_to_source, source_to_content)
     }
 
@@ -252,7 +277,7 @@ impl Editor {
                 if block_ref.render_depth == 0 {
                     String::new()
                 } else {
-                    "  ".repeat(block_ref.render_depth)
+                    " ".repeat(block_ref.source_indent_columns)
                 },
             )
         };
@@ -283,20 +308,26 @@ impl Editor {
         mappings: &mut Vec<SourceMapEntry>,
         cx: &App,
     ) -> usize {
-        let (language, indentation, content) = {
+        let (language, indentation, content, fence_variant) = {
             let block_ref = block.read(cx);
             (
                 match block_ref.kind() {
                     BlockKind::CodeBlock { language } => language.clone(),
                     _ => None,
                 },
-                "  ".repeat(block_ref.render_depth),
+                " ".repeat(block_ref.source_indent_columns),
                 block_ref.rendered_text().to_string(),
+                block_ref.record.code_fence,
             )
         };
 
         let (full_text, content_to_source, source_to_content) =
-            Self::build_code_block_content_mapping(&content, &indentation, language.as_ref());
+            Self::build_code_block_content_mapping(
+                &content,
+                &indentation,
+                language.as_ref(),
+                fence_variant,
+            );
         let (full_text, content_to_source, source_to_content) =
             Self::wrap_source_mapping_with_quotes(
                 full_text,
@@ -315,8 +346,8 @@ impl Editor {
 
     /// 记录 Mermaid 块的源码映射并返回其源码长度。
     /// 编辑正文不含围栏，序列化输出是 raw_fallback 的围栏原文，
-    /// 映射须与 `tree.rs` 逐行输出一致：起止围栏行取自 raw_fallback 首末行，
-    /// 正文按渲染深度逐行缩进（与 `markdown_line` 的 `indent_multiline` 一致）。
+    /// 映射须与 `tree.rs` 逐行输出一致：起止围栏行与正文行都取自 raw_fallback
+    /// 的实际行结构，正文按渲染深度逐行缩进（与 `markdown_line` 一致）。
     pub(super) fn push_mermaid_block_mapping(
         &self,
         block: &Entity<Block>,
@@ -325,29 +356,38 @@ impl Editor {
         mappings: &mut Vec<SourceMapEntry>,
         cx: &App,
     ) -> usize {
-        let (content, indentation, fence_open, fence_close) = {
+        let (full_text, content_to_source, source_to_content) = {
             let block_ref = block.read(cx);
             let raw = block_ref.record.raw_fallback.clone().unwrap_or_default();
-            let (fence_open, fence_close) =
-                match crate::components::parse_mermaid_fence_source(&raw) {
-                    Some(_) => (
-                        raw.split('\n').next().unwrap_or("```mermaid").to_string(),
-                        raw.split('\n').next_back().unwrap_or("```").to_string(),
-                    ),
-                    // raw_fallback 理论上总是围栏原文（构造与 sync 保证），
-                    // 防御性回退到标准围栏。
-                    None => ("```mermaid".to_string(), "```".to_string()),
-                };
-            (
-                block_ref.rendered_text().to_string(),
-                "  ".repeat(block_ref.render_depth),
-                fence_open,
-                fence_close,
-            )
+            let indentation = " ".repeat(block_ref.source_indent_columns);
+            match crate::components::parse_mermaid_fence_source(&raw) {
+                Some(source) => {
+                    let fence_open = raw.split('\n').next().unwrap_or("```mermaid").to_string();
+                    let fence_close = raw.split('\n').next_back().unwrap_or("```").to_string();
+                    // 序列化逐行输出 raw_fallback，映射必须镜像同一行结构。
+                    // 两行形式的空图（` ```mermaid\n``` `）没有正文行，不能走
+                    // build_fenced_content_mapping——它会恒定补一行正文，使映射
+                    // 比序列化长，后续所有块的偏移整体漂移。
+                    if raw.split('\n').count() > 2 {
+                        Self::build_fenced_content_mapping(
+                            &source.body,
+                            &indentation,
+                            &fence_open,
+                            &fence_close,
+                        )
+                    } else {
+                        Self::build_empty_fence_mapping(&indentation, &fence_open, &fence_close)
+                    }
+                }
+                // raw_fallback 理论上总是围栏原文（构造与 sync 保证），防御性
+                // 回退到编辑文本与标准三行围栏（与重建路径结构一致）。
+                None => {
+                    let content = block_ref.rendered_text().to_string();
+                    Self::build_fenced_content_mapping(&content, &indentation, "```mermaid", "```")
+                }
+            }
         };
 
-        let (full_text, content_to_source, source_to_content) =
-            Self::build_fenced_content_mapping(&content, &indentation, &fence_open, &fence_close);
         let (full_text, content_to_source, source_to_content) =
             Self::wrap_source_mapping_with_quotes(
                 full_text,
@@ -398,7 +438,7 @@ impl Editor {
     pub(super) fn push_table_mappings(
         &self,
         block: &Entity<Block>,
-        list_depth: usize,
+        indent_columns: usize,
         quote_depth: usize,
         absolute_start: usize,
         mappings: &mut Vec<SourceMapEntry>,
@@ -412,7 +452,7 @@ impl Editor {
         };
 
         let lines = crate::components::table_to_markdown_lines(&table);
-        let indentation = "  ".repeat(list_depth);
+        let indentation = " ".repeat(indent_columns);
         let quote_prefix = "> ".repeat(quote_depth);
         let line_prefix_len = indentation.len() + quote_prefix.len();
         let mut line_start = absolute_start;
@@ -481,7 +521,7 @@ impl Editor {
     pub(super) fn collect_single_block_source_mappings(
         &self,
         block: &Entity<Block>,
-        list_depth: usize,
+        indent_columns: usize,
         quote_depth: usize,
         absolute_start: usize,
         mappings: &mut Vec<SourceMapEntry>,
@@ -514,7 +554,7 @@ impl Editor {
         let own_len = match kind {
             BlockKind::Table => self.push_table_mappings(
                 block,
-                list_depth,
+                indent_columns,
                 quote_depth,
                 absolute_start,
                 mappings,
@@ -536,7 +576,7 @@ impl Editor {
                 let line = block
                     .read(cx)
                     .record
-                    .markdown_line(list_depth, list_ordinal);
+                    .markdown_line(indent_columns, list_ordinal);
                 if quote_depth == 0 {
                     line.len()
                 } else {
@@ -553,14 +593,18 @@ impl Editor {
             BlockKind::Heading { level } => self.push_inline_block_mapping(
                 block,
                 title.expect("heading title").markdown().to_string(),
-                format!("{}{} ", "  ".repeat(list_depth), "#".repeat(level as usize)),
+                format!(
+                    "{}{} ",
+                    " ".repeat(indent_columns),
+                    "#".repeat(level as usize)
+                ),
                 String::new(),
                 quote_depth,
                 absolute_start,
                 mappings,
             ),
             BlockKind::Paragraph => {
-                let indentation = "  ".repeat(list_depth);
+                let indentation = " ".repeat(indent_columns);
                 self.push_inline_block_mapping(
                     block,
                     title.expect("paragraph title").markdown().to_string(),
@@ -572,7 +616,7 @@ impl Editor {
                 )
             }
             BlockKind::BulletedListItem => {
-                let indentation = "  ".repeat(list_depth);
+                let indentation = " ".repeat(indent_columns);
                 self.push_inline_block_mapping(
                     block,
                     title.expect("bullet title").markdown().to_string(),
@@ -584,7 +628,7 @@ impl Editor {
                 )
             }
             BlockKind::TaskListItem { checked } => {
-                let indentation = "  ".repeat(list_depth);
+                let indentation = " ".repeat(indent_columns);
                 self.push_inline_block_mapping(
                     block,
                     title.expect("task title").markdown().to_string(),
@@ -596,7 +640,7 @@ impl Editor {
                 )
             }
             BlockKind::NumberedListItem => {
-                let indentation = "  ".repeat(list_depth);
+                let indentation = " ".repeat(indent_columns);
                 let ordinal = list_ordinal.unwrap_or(1);
                 self.push_inline_block_mapping(
                     block,
@@ -615,7 +659,7 @@ impl Editor {
                 } else {
                     // 引用行的真实前缀是「列表缩进 + `> `」；`push_inline_block_mapping`
                     // 把 `> ` 包在缩进外侧，两者长度相加与原行一致，映射偏移才对齐。
-                    let indentation = "  ".repeat(list_depth);
+                    let indentation = " ".repeat(indent_columns);
                     self.push_inline_block_mapping(
                         block,
                         title,
@@ -629,7 +673,7 @@ impl Editor {
             }
             BlockKind::Callout(variant) => {
                 let title_to_markdown = title.expect("callout title").markdown().to_string();
-                let indentation = "  ".repeat(list_depth);
+                let indentation = " ".repeat(indent_columns);
                 if title_to_markdown.is_empty() {
                     let head = format!("{indentation}[!{}]", variant.marker());
                     let full_text = Self::wrap_source_mapping_with_quotes(
@@ -668,7 +712,7 @@ impl Editor {
                     block,
                     &footnote_id,
                     first_is_paragraph,
-                    &"  ".repeat(list_depth),
+                    &" ".repeat(indent_columns),
                     quote_depth,
                     absolute_start,
                     mappings,
@@ -686,7 +730,7 @@ impl Editor {
                 // 否则整块复制会把头行算两遍；首行接在头行同一行上、自身不带
                 // 前缀，续行前缀才是「列表缩进 + `> `×引用层数 + 4 空格」
                 // （与 tree.rs 脚注分支逐行输出一致），故不用逐行引用包裹。
-                let mut continuation = "  ".repeat(list_depth);
+                let mut continuation = " ".repeat(indent_columns);
                 continuation.push_str(&"> ".repeat(quote_depth));
                 continuation.push_str("    ");
                 total_len += self.push_inline_block_mapping(
@@ -715,7 +759,7 @@ impl Editor {
             // 脚注头行与其后子块之间的空行落在引用/列表容器内时同样带容器
             // 逐行前缀（tree.rs 只 push 空串，前缀由外层引用补齐），只按一个
             // 换行记长会让其后所有块的映射整体前移。
-            let blank_line_prefix = "  ".repeat(list_depth) + &"> ".repeat(quote_depth);
+            let blank_line_prefix = " ".repeat(indent_columns) + &"> ".repeat(quote_depth);
             for child in children.iter().skip(child_index) {
                 let current_kind = child.read(cx).kind();
                 if total_len > 0 {
@@ -730,7 +774,7 @@ impl Editor {
                 }
                 total_len += self.collect_single_block_source_mappings(
                     child,
-                    list_depth + 2,
+                    indent_columns + 4,
                     quote_depth,
                     absolute_start + total_len,
                     mappings,
@@ -746,10 +790,13 @@ impl Editor {
             return total_len;
         }
 
-        let child_list_depth = list_depth + usize::from(kind.is_list_item());
+        // 子块缩进列宽与 tree.rs 序列化一致：列表项按标记正文列宽累计，
+        // 其余容器不累计（引用/提示框的 `> ` 前缀由 quote_depth 单独承担）。
+        let child_indent_columns = indent_columns
+            + kind.marker_content_columns(list_ordinal) * usize::from(kind.is_list_item());
         let child_quote_depth = quote_depth + usize::from(kind.is_quote_container());
         // 同理：子块前的空行若落在引用/列表容器内，需要加上容器逐行前缀。
-        let blank_line_prefix = "  ".repeat(list_depth) + &"> ".repeat(quote_depth);
+        let blank_line_prefix = " ".repeat(indent_columns) + &"> ".repeat(quote_depth);
         let mut total_len = own_len;
         for child in children {
             if total_len > 0 {
@@ -767,7 +814,7 @@ impl Editor {
             }
             total_len += self.collect_single_block_source_mappings(
                 &child,
-                child_list_depth,
+                child_indent_columns,
                 child_quote_depth,
                 absolute_start + total_len,
                 mappings,
@@ -913,7 +960,7 @@ mod tests {
     #[test]
     fn code_block_content_mapping_wraps_content_in_fence() {
         let (full, content_to_source, source_to_content) =
-            Editor::build_code_block_content_mapping("a\nb", "", None);
+            Editor::build_code_block_content_mapping("a\nb", "", None, None);
 
         assert_eq!(full, "```\na\nb\n```");
         assert_eq!(content_to_source.len(), 4);
@@ -927,7 +974,7 @@ mod tests {
 
     #[test]
     fn code_block_content_mapping_keeps_indentation_on_every_line() {
-        let (full, _, _) = Editor::build_code_block_content_mapping("x\ny", "  ", None);
+        let (full, _, _) = Editor::build_code_block_content_mapping("x\ny", "  ", None, None);
 
         assert_eq!(full, "  ```\n  x\n  y\n  ```");
     }

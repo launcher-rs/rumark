@@ -141,6 +141,11 @@ pub struct Block {
     pub(crate) last_shell_bounds: Option<Bounds<Pixels>>,
     pub last_line_height: Pixels,
     pub render_depth: usize,
+    /// 该块自身行在序列化源码中的缩进列数：列表项子块按父项标记正文列宽累计
+    /// （`1. ` 为 3 而非 2，CommonMark 子块缩进语义），引用/提示框内部归零由
+    /// `> ` 前缀承担。序列化（tree.rs）、源码映射（source_map.rs）与跨块复制
+    /// 回退（selection.rs）共用，三方必须一致。
+    pub source_indent_columns: usize,
     pub quote_depth: usize,
     pub(crate) quote_group_anchor: Option<uuid::Uuid>,
     pub(crate) visible_quote_depth: usize,
@@ -151,6 +156,9 @@ pub struct Block {
     pub(crate) footnote_anchor: Option<uuid::Uuid>,
     pub(crate) parent_is_list_item: bool,
     pub list_ordinal: Option<usize>,
+    /// 该块当前文本是否含引用定义/脚注语法（`]:`、`[^`）。编辑器据此判断文本
+    /// 变更是否可能影响全局引用集合：上一态为真时即使语法被删净也要重建。
+    pub(crate) may_affect_global_references: bool,
     pub is_selecting: bool,
     /// 拖拽扩展选区的吸附粒度：单击按字符，双击按词，三击按行。
     /// mouse_down 时设定，mouse_move 消费，mouse_up 复位。
@@ -256,6 +264,7 @@ impl Block {
             last_shell_bounds: None,
             last_line_height: px(20.0),
             render_depth: 0,
+            source_indent_columns: 0,
             quote_depth: 0,
             quote_group_anchor: None,
             visible_quote_depth: 0,
@@ -266,6 +275,7 @@ impl Block {
             footnote_anchor: None,
             parent_is_list_item: false,
             list_ordinal: None,
+            may_affect_global_references: false,
             is_selecting: false,
             select_extend_mode: SelectExtendMode::Char,
             cursor_blink_epoch: Instant::now(),

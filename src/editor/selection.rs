@@ -1565,7 +1565,7 @@ impl Editor {
             // 表格会脱离所在列表或引用。
             let prefix = format!(
                 "{}{}",
-                "  ".repeat(block.render_depth),
+                " ".repeat(block.source_indent_columns),
                 "> ".repeat(block.quote_depth)
             );
             return match block.kind() {
@@ -1584,7 +1584,7 @@ impl Editor {
                     .unwrap_or_default(),
                 _ => block
                     .record
-                    .markdown_line(block.render_depth, block.list_ordinal),
+                    .markdown_line(block.source_indent_columns, block.list_ordinal),
             };
         }
 

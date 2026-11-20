@@ -5,6 +5,22 @@
 
 ## 1. 工作区状态与改动分组
 
+2026-11-21 **整体代码审查修复批次（未提交）**：发布 0.2.4 前的全面审查（2 个并行子代理 + 人工复核）发现并修复 2 个 P0、3 个 P1、5 个 P2。① P0：`document.rs` 导入器 Setext 分支无段落守卫（`# 标题\n---` 打开→保存即损坏）——分支移到所有块类型判定之后（段落兜底前），顺带拦截列表项后顶格分隔线被懒续行吞掉（`collect_list_item_region`，CommonMark 分隔线可打断段落）；② P0：`events.rs` `RequestMergeIntoPrev` 无前块类型守卫（段首退格把文本 set_title 进分隔线/表格，保存即丢）——用 `is_atomic_block()` 拦截；③ P1：有序列表起始号保留——`BlockRecord.list_number`（解析时捕获）+ `sync_block_list` 分组起始号感知（组内按位置续排，CommonMark 只认首项）；④ P1：HTML 导出 svg/tiff/ico 丢图——`is_safe_data_url` 拆出 `is_supported_image_data_url` 仅对 `img[src]` 放行（`a[href]` 不放行 svg：顶层文档可执行内嵌脚本），`embedded_mime_for_extension` 与清洗白名单对齐；⑤ P1：代码围栏变体保留——`BlockRecord.code_fence` + `code_fence_markdown`（原文变体对当前内容可安全闭合时原样保留，冲突回退重算），tree.rs/source_map.rs 共用；⑥ P2：Mermaid 空正文两行围栏映射比序列化多一行（后续块偏移漂移，曾致越界 panic 的同类）——`push_mermaid_block_mapping` 对无正文行走 `build_empty_fence_mapping`；⑦ P2：数学/Mermaid 非聚焦块补 `last_bounds` 兜底（跨块选区按点命中）；⑧ P2：DOCX 每个有序列表独立编号定义（起始号落盘，嵌套列表栈式压弹）；⑨ P2 三处每键热点：引用块 Changed 走树修订号守卫（`quote_metadata_revision`，纯文本编辑跳过全树重建）、引用重建按块级 `may_affect_global_references` 标志门控（sync 时刷新，撤销恢复也能拿到准确初值）、单表编辑改 `rebuild_table_runtime_for_block` 作用域化（全量重建只留载入/撤销/视图切换）；⑩ P2：嵌套列表缩进从「每层 2 空格」改为「父项标记正文列宽」（`1. ` 下 3 列、`10. ` 下 4 列，`marker_content_columns`；`markdown_line` 参数语义 depth→columns；tree/source_map/selection 三处镜像同步改；引用/提示框内部仍归零由 `> ` 前缀承担，脚注子块 +4 列保持既有绝对语义）。验证：fmt/clippy 0 警告、1014 passed（原 1007 + 新增 7 回归）、`--no-default-features` 绿。
+
+### 3.3a 审查遗留（2026-11-21，低优先，未修）
+
+- 列表项懒续行仍会吞顶格的 ATX 标题/引用/围栏行（本次只拦了分隔线；CommonMark 语义下这些块起始行也应终止条目，`collect_list_item_region`）。
+- Mermaid 块正文里输入裸 ```` ``` ```` 行，保存重载后图表会在该行截断（Markdown 反引号围栏固有行为；代码块路径靠 `safe_code_fence` 加长围栏规避，Mermaid 保留原围栏无此处理，可考虑编辑时同样加长）。
+- 脚注定义嵌在列表项内且含 2+ 子块时，树序列化子块缩进（绝对 4 列）与源码映射（相对 +4）在嵌套列表下本就不一致（映射偏长，既有偏差，本次未扩大修复面）。
+- PDF `wrap_text` 行首长 URL（超长单词）会溢出版心右缘（`export/pdf.rs`）。
+- DOCX 目录标题「目录」自身是 Heading1，Word 刷新 TOC 域会把它收进目录；HTML 导出 TOC 嵌套 `<ul>` 直接挂在 `<ul>` 下不经 `<li>`（HTML 不合法，浏览器容错）。
+- `find.rs` `replace_current_find_match` 回绕分支传 `&[]` 不替换（注释说回绕到首个）——当前不可达的死代码，改 `&matches[..1]` 或删除。
+- 渲染模式查找基于规范 Markdown，围栏 info 串等不可见语法区也会命中并可被替换（设计取舍，可文档化或过滤纯语法命中）。
+- `RequestFocus` 点击路径 notify 全部可见块（万级块文档每击 O(N) 实体更新，`events.rs`）；`normalize_block_list` 对每个容器块双克隆 children（可 `std::mem::take`）；两处自动补尾段落无撤销捕获（`ensure_trailing_paragraph_after_structural` 与空白处点击）；拖拽选区每 mousemove 全量扫描可见块 bounds（可用行计划按 y 定位）；undo/redo 不去重。
+- `document.rs` `collect_quote_block` 空行分支不可达（死代码）；`model.rs` `markdown_line` 的 FootnoteDefinition 分支输出与实际序列化不一致（仅复制回退路径可达）。
+- 交互路径输入 `3. ` 转有序项时未捕获原始编号（从 1 起排；导入器/粘贴路径不受影响）。
+- `may_change_global_references` 场景：文档含定义时普通段落打字已不重建（本次修复），但含 `]:`/`[^` 字样的普通文本（如行内代码示例）每次编辑仍触发重建——可用「集合实际未变则跳过」的指纹短路进一步优化。
+
 2026-11-19 **Mermaid 渲染库拆分独立仓（未提交）**：`crates/mermaid-rs-renderer` 抽出为独立仓 [launcher-rs/mermaid-renderer](https://github.com/launcher-rs/mermaid-renderer)（GitHub 主仓 + Gitee 镜像），包名改 `mermaid-renderer`、库名改 `mermaid_renderer`，版本 `0.1.0`，暂不发布 crates.io、暂不打标签；拆分时清掉了 62 个误提交的 0 字节文件（文件名带 U+F00D 私用区字符），并重写了历史去掉它们。rumark 侧改 crates.io 版本依赖（`mermaid-renderer = "0.1"`），删除 vendor 目录与 workspace 成员，`src/components/mermaid/mod.rs` 引用同步改名，AGENTS/README/CONTRIBUTING/TODO 同步。已发布 0.1.0 到 crates.io。验证：新仓 `fmt/clippy/test` 全绿（含 10 个 suite）；rumark 侧待跑。
 
 2026-11-19 **Mermaid 渲染 vendor 化与状态图修复（未提交）**：用户拍板把项目改成 cargo workspace 并将 `mermaid-rs-renderer` vendor 进仓自维护（MIT，基于上游 0.3.1）。落地内容：① 根 `Cargo.toml` 加 `[workspace]`（members = `[".", "crates/mermaid-rs-renderer"]`，resolver 3；`[profile.*]` 留在根），依赖改 path+version，`release.yml` 两处 `cargo build` 加 `-p rumark`；② 新增 `crates/mermaid-rs-renderer/`（上游裁剪：去 cli/png feature 与 mmdr bin、clap/resvg/usvg 依赖、criterion bench、cli_suite；`benches/` 只留 fixtures/typical 语料，因 5 个测试 suite 用 `include_str!`/read_dir 引用它们与 `docs/comparison_sources/`——后者不在 crates.io 包里，从上游 GitHub tag v0.3.1 补齐；`clippy.toml` 必须带上，否则 1.100 工具链报 46 个 lint；测试套件文件头加了与上游 lib.rs 一致的 clippy allow）；③ 状态图三处修复（改动点均以 `rumark` 注释标注）：`render.rs` 圆角分支加入 State（应用层 SVG 后处理随之删除）、`objectives.rs` 的 `relax_edge_span_constraints` 排除 State（消除同 rank 推移造成的 zigzag）、`edge_pipeline.rs` State 不再把自身标签障碍传给 `cell_blocked`（消除绕自身标签的 S 形走线）；④ 标签贴线两处：`label_placement.rs` State 的 own-edge gap 常量改贴线语义（target 0.8，对齐 class）+ 走线预置锚点不再视为固定位置（否则同节点多出边标签在分叉点重叠且无法消解）——这两条是「最后一个图不自然」的最终根因，标签互叠在渲染阶段根本没有去重叠 pass 生效；⑤ rumark 侧：删 `round_state_edge_corners`/`rounded_polyline_path`，`MERMAID_RENDERER_CACHE_VERSION` 11→12，标签重叠回归测试的内边距改按渲染库 State 实际值（3.0/1.6+0.5 余量）；⑥ 文档：AGENTS.md 依赖约定重写 workspace 条目（明确 vendored crate 是唯一允许的 path 依赖，红线仅针对 rgpui）、README/CONTRIBUTING 补校验项。上游 1 个测试因本机字体度量差异宽松化：`cycle_fixture_subgraph_entry_aligns_with_spine` 允许一次 16px 网格折角。新增 crate 回归测试 2 个（状态图正交近直线走线 + 圆角 Q 指令），vendored 套件 424 passed、rumark 993 passed、两 crate clippy -D warnings 全绿、fmt --check 绿、`--no-default-features` 绿、`--profile size` 构建绿；目检用 mmdr/resvg 栅格化（`F:\Desktop\ceshi3\out\`），状态图标签压线带背景框、直线边、圆角。暂存实验台 `D:\tmp-mermaid-tune`（path 依赖渲染不同 LayoutConfig 变体出 SVG）已确认可删。
@@ -115,7 +131,7 @@
 ```pwsh
 cargo fmt --check
 cargo clippy -p rumark --all-targets          # 期望 0 warning
-cargo test -p rumark                          # 当前基线 993 passed
+cargo test -p rumark                          # 当前基线 1014 passed
 cargo check -p rumark --no-default-features   # 期望 5 个已知 warning
 git diff --check -- 'src/*.rs' 'AGENTS.md'    # 期望无输出
 ```

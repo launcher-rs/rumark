@@ -3460,9 +3460,24 @@ impl Render for Block {
                         .child(rendered)
                         .into_any_element()
                 } else {
-                    rendered
+                    rendered.into_any_element()
                 };
-                focused_base.w_full().child(child).into_any_element()
+                let element = focused_base.w_full().child(child);
+                // 未聚焦时没有文本元素写入 `last_bounds`，这里补整块边界，
+                // 供跨块选区按点命中（与 HTML 块兜底一致）。
+                let element = if !focused {
+                    let entity = cx.entity();
+                    element.on_prepaint(move |bounds, _window, cx| {
+                        entity.update(cx, |block, _| {
+                            if block.last_layout.is_none() {
+                                block.last_bounds = Some(bounds);
+                            }
+                        })
+                    })
+                } else {
+                    element
+                };
+                element.into_any_element()
             }
             BlockKind::MermaidBlock => {
                 if !focused {
@@ -3500,9 +3515,24 @@ impl Render for Block {
                         .child(rendered)
                         .into_any_element()
                 } else {
-                    rendered
+                    rendered.into_any_element()
                 };
-                focused_base.w_full().child(child).into_any_element()
+                let element = focused_base.w_full().child(child);
+                // 未聚焦时没有文本元素写入 `last_bounds`，这里补整块边界，
+                // 供跨块选区按点命中（与 HTML 块兜底一致）。
+                let element = if !focused {
+                    let entity = cx.entity();
+                    element.on_prepaint(move |bounds, _window, cx| {
+                        entity.update(cx, |block, _| {
+                            if block.last_layout.is_none() {
+                                block.last_bounds = Some(bounds);
+                            }
+                        })
+                    })
+                } else {
+                    element
+                };
+                element.into_any_element()
             }
             BlockKind::Paragraph
             | BlockKind::Comment

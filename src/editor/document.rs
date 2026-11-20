@@ -103,6 +103,8 @@ struct ListMarker {
     kind: BlockKind,
     indent_columns: usize,
     content_indent_columns: usize,
+    /// 有序列表项声明的原始编号（`3.` → Some(3)）；无序/任务项为 `None`。
+    number: Option<u64>,
     text: String,
 }
 
@@ -381,21 +383,23 @@ fn parse_list_marker(line: &str) -> Option<ListMarker> {
             content_indent_columns: display_columns(
                 &line[..indent_bytes + marker.len_utf8() + separator_len],
             ),
+            number: None,
             text,
         });
     }
 
-    let (digit_len, marker_len, text) = parse_ordered_list_marker(rest)?;
+    let (digit_len, marker_len, number, text) = parse_ordered_list_marker(rest)?;
     Some(ListMarker {
         kind: BlockKind::NumberedListItem,
         indent_columns,
         content_indent_columns: display_columns(&line[..indent_bytes + digit_len + marker_len]),
+        number: Some(number),
         text: text.to_string(),
     })
 }
 
-/// 解析有序列表标记的数字长度、符号长度与正文。
-fn parse_ordered_list_marker(rest: &str) -> Option<(usize, usize, &str)> {
+/// 解析有序列表标记的数字长度、符号长度、原始编号与正文。
+fn parse_ordered_list_marker(rest: &str) -> Option<(usize, usize, u64, &str)> {
     let digit_len = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
     if !(1..=9).contains(&digit_len) {
         return None;
@@ -411,7 +415,9 @@ fn parse_ordered_list_marker(rest: &str) -> Option<(usize, usize, &str)> {
         return None;
     }
 
-    Some((digit_len, 2, &rest[digit_len + 2..]))
+    // 1..=9 位数字必在 u64 范围内（最长 999999999）。
+    let number = rest[..digit_len].parse::<u64>().ok()?;
+    Some((digit_len, 2, number, &rest[digit_len + 2..]))
 }
 
 /// 去掉引用行的一层 `>` 前缀，非法则返回空。
@@ -776,6 +782,11 @@ fn collect_list_item_region(lines: &[String], start: usize, marker_indent_column
         }
 
         let (indent_columns, _) = leading_indent_columns_and_bytes(line);
+        // 顶格（不超过标记缩进）的分隔线打断列表项：CommonMark 规定分隔线可
+        // 打断段落，不能作为懒续行被吞进条目文本（`- item\n---` 是列表 + 水平线）。
+        if indent_columns <= marker_indent_columns && BlockKind::parse_separator(line) {
+            return index.saturating_sub(pending_blank_lines);
+        }
         if indent_columns > marker_indent_columns || pending_blank_lines == 0 {
             pending_blank_lines = 0;
             index += 1;
@@ -836,18 +847,21 @@ fn attach_child_blocks(
 }
 
 /// 构造指定语言与内容的代码块实体。
+///
+/// `fence` 为解析时记录的原文围栏变体（围栏字符与长度），序列化时在仍能安全
+/// 闭合的前提下原样保留；交互创建的代码块传 `None`，按内容重算标准围栏。
 fn build_code_block(
     cx: &mut Context<Editor>,
     language: Option<SharedString>,
     content: String,
+    fence: Option<(char, usize)>,
 ) -> Entity<super::Block> {
-    Editor::new_block(
-        cx,
-        BlockRecord::with_deferred_code_highlight(
-            BlockKind::CodeBlock { language },
-            InlineTextTree::plain(content),
-        ),
-    )
+    let mut record = BlockRecord::with_deferred_code_highlight(
+        BlockKind::CodeBlock { language },
+        InlineTextTree::plain(content),
+    );
+    record.code_fence = fence;
+    Editor::new_block(cx, record)
 }
 
 /// 收集围栏代码块并返回块与下一行下标。
@@ -872,7 +886,12 @@ fn collect_fenced_code_block(
     let code_lines = lines[start + 1..closing_index].to_vec();
 
     Some((
-        build_code_block(cx, fence.language.clone(), code_lines.join("\n")),
+        build_code_block(
+            cx,
+            fence.language.clone(),
+            code_lines.join("\n"),
+            Some((fence.ch, fence.len)),
+        ),
         closing_index + 1,
     ))
 }
@@ -899,7 +918,7 @@ fn collect_indented_code_block(
     }
 
     Some((
-        build_code_block(cx, None, code_lines.join("\n")),
+        build_code_block(cx, None, code_lines.join("\n"), None),
         code_index,
     ))
 }
@@ -1246,21 +1265,6 @@ impl Editor {
                 continue;
             }
 
-            // 紧贴段落的 `---`/`===` 按 CommonMark 解析成 Setext 标题（与 Typora 一致），
-            // 不是分隔线；分隔线需要与上一段之间有空行。
-            if let Some(level) = lines
-                .get(index + 1)
-                .and_then(|next| BlockKind::parse_setext_rule(next))
-            {
-                roots.push(native_block(
-                    cx,
-                    BlockKind::Heading { level },
-                    line.trim_end().to_string(),
-                ));
-                index += 2;
-                continue;
-            }
-
             if parse_standalone_image(line).is_some() {
                 roots.push(standalone_image_block(cx, line.to_string()));
                 index += 1;
@@ -1337,6 +1341,24 @@ impl Editor {
                 let end = collect_display_math_region(lines, index);
                 roots.push(math_or_raw_block(cx, lines[index..end].join("\n")));
                 index = end;
+                continue;
+            }
+
+            // 紧贴段落的 `---`/`===` 按 CommonMark 解析成 Setext 标题（与 Typora 一致），
+            // 不是分隔线；分隔线需要与上一段之间有空行。该分支必须放在所有其他块类型
+            // 判定之后：只有走到段落兜底的行才是段落行，否则 `# 标题\n---`、
+            // `- 列表\n---`、`> 引用\n---` 会被整体吞成标题且分隔线消失（打开→保存
+            // 即损坏）。与交互路径 events.rs 的 Paragraph 守卫语义一致。
+            if let Some(level) = lines
+                .get(index + 1)
+                .and_then(|next| BlockKind::parse_setext_rule(next))
+            {
+                roots.push(native_block(
+                    cx,
+                    BlockKind::Heading { level },
+                    line.trim_end().to_string(),
+                ));
+                index += 2;
                 continue;
             }
 
@@ -1882,6 +1904,13 @@ impl Editor {
             // 标题先留空，首行内容进入待解析缓冲；缓冲在条目结束时一次性解析，
             // 保证跨行代码段等行内结构按完整文本解析（见 flush_pending_item_text）。
             let block = native_block(cx, marker.kind.clone(), String::new());
+            // 保留条目在源码中声明的原始编号（`3. a` 保存后仍从 3 起排）。
+            let list_number = marker.number;
+            if list_number.is_some() {
+                block.update(cx, |item, _block_cx| {
+                    item.record.set_list_number(list_number)
+                });
+            }
             let mut pending_parts = vec![(String::new(), marker.text)];
             let mut body_index = index + 1;
             let mut pending_blank_lines = 0usize;
@@ -2356,6 +2385,46 @@ mod tests {
         });
     }
 
+    /// 非段落行紧贴 `---` 不得被 Setext 分支吞掉：标题/列表项/引用后跟分隔线
+    /// 必须各自成块（此前打开→保存会把 `# Intro\n---` 改写成 `## # Intro`）。
+    #[rgpui::test]
+    async fn setext_underline_after_non_paragraph_lines_stays_separator(cx: &mut TestAppContext) {
+        for (markdown, expected_markdown) in [
+            ("# Intro\n---", "# Intro\n\n---"),
+            ("- item\n---", "- item\n\n---"),
+            ("> quoted\n---", "> quoted\n\n---"),
+            ("---\n---", "---\n\n---"),
+        ] {
+            let editor = cx.new(|cx| Editor::from_markdown(cx, markdown.to_string(), None));
+            editor.update(cx, |editor, cx| {
+                assert_eq!(
+                    editor.document.markdown_text(cx),
+                    expected_markdown,
+                    "输入：{markdown}"
+                );
+            });
+        }
+    }
+
+    /// 代码围栏变体保存往返不改写（此前 `~~~` 与更长围栏一律被规范化为 ```）。
+    #[rgpui::test]
+    async fn code_block_fence_variants_survive_roundtrip(cx: &mut TestAppContext) {
+        for markdown in [
+            "~~~rust\nlet x = 1;\n~~~",
+            "````\ncode\n````",
+            "~~~js\nvar x = 1;\n~~~",
+        ] {
+            let editor = cx.new(|cx| Editor::from_markdown(cx, markdown.to_string(), None));
+            editor.update(cx, |editor, cx| {
+                assert_eq!(
+                    editor.document.markdown_text(cx),
+                    markdown,
+                    "输入：{markdown}"
+                );
+            });
+        }
+    }
+
     #[rgpui::test]
     async fn imports_indented_code_blocks_and_serializes_fenced(cx: &mut TestAppContext) {
         let editor = cx.new(|cx| {
@@ -2664,7 +2733,7 @@ mod tests {
             );
             assert_eq!(
                 editor.document.markdown_text(cx),
-                "1. item with nested quote\n  > quoted text\n  > \n  > quoted paragraph two"
+                "1. item with nested quote\n   > quoted text\n   > \n   > quoted paragraph two"
             );
 
             editor.toggle_view_mode(cx);
@@ -2711,6 +2780,51 @@ mod tests {
                 editor.document.markdown_text(cx),
                 "1. aa\n2. bb\n3. cc\n\n1. dd"
             );
+        });
+    }
+
+    /// 有序列表起始号保留：首条目的原始编号（`3.`）作为分组起始号续排；
+    /// 后续条目按位置续排（CommonMark 只承认首项起始号，`7.` 渲染等价于 4）。
+    #[rgpui::test]
+    async fn numbered_list_preserves_declared_start_number(cx: &mut TestAppContext) {
+        // 起始号 3：整组从 3 起排，保存往返不变。
+        let editor = cx.new(|cx| Editor::from_markdown(cx, "3. aa\n4. bb".to_string(), None));
+        editor.update(cx, |editor, cx| {
+            let visible = editor.document.visible_blocks();
+            assert_eq!(visible[0].entity.read(cx).list_ordinal, Some(3));
+            assert_eq!(visible[1].entity.read(cx).list_ordinal, Some(4));
+            assert_eq!(editor.document.markdown_text(cx), "3. aa\n4. bb");
+        });
+
+        // 组内非首项编号按 CommonMark 语义忽略，按位置从起始号续排。
+        let editor = cx.new(|cx| Editor::from_markdown(cx, "3. aa\n7. bb".to_string(), None));
+        editor.update(cx, |editor, cx| {
+            let visible = editor.document.visible_blocks();
+            assert_eq!(visible[0].entity.read(cx).list_ordinal, Some(3));
+            assert_eq!(visible[1].entity.read(cx).list_ordinal, Some(4));
+            assert_eq!(editor.document.markdown_text(cx), "3. aa\n4. bb");
+        });
+
+        // 空行分隔的两个分组各自保留自己的起始号。
+        let editor = cx.new(|cx| Editor::from_markdown(cx, "1. aa\n\n3. bb".to_string(), None));
+        editor.update(cx, |editor, cx| {
+            let visible = editor.document.visible_blocks();
+            assert_eq!(visible[0].entity.read(cx).list_ordinal, Some(1));
+            assert_eq!(visible[2].entity.read(cx).list_ordinal, Some(3));
+            assert_eq!(editor.document.markdown_text(cx), "1. aa\n\n3. bb");
+        });
+
+        // 括号变体同样保留起始号。
+        let editor = cx.new(|cx| Editor::from_markdown(cx, "5) aa".to_string(), None));
+        editor.update(cx, |editor, cx| {
+            assert_eq!(
+                editor.document.visible_blocks()[0]
+                    .entity
+                    .read(cx)
+                    .list_ordinal,
+                Some(5)
+            );
+            assert_eq!(editor.document.markdown_text(cx), "5. aa");
         });
     }
 
@@ -2777,7 +2891,8 @@ mod tests {
             assert_eq!(visible[0].entity.read(cx).rendered_text(), "parent");
             assert_eq!(visible[1].entity.read(cx).rendered_text(), "child");
             assert_eq!(visible[1].entity.read(cx).render_depth, 1);
-            assert_eq!(editor.document.markdown_text(cx), "1. parent\n  1. child");
+            // 有序项子块缩进到正文列（`1. ` 为 3 列），跨渲染器结构一致。
+            assert_eq!(editor.document.markdown_text(cx), "1. parent\n   1. child");
         });
     }
 

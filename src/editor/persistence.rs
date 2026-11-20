@@ -52,6 +52,27 @@ pub(super) fn safe_code_fence_with_info(content: &str, info: Option<&str>) -> St
     safe_code_fence(content)
 }
 
+/// 计算代码块序列化围栏：优先沿用解析时记录的原文围栏变体（`~~~`、更长的
+/// 围栏串），保证保存往返不改写用户写法；变体对当前内容不再安全闭合
+/// （内容中出现长度达到围栏的同类标记串，或反引号围栏配含反引号的信息串）
+/// 时回退到按内容重算。
+pub(super) fn code_fence_markdown(
+    content: &str,
+    info: Option<&str>,
+    variant: Option<(char, usize)>,
+) -> String {
+    let computed = safe_code_fence_with_info(content, info);
+    if let Some((ch, len)) = variant {
+        let info_has_backtick = info.is_some_and(|info| info.contains('`'));
+        let closes_safely =
+            !(ch == '`' && info_has_backtick) && longest_marker_run(content, ch) < len;
+        if closes_safely {
+            return ch.to_string().repeat(len);
+        }
+    }
+    computed
+}
+
 /// UTF-8 字节序标记：仅出现在文件开头时剥离。
 const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
 
@@ -879,9 +900,9 @@ async fn show_export_error(window_handle: AnyWindowHandle, detail: String, cx: &
 #[cfg(test)]
 mod tests {
     use super::{
-        NonUtf8Document, collect_export_headings, html_escape, markdown_to_standalone_html,
-        read_error_detail, read_markdown_file, safe_code_fence, safe_code_fence_with_info,
-        slugify_heading, strip_inline_markdown,
+        NonUtf8Document, code_fence_markdown, collect_export_headings, html_escape,
+        markdown_to_standalone_html, read_error_detail, read_markdown_file, safe_code_fence,
+        safe_code_fence_with_info, slugify_heading, strip_inline_markdown,
     };
 
     #[test]
@@ -903,6 +924,35 @@ mod tests {
             "~~~~"
         );
         assert_eq!(safe_code_fence_with_info("plain code", Some("rust")), "```");
+    }
+
+    #[test]
+    fn code_fence_markdown_reuses_variant_when_safe() {
+        // 无冲突：原样保留原文变体。
+        assert_eq!(code_fence_markdown("a\nb", None, Some(('~', 3))), "~~~");
+        assert_eq!(code_fence_markdown("a\nb", None, Some(('`', 4))), "````");
+        assert_eq!(
+            code_fence_markdown("a\nb", Some("rust"), Some(('~', 3))),
+            "~~~"
+        );
+        // 原文波浪线而内容含 ``` 行：重算切到波浪线，字符匹配且长度足够，
+        // 原样保留（内容中波浪线串长度 0 < 3，闭合安全）。
+        assert_eq!(
+            code_fence_markdown("```\nx\n```", None, Some(('~', 3))),
+            "~~~"
+        );
+        // 原文反引号而内容含 ``` 行：重算换字符，回退到重算结果。
+        assert_eq!(
+            code_fence_markdown("```\nx\n```", None, Some(('`', 3))),
+            "~~~"
+        );
+        // 原文波浪线而内容含波浪线围栏行：重算换回反引号（可安全闭合），回退。
+        assert_eq!(
+            code_fence_markdown("plain\n~~~~\ncode", None, Some(('~', 3))),
+            "```"
+        );
+        // 无变体（交互创建）：按内容重算。
+        assert_eq!(code_fence_markdown("plain code", None, None), "```");
     }
 
     #[test]

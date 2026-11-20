@@ -443,6 +443,28 @@ async fn focused_mermaid_block_renders_edit_panel_above_preview(cx: &mut TestApp
     });
 }
 
+/// 空正文两行 Mermaid 围栏（` ```mermaid\n``` `）的源码映射必须与序列化行结构
+/// 一致：映射不得补一行正文，否则其后续所有块的映射起点整体漂移 2 字节。
+#[rgpui::test]
+async fn empty_two_line_mermaid_fence_mapping_stays_aligned(cx: &mut TestAppContext) {
+    init_editor_test_app(cx);
+    let markdown = "```mermaid\n```\n\nhello world".to_string();
+    let (editor, cx) = cx.add_window_view(|_window, cx| Editor::from_markdown(cx, markdown, None));
+
+    editor.read_with(cx, |editor, cx| {
+        let text = editor.document.markdown_text(cx);
+        let needle_offset = text.find("hello").expect("hello in markdown");
+        let (mappings, block_ranges) = editor.compute_source_target_mappings_with_block_ranges(cx);
+        // 其后段落的映射起点必须正好落在 "hello" 的源码偏移上。
+        let paragraph = mappings.last().expect("paragraph mapping");
+        let paragraph_start = block_ranges
+            .get(&paragraph.entity.entity_id())
+            .expect("paragraph range")
+            .start;
+        assert_eq!(paragraph_start, needle_offset);
+    });
+}
+
 /// 全夹具滚动回归：逐段滚到底并绘制每一窗，保证长文档滚动全程无崩溃。
 #[rgpui::test]
 async fn scrolling_full_fixture_renders_every_window(cx: &mut TestAppContext) {

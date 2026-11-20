@@ -212,6 +212,10 @@ impl Editor {
     }
 
     /// 引用结构相关时刷新渲染模式的引用元数据。
+    ///
+    /// 引用元数据（深度/锚点）来自树结构，纯文本编辑不会改变它：树修订号与
+    /// 上次重建一致时跳过全树重建。结构变更路径（`with_structure_mutation`、
+    /// `replace_roots`）都会递增修订号，下一次文本编辑前的首次 Changed 会补上。
     fn refresh_rendered_quote_metadata_if_needed(
         &mut self,
         block: &Entity<super::Block>,
@@ -221,6 +225,11 @@ impl Editor {
             return;
         }
 
+        let revision = self.document.revision();
+        if revision == self.quote_metadata_revision {
+            return;
+        }
+        self.quote_metadata_revision = revision;
         self.document.rebuild_metadata_and_snapshot(cx);
     }
 
@@ -1914,15 +1923,24 @@ impl Editor {
                 if should_normalize_quote {
                     self.normalize_rendered_quote_structure(cx);
                 } else {
-                    let block_ref = block.read(cx);
-                    let may_change_global_references = block_ref.kind()
-                        == BlockKind::FootnoteDefinition
-                        || block_ref.record.title.plain_text().contains("]:")
-                        || block_ref.record.title.plain_text().contains("[^")
-                        || !self.image_reference_definitions.is_empty()
-                        || !self.link_reference_definitions.is_empty()
-                        || !self.footnote_registry.bindings.is_empty();
-                    if may_change_global_references {
+                    // 只有本块文本触及引用/脚注语法（`]:`、`[^`、脚注定义块）时
+                    // 才需要重建全局引用集合；上一态含语法时即使本次删净也要重建。
+                    // 文档其他位置存在定义不构成重建理由——本块文本不触及时
+                    // 定义集合不可能变化，逐键全量重建是纯浪费。
+                    let (text_may_affect_refs, previously_may) = {
+                        let block_ref = block.read(cx);
+                        let plain = block_ref.record.title.plain_text();
+                        (
+                            block_ref.kind() == BlockKind::FootnoteDefinition
+                                || plain.contains("]:")
+                                || plain.contains("[^"),
+                            block_ref.may_affect_global_references,
+                        )
+                    };
+                    block.update(cx, |block, _cx| {
+                        block.may_affect_global_references = text_may_affect_refs;
+                    });
+                    if text_may_affect_refs || previously_may {
                         self.rebuild_image_runtimes(cx);
                     } else {
                         let base_dir = self.image_base_dir();
@@ -2055,6 +2073,14 @@ impl Editor {
                 let Some(prev) = self.document.visible_block_at(current_visible_index - 1) else {
                     return;
                 };
+                // 原子块（分隔线/表格/代码/数学/Mermaid/HTML/注释/原文）是自包含
+                // 部件：分隔线与表格的序列化完全不读 title，把文本 set_title 进去
+                // 只在内存里"看似合并"，保存时静默丢失；其余原子块则被劫持块语义
+                // （文本混进代码/图源/注释）。退格到此类块后面时不合并，光标留在
+                // 原处；空段落走 RequestDelete 仍可删除自身。
+                if prev.read(cx).kind().is_atomic_block() {
+                    return;
+                }
                 let quote_related = self.block_is_quote_structure_related(&block, cx)
                     || self.block_is_quote_structure_related(&prev, cx);
                 self.prepare_undo_capture(crate::components::UndoKind::NonCoalescible, cx);
@@ -4584,6 +4610,33 @@ mod tests {
         });
     }
 
+    /// 段首退格遇原子前块不得合并：分隔线后的段落按退格，文本必须原地保留
+    /// （此前合并会把文本 set_title 进分隔线，序列化不读 title，保存即丢失）。
+    #[rgpui::test]
+    async fn backspace_at_paragraph_start_after_atomic_block_keeps_text(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let editor = cx.new(|cx| Editor::from_markdown(cx, "---\n\ntext".to_string(), None));
+
+        cx.update(|window, cx| {
+            editor.update(cx, |editor, cx| {
+                let paragraph = editor.document.visible_blocks()[1].entity.clone();
+                paragraph.update(cx, |block, block_cx| {
+                    block.move_to(0, block_cx);
+                    block.on_delete_back(&DeleteBack, window, block_cx);
+                });
+            });
+        });
+
+        editor.update(cx, |editor, cx| {
+            let visible = editor.document.visible_blocks();
+            assert_eq!(visible.len(), 2);
+            assert_eq!(visible[0].entity.read(cx).kind(), BlockKind::Separator);
+            assert_eq!(visible[1].entity.read(cx).kind(), BlockKind::Paragraph);
+            assert_eq!(visible[1].entity.read(cx).rendered_text(), "text");
+            assert_eq!(editor.document.markdown_text(cx), "---\n\ntext");
+        });
+    }
+
     #[rgpui::test]
     async fn nested_list_item_backspace_downgrades_to_direct_list_child(cx: &mut TestAppContext) {
         let cx = cx.add_empty_window();
@@ -4725,7 +4778,7 @@ mod tests {
             assert_eq!(visible[1].entity.read(cx).kind(), BlockKind::Paragraph);
             assert_eq!(visible[1].entity.read(cx).rendered_text(), "b");
             assert_eq!(visible[1].entity.read(cx).render_depth, 1);
-            assert_eq!(editor.document.markdown_text(cx), "1. a\n\n  b");
+            assert_eq!(editor.document.markdown_text(cx), "1. a\n\n   b");
         });
 
         let task = cx.new(|cx| Editor::from_markdown(cx, "- [ ] a\n  - [ ] b".to_string(), None));

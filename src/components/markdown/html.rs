@@ -1138,7 +1138,15 @@ fn sanitize_attr(tag_name: &str, attr: &HtmlAttr) -> Option<String> {
             let css = parse_inline_style(value).to_css()?;
             Some(format!("style=\"{css}\""))
         }
-        "href" | "src" | "cite" => {
+        // img 的 src 放行编辑器支持的惰性图片 data URL；href/cite 维持严格
+        // 白名单（svg data URL 作顶层文档打开会执行内嵌脚本）。
+        "src" => {
+            if !is_safe_img_src_url(value) {
+                return None;
+            }
+            Some(format!("{name}=\"{}\"", escape_html_text(value)))
+        }
+        "href" | "cite" => {
             if !is_safe_url(value) {
                 return None;
             }
@@ -1179,6 +1187,19 @@ fn is_allowed_attr(tag_name: &str, name: &str) -> bool {
 /// 协议判定前先解码 HTML 实体并剔除控制字符：浏览器会把
 /// `java&#115;cript:`、`javascript&colon;` 之类的写法还原成可执行协议。
 fn is_safe_url(url: &str) -> bool {
+    is_safe_url_inner(url, false)
+}
+
+/// 判断 `img[src]` 的 URL 是否可安全写入导出产物。
+///
+/// 在通用白名单之外额外放行编辑器支持的惰性图片 data URL（svg/tiff/ico）：
+/// svg 在 `<img>` 上下文由浏览器禁用脚本，tiff/ico 为惰性位图。`a[href]`
+/// 不放行 svg——svg 作为顶级文档打开会执行内嵌脚本。
+fn is_safe_img_src_url(url: &str) -> bool {
+    is_safe_url_inner(url, true)
+}
+
+fn is_safe_url_inner(url: &str, allow_embedded_image_data_urls: bool) -> bool {
     let decoded = decode_html_entities(url);
     let normalized: String = decoded
         .chars()
@@ -1187,6 +1208,9 @@ fn is_safe_url(url: &str) -> bool {
     let lower = normalized.to_ascii_lowercase();
 
     if lower.starts_with("data:") {
+        if allow_embedded_image_data_urls {
+            return is_supported_image_data_url(&lower);
+        }
         return is_safe_data_url(&lower);
     }
 
@@ -1211,6 +1235,31 @@ fn is_safe_data_url(lower_url: &str) -> bool {
             | "image/webp"
             | "image/bmp"
             | "image/avif"
+    )
+}
+
+/// 判断 data URL 是否为编辑器内可正常显示、可安全作为 `<img>` 来源的图片类型。
+/// 与 `embedded_mime_for_extension`（events.rs）的内嵌 MIME 对齐：本地
+/// svg/tiff/ico 图片导出 HTML 时内嵌为 data URI，若此处不放行会被剥掉 src，
+/// 图片静默丢失。
+fn is_supported_image_data_url(lower_url: &str) -> bool {
+    let Some(rest) = lower_url.strip_prefix("data:") else {
+        return false;
+    };
+    let mime = rest.split(';').next().unwrap_or_default();
+    matches!(
+        mime,
+        "image/png"
+            | "image/jpeg"
+            | "image/jpg"
+            | "image/gif"
+            | "image/webp"
+            | "image/bmp"
+            | "image/avif"
+            | "image/svg+xml"
+            | "image/tiff"
+            | "image/x-icon"
+            | "image/vnd.microsoft.icon"
     )
 }
 
@@ -1530,8 +1579,26 @@ mod tests {
             sanitize_html_fragment("<a href=\"javascript&colon;alert(1)\">x</a>"),
             "<a>x</a>"
         );
+        // svg data URL 在 `<img>` 上下文安全（浏览器禁用脚本），保留；
+        // 在 `<a href>` 上会以顶层文档打开并执行内嵌脚本，仍然剥除。
         assert_eq!(
             sanitize_html_fragment("<img src=\"data:image/svg+xml;base64,AAA\">"),
+            "<img src=\"data:image/svg+xml;base64,AAA\">"
+        );
+        assert_eq!(
+            sanitize_html_fragment("<img src=\"data:image/tiff;base64,AAA\">"),
+            "<img src=\"data:image/tiff;base64,AAA\">"
+        );
+        assert_eq!(
+            sanitize_html_fragment("<img src=\"data:image/x-icon;base64,AAA\">"),
+            "<img src=\"data:image/x-icon;base64,AAA\">"
+        );
+        assert_eq!(
+            sanitize_html_fragment("<a href=\"data:image/svg+xml;base64,AAA\">x</a>"),
+            "<a>x</a>"
+        );
+        assert_eq!(
+            sanitize_html_fragment("<img src=\"data:application/javascript;base64,AAA\">"),
             "<img>"
         );
     }

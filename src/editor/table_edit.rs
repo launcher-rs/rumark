@@ -125,6 +125,38 @@ impl Editor {
         self.sync_table_axis_visuals(cx);
     }
 
+    /// 只重建单个表格的运行时：清掉该表的旧单元格绑定并按当前记录重装，
+    /// 其余表格的实体保持不动。单表编辑路径用它替代全文档重建
+    /// （`rebuild_table_runtimes`），避免多表格文档改一格就重建全部表格。
+    pub(super) fn rebuild_table_runtime_for_block(
+        &mut self,
+        table_block: &Entity<Block>,
+        cx: &mut Context<Self>,
+    ) {
+        let table_block_id = table_block.entity_id();
+        self.table_cells
+            .retain(|_, binding| binding.table_block.entity_id() != table_block_id);
+        self.table_axis_preview = None;
+        table_block.update(cx, |block, _cx| block.clear_table_runtime());
+        let table = table_block.read(cx).record.table.clone();
+        if let Some(table) = table {
+            self.install_table_runtime_for_block(table_block, &table, cx);
+            // 新建的单元格实体需要同步运行时上下文（嵌图/链接等），
+            // 与全量重建路径 rebuild_image_runtimes 对单元格的覆盖一致。
+            let base_dir = self.image_base_dir();
+            let cells = self
+                .table_cells
+                .values()
+                .filter(|binding| binding.table_block.entity_id() == table_block_id)
+                .map(|binding| binding.cell.clone())
+                .collect::<Vec<_>>();
+            for cell in cells {
+                self.sync_runtime_context_for_block(&cell, base_dir.as_deref(), cx);
+            }
+        }
+        self.sync_table_axis_visuals(cx);
+    }
+
     /// 把单元格运行时的编辑内容回写到表格记录。
     pub(super) fn sync_table_record_from_runtime(
         &mut self,
@@ -191,7 +223,7 @@ impl Editor {
         table_block.update(cx, move |block, _cx| {
             block.record.set_table(Some(table.clone()));
         });
-        self.rebuild_table_runtimes(cx);
+        self.rebuild_table_runtime_for_block(table_block, cx);
         if let Some(cell) = table_block
             .read(cx)
             .table_runtime
@@ -226,7 +258,7 @@ impl Editor {
         table_block.update(cx, move |block, _cx| {
             block.record.set_table(Some(table.clone()));
         });
-        self.rebuild_table_runtimes(cx);
+        self.rebuild_table_runtime_for_block(table_block, cx);
         if let Some(cell) = table_block
             .read(cx)
             .table_runtime
@@ -266,7 +298,7 @@ impl Editor {
         table_block.update(cx, move |block, _cx| {
             block.record.set_table(Some(table.clone()));
         });
-        self.rebuild_table_runtimes(cx);
+        self.rebuild_table_runtime_for_block(table_block, cx);
         self.focus_table_cell_position(
             table_block,
             CellPosition {
@@ -310,7 +342,7 @@ impl Editor {
         table_block.update(cx, move |block, _cx| {
             block.record.set_table(Some(table.clone()));
         });
-        self.rebuild_table_runtimes(cx);
+        self.rebuild_table_runtime_for_block(table_block, cx);
         self.focus_table_cell_position(
             table_block,
             CellPosition {
@@ -659,7 +691,7 @@ impl Editor {
         table_block.update(cx, move |block, _cx| {
             block.record.set_table(Some(table.clone()));
         });
-        self.rebuild_table_runtimes(cx);
+        self.rebuild_table_runtime_for_block(table_block, cx);
         let selection = AxisSelection {
             table_block_id: table_block.entity_id(),
             kind: TableAxisKind::Column,
@@ -709,7 +741,7 @@ impl Editor {
         table_block.update(cx, move |block, _cx| {
             block.record.set_table(Some(table.clone()));
         });
-        self.rebuild_table_runtimes(cx);
+        self.rebuild_table_runtime_for_block(table_block, cx);
         let selection = AxisSelection {
             table_block_id: table_block.entity_id(),
             kind: TableAxisKind::Row,
@@ -765,7 +797,7 @@ impl Editor {
         table_block.update(cx, move |block, _cx| {
             block.record.set_table(Some(table.clone()));
         });
-        self.rebuild_table_runtimes(cx);
+        self.rebuild_table_runtime_for_block(table_block, cx);
         let selection = AxisSelection {
             table_block_id: table_block.entity_id(),
             kind: TableAxisKind::Column,
@@ -813,7 +845,7 @@ impl Editor {
         table_block.update(cx, move |block, _cx| {
             block.record.set_table(Some(table.clone()));
         });
-        self.rebuild_table_runtimes(cx);
+        self.rebuild_table_runtime_for_block(table_block, cx);
         // 行选区按可视下标寻址：首个正文行为 1（表头为 0）。无正文行时
         // 回落到表头，保证焦点落在仍存在的单元格上。
         let focus_visual_row = if remaining_body_rows == 0 {
@@ -873,7 +905,7 @@ impl Editor {
         table_block.update(cx, move |block, _cx| {
             block.record.set_table(Some(table.clone()));
         });
-        self.rebuild_table_runtimes(cx);
+        self.rebuild_table_runtime_for_block(table_block, cx);
         self.clear_table_axis_selection(cx);
         self.focus_table_cell_position(table_block, CellPosition { row: 0, column: 0 }, cx);
         self.mark_dirty(cx);
@@ -909,7 +941,7 @@ impl Editor {
         table_block.update(cx, move |block, _cx| {
             block.record.set_table(Some(table.clone()));
         });
-        self.rebuild_table_runtimes(cx);
+        self.rebuild_table_runtime_for_block(table_block, cx);
         let selection = AxisSelection {
             table_block_id: table_block.entity_id(),
             kind: TableAxisKind::Column,
@@ -961,7 +993,7 @@ impl Editor {
         self.document.with_structure_mutation(cx, |document, cx| {
             let _ = document.remove_block_by_id_raw(table_id, cx);
         });
-        self.rebuild_table_runtimes(cx);
+        self.rebuild_table_runtime_for_block(table_block, cx);
         self.clear_table_axis_selection(cx);
         self.focus_block(paragraph.entity_id());
         self.mark_dirty(cx);
