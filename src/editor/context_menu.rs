@@ -880,12 +880,9 @@ impl Editor {
         };
         self.insert_block_after_target(
             target,
-            BlockRecord::with_plain_text(
-                BlockKind::CodeBlock {
-                    language: Some("mermaid".into()),
-                },
-                "flowchart TD\n    A --> B",
-            ),
+            // 与解析路径（document.rs 把 ```mermaid 围栏建为 MermaidBlock）保持同一类型，
+            // 新插入的块点击预览、编辑与保存行为才和文件里加载的旧图一致。
+            BlockRecord::mermaid("```mermaid\nflowchart TD\n    A --> B\n```"),
             cx,
         );
     }
@@ -2286,6 +2283,58 @@ mod tests {
                 kinds,
                 vec![BlockKind::Paragraph, BlockKind::Heading { level: 2 },]
             );
+        });
+    }
+
+    /// 右键「插入 Mermaid」必须建原生 MermaidBlock，
+    /// 与解析 ```mermaid 围栏（document.rs）保持同一类型与行为。
+    #[rgpui::test]
+    async fn insert_mermaid_creates_native_mermaid_block(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let editor = cx.new(|cx| Editor::from_markdown(cx, "alpha".to_string(), None));
+
+        let target = editor.read_with(cx, |editor, _| {
+            editor
+                .document
+                .first_root()
+                .map(|block| block.entity_id())
+                .expect("one root block")
+        });
+        cx.update(|window, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.context_menu = Some(ContextMenuState::Insert {
+                    target: TableInsertTarget::After(target),
+                });
+                editor.on_insert_mermaid_block(&rgpui::ClickEvent::default(), window, cx);
+            });
+        });
+
+        editor.update(cx, |editor, cx| {
+            let kinds = editor
+                .document
+                .root_blocks()
+                .iter()
+                .map(|block| block.read(cx).kind())
+                .collect::<Vec<_>>();
+            // 多行编辑块插入后自动补尾部空段落承接光标（既有插入规则）。
+            assert_eq!(
+                kinds,
+                vec![
+                    BlockKind::Paragraph,
+                    BlockKind::MermaidBlock,
+                    BlockKind::Paragraph
+                ]
+            );
+            let mermaid = editor.document.root_blocks()[1].read(cx);
+            // 编辑文本是去围栏正文；序列化输出仍含完整围栏。
+            assert_eq!(mermaid.rendered_text(), "flowchart TD\n    A --> B");
+            assert!(
+                editor
+                    .document
+                    .markdown_text(cx)
+                    .contains("```mermaid\nflowchart TD\n    A --> B\n```")
+            );
+            assert!(editor.context_menu.is_none());
         });
     }
 

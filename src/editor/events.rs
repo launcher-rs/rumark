@@ -3617,7 +3617,7 @@ mod tests {
             (
                 BlockRecord::mermaid("```mermaid\nflowchart LR\nA-->B\n```"),
                 BlockKind::MermaidBlock,
-                "```mermaid\nflowchart LR\nA-->B\n```",
+                "flowchart LR\nA-->B",
             ),
             (
                 BlockRecord::raw_markdown("::: custom\ncontent\n:::"),
@@ -4093,6 +4093,45 @@ mod tests {
             // 块内点击交给块自身处理，编辑器空白逻辑不得改动光标。
             assert_eq!(editor.document.root_count(), 1);
             assert_eq!(paragraph.read(cx).selected_range, 0..0);
+        });
+    }
+
+    /// 点击 Mermaid 预览图：块壳点击处理必须请求聚焦（“点图没反应”回归）。
+    #[rgpui::test]
+    async fn click_mermaid_preview_requests_focus(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let editor = cx.new(|cx| {
+            Editor::from_markdown(
+                cx,
+                "```mermaid\nflowchart TD\n    A --> B\n```".to_string(),
+                None,
+            )
+        });
+
+        let mermaid = editor.update(cx, |editor, cx| {
+            let mermaid = editor.document.first_root().expect("mermaid root").clone();
+            mermaid.update(cx, |block, _cx| {
+                block.last_shell_bounds = Some(Bounds::new(
+                    point(px(0.0), px(0.0)),
+                    size(px(600.0), px(200.0)),
+                ));
+            });
+            mermaid
+        });
+
+        let event = left_click(point(px(300.0), px(100.0)));
+        cx.update(|window, cx| {
+            mermaid.update(cx, |block, cx| {
+                block.on_mouse_down(&event, window, cx);
+            });
+        });
+
+        editor.update(cx, |editor, _cx| {
+            assert_eq!(
+                editor.pending_focus,
+                Some(mermaid.entity_id()),
+                "点击 Mermaid 预览应请求聚焦该块"
+            );
         });
     }
 

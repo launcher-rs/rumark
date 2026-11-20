@@ -585,7 +585,8 @@ async fn mermaid_block_uses_raw_text_editing(cx: &mut TestAppContext) {
     block.update(cx, |block, _cx| {
         assert_eq!(block.kind(), BlockKind::MermaidBlock);
         assert!(block.uses_raw_text_editing());
-        assert_eq!(block.rendered_text(), markdown);
+        // 编辑文本只含围栏之间的正文；序列化仍保留完整围栏原文。
+        assert_eq!(block.rendered_text(), "flowchart LR\nA --> B");
         assert_eq!(block.record.markdown_line(0, None), markdown);
     });
 }

@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::components::markdown::html::{HtmlDocument, parse_html_document};
 use crate::components::markdown::image::parse_standalone_image;
 use crate::components::markdown::inline::InlineTextTree;
-use crate::components::{TableAxisKind, TableAxisMenuOp, TableModel};
+use crate::components::{TableAxisKind, TableAxisMenuOp, TableModel, parse_mermaid_fence_source};
 
 /// 从 `[!TYPE]` 引用头解析出的提示框变体。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -586,9 +586,15 @@ impl BlockRecord {
     }
 
     /// 创建 Mermaid 块。
+    ///
+    /// title 只存围栏之间的图表正文（聚焦编辑时展示的文本，与代码块一致），
+    /// raw_fallback 保留含围栏的完整原文，未编辑过的块保存时无损往返。
     pub fn mermaid(markdown: impl Into<String>) -> Self {
         let markdown = markdown.into();
-        let mut record = Self::with_plain_text(BlockKind::MermaidBlock, markdown.clone());
+        let body = parse_mermaid_fence_source(&markdown)
+            .map(|source| source.body)
+            .unwrap_or_else(|| markdown.clone());
+        let mut record = Self::with_plain_text(BlockKind::MermaidBlock, body);
         record.raw_fallback = Some(markdown);
         record
     }
@@ -734,7 +740,11 @@ impl BlockRecord {
     /// 同步原始回退文本。
     fn sync_raw_fallback(&mut self) {
         if self.kind_falls_back_to_raw() {
-            self.raw_fallback = Some(self.title.plain_text().to_string());
+            self.raw_fallback = if self.kind == BlockKind::MermaidBlock {
+                Some(self.rebuilt_mermaid_fallback())
+            } else {
+                Some(self.title.plain_text().to_string())
+            };
             if self.kind == BlockKind::HtmlBlock {
                 self.html = self
                     .raw_fallback
@@ -745,6 +755,22 @@ impl BlockRecord {
             self.raw_fallback = None;
             self.html = None;
         }
+    }
+
+    /// 重建 Mermaid 块的围栏原文：正文取块标题文本，围栏沿用上一份原文的
+    /// 起止行（保留 `~~~`、围栏长度与大小写 info 等变体），旧原文解析不出
+    /// 围栏时回退标准 ```` ```mermaid ````。仅编辑后经 setter 走到这里；
+    /// 构造时由 `BlockRecord::mermaid` 直接写入原始围栏。
+    fn rebuilt_mermaid_fallback(&self) -> String {
+        let body = self.title.plain_text();
+        if let Some(raw) = self.raw_fallback.as_deref()
+            && parse_mermaid_fence_source(raw).is_some()
+        {
+            let open_line = raw.split('\n').next().unwrap_or_default();
+            let close_line = raw.split('\n').next_back().unwrap_or_default();
+            return format!("{open_line}\n{body}\n{close_line}");
+        }
+        format!("```mermaid\n{body}\n```")
     }
 }
 
@@ -960,6 +986,39 @@ mod tests {
         assert!(!BlockKind::CodeBlock { language: None }.allows_table_insert_from_context());
         assert!(!BlockKind::MathBlock.allows_table_insert_from_context());
         assert!(!BlockKind::MermaidBlock.allows_table_insert_from_context());
+    }
+
+    #[test]
+    fn mermaid_record_edits_body_and_rebuilds_fence() {
+        let record = BlockRecord::mermaid("```mermaid\nflowchart LR\nA --> B\n```");
+        // title 只存正文，未编辑时序列化原样保留围栏原文。
+        assert_eq!(record.title.plain_text(), "flowchart LR\nA --> B");
+        assert_eq!(
+            record.markdown_line(0, None),
+            "```mermaid\nflowchart LR\nA --> B\n```"
+        );
+
+        let mut record = record;
+        record.set_title(InlineTextTree::plain("flowchart LR\nX --> Y"));
+        assert_eq!(
+            record.markdown_line(0, None),
+            "```mermaid\nflowchart LR\nX --> Y\n```"
+        );
+    }
+
+    #[test]
+    fn mermaid_edit_preserves_fence_variants() {
+        // `~~~` 围栏与大小写 info 等变体在编辑后仍按原样式重建。
+        let mut record = BlockRecord::mermaid("~~~MMD\nflowchart LR\nA --> B\n~~~");
+        assert_eq!(
+            record.markdown_line(0, None),
+            "~~~MMD\nflowchart LR\nA --> B\n~~~"
+        );
+        record.set_title(InlineTextTree::plain("pie\ntitle 占比"));
+        assert_eq!(
+            record.markdown_line(0, None),
+            "~~~MMD\npie\ntitle 占比\n~~~"
+        );
     }
 
     #[test]

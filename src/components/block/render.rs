@@ -3473,14 +3473,30 @@ impl Render for Block {
                     self.start_cursor_blink(cx);
                 }
                 let rendered = self.render_mermaid_content(&theme, &i18n, window);
-                // 聚焦时源码行叠加在渲染图上方，图保持可见（对齐 Typora）。
+                // 聚焦时源码面板叠加在渲染图上方，图保持可见（对齐 Typora）。
+                // 面板样式与代码块的代码面板一致：灰底、等宽、正文不含围栏
+                // （围栏由模型在序列化时重建，见 `BlockRecord::mermaid`）。
                 let child = if focused {
                     div()
                         .w_full()
                         .flex()
                         .flex_col()
                         .gap(px(d.block_padding_y))
-                        .child(TextBlockElement::new(cx.entity(), is_placeholder))
+                        .child(
+                            div()
+                                .w_full()
+                                .bg(theme.muted)
+                                .rounded_sm()
+                                .pl(px(d.code_block_padding_x))
+                                .pr(px(d.code_block_padding_x))
+                                .py(px(d.code_block_padding_y))
+                                .font(crate::theme::code_text_font())
+                                .text_size(px(t.code_size))
+                                .line_height(rems(t.text_line_height))
+                                .text_color(theme.foreground)
+                                .min_w(px(0.0))
+                                .child(TextBlockElement::new(cx.entity(), is_placeholder)),
+                        )
                         .child(rendered)
                         .into_any_element()
                 } else {

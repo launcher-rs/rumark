@@ -3654,7 +3654,7 @@ mod tests {
             assert_eq!(visible[1].entity.read(cx).kind(), BlockKind::MermaidBlock);
             assert_eq!(
                 visible[1].entity.read(cx).rendered_text(),
-                "```mermaid\nflowchart LR\nA --> B\n```"
+                "flowchart LR\nA --> B"
             );
             assert_eq!(visible[2].entity.read(cx).kind(), BlockKind::Paragraph);
             assert_eq!(

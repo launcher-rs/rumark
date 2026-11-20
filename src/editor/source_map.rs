@@ -79,6 +79,20 @@ impl Editor {
             content,
             language.map(|language| language.as_ref()),
         );
+        let fence_open = match language {
+            Some(language) => format!("{fence}{language}"),
+            None => fence.clone(),
+        };
+        Self::build_fenced_content_mapping(content, indentation, &fence_open, &fence)
+    }
+
+    /// 为围栏正文构建源码映射（开围栏行 + 逐行缩进正文 + 闭围栏行）。
+    pub(super) fn build_fenced_content_mapping(
+        content: &str,
+        indentation: &str,
+        fence_open: &str,
+        fence_close: &str,
+    ) -> (String, Vec<usize>, Vec<usize>) {
         let mut full = String::new();
         let mut content_to_source = vec![0; content.len() + 1];
         let mut source_to_content = vec![0];
@@ -86,10 +100,7 @@ impl Editor {
         // 开围栏行也要带列表缩进，与 `tree.rs::collect_single_block_markdown_lines`
         // 逐行输出保持一致（否则嵌套列表内代码块的映射会比真实源码短）。
         full.push_str(indentation);
-        full.push_str(&fence);
-        if let Some(language) = language {
-            full.push_str(language);
-        }
+        full.push_str(fence_open);
         full.push('\n');
         source_to_content.resize(full.len() + 1, 0);
 
@@ -125,7 +136,7 @@ impl Editor {
         // 闭围栏行同样带缩进。
         full.push_str(indentation);
         source_to_content.resize(full.len() + 1, content.len());
-        full.push_str(&fence);
+        full.push_str(fence_close);
         source_to_content.resize(full.len() + 1, content.len());
         source_to_content[full.len()] = content.len();
 
@@ -302,6 +313,57 @@ impl Editor {
         full_text.len()
     }
 
+    /// 记录 Mermaid 块的源码映射并返回其源码长度。
+    /// 编辑正文不含围栏，序列化输出是 raw_fallback 的围栏原文，
+    /// 映射须与 `tree.rs` 逐行输出一致：起止围栏行取自 raw_fallback 首末行，
+    /// 正文按渲染深度逐行缩进（与 `markdown_line` 的 `indent_multiline` 一致）。
+    pub(super) fn push_mermaid_block_mapping(
+        &self,
+        block: &Entity<Block>,
+        quote_depth: usize,
+        absolute_start: usize,
+        mappings: &mut Vec<SourceMapEntry>,
+        cx: &App,
+    ) -> usize {
+        let (content, indentation, fence_open, fence_close) = {
+            let block_ref = block.read(cx);
+            let raw = block_ref.record.raw_fallback.clone().unwrap_or_default();
+            let (fence_open, fence_close) =
+                match crate::components::parse_mermaid_fence_source(&raw) {
+                    Some(_) => (
+                        raw.split('\n').next().unwrap_or("```mermaid").to_string(),
+                        raw.split('\n').next_back().unwrap_or("```").to_string(),
+                    ),
+                    // raw_fallback 理论上总是围栏原文（构造与 sync 保证），
+                    // 防御性回退到标准围栏。
+                    None => ("```mermaid".to_string(), "```".to_string()),
+                };
+            (
+                block_ref.rendered_text().to_string(),
+                "  ".repeat(block_ref.render_depth),
+                fence_open,
+                fence_close,
+            )
+        };
+
+        let (full_text, content_to_source, source_to_content) =
+            Self::build_fenced_content_mapping(&content, &indentation, &fence_open, &fence_close);
+        let (full_text, content_to_source, source_to_content) =
+            Self::wrap_source_mapping_with_quotes(
+                full_text,
+                content_to_source,
+                source_to_content,
+                quote_depth,
+            );
+        mappings.push(SourceMapEntry {
+            entity: block.clone(),
+            full_source_range: absolute_start..absolute_start + full_text.len(),
+            content_to_source: Arc::new(content_to_source),
+            source_to_content: Arc::new(source_to_content),
+        });
+        full_text.len()
+    }
+
     /// 按引用层数为源码映射包裹引用前缀。
     pub(super) fn wrap_source_mapping_with_quotes(
         mut full_text: String,
@@ -461,11 +523,13 @@ impl Editor {
             BlockKind::CodeBlock { .. } => {
                 self.push_code_block_mapping(block, quote_depth, absolute_start, mappings, cx)
             }
+            BlockKind::MermaidBlock => {
+                self.push_mermaid_block_mapping(block, quote_depth, absolute_start, mappings, cx)
+            }
             BlockKind::RawMarkdown
             | BlockKind::Comment
             | BlockKind::HtmlBlock
-            | BlockKind::MathBlock
-            | BlockKind::MermaidBlock => {
+            | BlockKind::MathBlock => {
                 self.push_raw_block_mapping(block, quote_depth, absolute_start, mappings, cx)
             }
             BlockKind::Separator => {

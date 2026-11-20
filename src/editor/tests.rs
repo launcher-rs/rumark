@@ -410,6 +410,39 @@ async fn draw_test_md_fixture_does_not_overflow(cx: &mut TestAppContext) {
     });
 }
 
+/// 聚焦 Mermaid 块的渲染回归：源码编辑面板（去围栏代码样式）与预览图叠加绘制不崩溃。
+#[rgpui::test]
+async fn focused_mermaid_block_renders_edit_panel_above_preview(cx: &mut TestAppContext) {
+    init_editor_test_app(cx);
+    let markdown = "```mermaid\nflowchart TD\n    A --> B\n```".to_string();
+    let (editor, cx) = cx.add_window_view(|_window, cx| Editor::from_markdown(cx, markdown, None));
+
+    cx.update(|window, cx| {
+        editor.update(cx, |editor, _cx| {
+            let mermaid_id = editor.document.root_blocks()[0].entity_id();
+            editor.focus_block(mermaid_id);
+        });
+        window.draw(cx).clear(cx);
+    });
+    cx.run_until_parked();
+
+    editor.read_with(cx, |editor, cx| {
+        // 焦点会话已消费，聚焦绘制路径确实执行过。
+        assert!(
+            editor.pending_focus.is_none(),
+            "pending focus should be consumed"
+        );
+        let block = editor.document.root_blocks()[0].read(cx);
+        assert_eq!(block.kind(), BlockKind::MermaidBlock);
+        // 编辑文本是去围栏正文，序列化仍是完整围栏原文。
+        assert_eq!(block.rendered_text(), "flowchart TD\n    A --> B");
+        assert_eq!(
+            editor.document.markdown_text(cx),
+            "```mermaid\nflowchart TD\n    A --> B\n```"
+        );
+    });
+}
+
 /// 全夹具滚动回归：逐段滚到底并绘制每一窗，保证长文档滚动全程无崩溃。
 #[rgpui::test]
 async fn scrolling_full_fixture_renders_every_window(cx: &mut TestAppContext) {
