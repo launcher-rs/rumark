@@ -757,6 +757,21 @@ fn collect_unsupported_quote_region(lines: &[String], start: usize) -> Option<us
     None
 }
 
+/// 顶格根块起始行是否打断列表项的懒续行。
+///
+/// 只判断当前行自身的语法，不做 setext 的下一行预判：`段落\n---` 的 `---`
+/// 已由分隔线分支覆盖，把「下一行是 setext」也算进来会把普通续行误截断。
+fn breaks_list_lazy_continuation(line: &str) -> bool {
+    parse_opening_fence(line).is_some()
+        || is_block_html_start(line)
+        || is_footnote_definition_start(line)
+        || is_reference_definition_start(line)
+        || is_quote_start(line)
+        || BlockKind::parse_heading_line(line).is_some()
+        || BlockKind::parse_separator(line)
+        || is_display_math_start(line)
+}
+
 /// 收集单个列表项覆盖的行区域结束下标。
 fn collect_list_item_region(lines: &[String], start: usize, marker_indent_columns: usize) -> usize {
     let mut index = start + 1;
@@ -782,9 +797,11 @@ fn collect_list_item_region(lines: &[String], start: usize, marker_indent_column
         }
 
         let (indent_columns, _) = leading_indent_columns_and_bytes(line);
-        // 顶格（不超过标记缩进）的分隔线打断列表项：CommonMark 规定分隔线可
-        // 打断段落，不能作为懒续行被吞进条目文本（`- item\n---` 是列表 + 水平线）。
-        if indent_columns <= marker_indent_columns && BlockKind::parse_separator(line) {
+        // 顶格的块起始行打断列表项：CommonMark 规定 ATX 标题、引用、围栏、
+        // 分隔线等可打断段落，不能作为懒续行被吞进条目文本。此处不做 setext
+        // 预判（`段落\n---` 的 `---` 已由分隔线分支覆盖），避免把普通文本行
+        // 误判为块起始。
+        if indent_columns <= marker_indent_columns && breaks_list_lazy_continuation(line) {
             return index.saturating_sub(pending_blank_lines);
         }
         if indent_columns > marker_indent_columns || pending_blank_lines == 0 {
@@ -2702,6 +2719,39 @@ mod tests {
             );
             assert_eq!(visible[1].entity.read(cx).rendered_text(), "fn main() {}");
         });
+    }
+
+    #[rgpui::test]
+    async fn top_level_blocks_break_list_item_lazy_continuation(cx: &mut TestAppContext) {
+        // CommonMark 下顶格的标题/引用/围栏可打断段落，不应被当作列表项懒续行吞掉。
+        type Case = (&'static str, fn(&BlockKind) -> bool);
+        let cases: &[Case] = &[
+            ("- item\n# Heading", |kind| {
+                matches!(kind, BlockKind::Heading { level: 1 })
+            }),
+            ("- item\n> quoted", |kind| {
+                matches!(kind, super::BlockKind::Quote)
+            }),
+            ("- item\n```rust\nfn main() {}\n```", |kind| {
+                matches!(kind, super::BlockKind::CodeBlock { .. })
+            }),
+        ];
+        for (markdown, check) in cases {
+            let editor = cx.new(|cx| Editor::from_markdown(cx, (*markdown).to_string(), None));
+            editor.update(cx, |editor, cx| {
+                let visible = editor.document.visible_blocks();
+                assert_eq!(visible.len(), 2, "markdown: {markdown}");
+                assert_eq!(
+                    visible[0].entity.read(cx).kind(),
+                    BlockKind::BulletedListItem
+                );
+                assert!(
+                    check(&visible[1].entity.read(cx).kind()),
+                    "markdown: {markdown}, second block: {:?}",
+                    visible[1].entity.read(cx).kind()
+                );
+            });
+        }
     }
 
     #[rgpui::test]
