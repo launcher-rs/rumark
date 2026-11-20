@@ -7,12 +7,14 @@
 //!
 //! 三种格式共享下面的块模型：先由 `parse_blocks` 把 Markdown 走
 //! `pulldown-cmark` 解析为与呈现无关的块树，再由各格式渲染器消费。
-//! 降级约定：公式/流程图等编辑器内富渲染在导出中回退为等宽原文，
-//! 以保证内容不丢失；图片按文档目录解析后嵌入（加载失败回退替代文本占位）。
+//! 降级约定：公式等编辑器内富渲染在导出中回退为等宽原文；Mermaid 图导出为
+//! 图片（HTML 内嵌 SVG，PDF/DOCX 内嵌栅格化 PNG），渲染失败才回退源码；
+//! 图片按文档目录解析后嵌入（加载失败回退替代文本占位）。
 
 #[cfg(feature = "export-docx")]
 pub(crate) mod docx;
 pub(crate) mod image;
+pub(crate) mod mermaid;
 #[cfg(feature = "export-pdf")]
 pub(crate) mod pdf;
 
@@ -100,11 +102,13 @@ pub(crate) enum Block {
         inline: Vec<Inline>,
     },
     Paragraph(Vec<Inline>),
-    /// 围栏/缩进代码块（含 mermaid 等原文）。
+    /// 围栏/缩进代码块（非 Mermaid 的原文）。
     Code {
         lang: Option<String>,
         code: String,
     },
+    /// Mermaid 图源码：各格式渲染为图片，失败回退等宽原文。
+    Mermaid(String),
     /// 块级公式原文。
     Math(String),
     Quote(Vec<Block>),
@@ -228,7 +232,11 @@ where
                         _ => {}
                     }
                 }
-                blocks.push(Block::Code { lang, code });
+                if crate::components::mermaid::is_mermaid_info_string(lang.as_deref()) {
+                    blocks.push(Block::Mermaid(code));
+                } else {
+                    blocks.push(Block::Code { lang, code });
+                }
             }
             Event::Start(Tag::BlockQuote(_)) => {
                 let inner = parse_block_list(events);
@@ -388,7 +396,11 @@ where
                         _ => {}
                     }
                 }
-                buffer.push(Block::Code { lang, code });
+                if crate::components::mermaid::is_mermaid_info_string(lang.as_deref()) {
+                    buffer.push(Block::Mermaid(code));
+                } else {
+                    buffer.push(Block::Code { lang, code });
+                }
             }
             Event::Start(Tag::Paragraph) => {
                 let inline = collect_inline(events, &TagEnd::Paragraph);
@@ -629,7 +641,9 @@ where
 fn block_text_fallback(block: &Block) -> String {
     match block {
         Block::Paragraph(inline) | Block::Heading { inline, .. } => inline_text(inline),
-        Block::Code { code, .. } | Block::Math(code) | Block::Html(code) => code.clone(),
+        Block::Code { code, .. } | Block::Mermaid(code) | Block::Math(code) | Block::Html(code) => {
+            code.clone()
+        }
         Block::Quote(inner) => inner
             .iter()
             .map(block_text_fallback)
@@ -693,6 +707,21 @@ mod tests {
         };
         assert_eq!(lang.as_deref(), Some("rust"));
         assert!(code.contains("let x = 1;"), "code: {code}");
+    }
+
+    #[test]
+    fn walker_recognizes_mermaid_fences_as_diagram_blocks() {
+        let blocks = parse_blocks(
+            "```mermaid\nflowchart TD\n  A --> B\n```\n\n~~~mmd\ngraph LR\n  X --> Y\n~~~\n",
+        );
+        assert!(
+            matches!(&blocks[0], Block::Mermaid(code) if code.contains("A --> B")),
+            "blocks: {blocks:?}"
+        );
+        assert!(
+            matches!(&blocks[1], Block::Mermaid(code) if code.contains("X --> Y")),
+            "blocks: {blocks:?}"
+        );
     }
 
     #[test]

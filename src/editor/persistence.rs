@@ -783,7 +783,9 @@ fn markdown_to_standalone_html(
     let mut body = String::new();
     html::push_html(
         &mut body,
-        sanitize_export_events(embed_local_image_events(parser, base_dir)),
+        sanitize_export_events(
+            render_mermaid_events(embed_local_image_events(parser, base_dir)).into_iter(),
+        ),
     );
     let toc = if include_toc {
         render_export_toc(&headings, toc_title)
@@ -855,6 +857,61 @@ fn embed_local_image_events<'a>(
         }
         other => other,
     })
+}
+
+/// 把事件流中的 Mermaid 围栏块替换为内嵌 SVG 图片（渲染失败保留源码）。
+///
+/// 编辑器内 Mermaid 是富渲染块，单文件 HTML 不应把它退化成等宽源码。
+/// 生成的 `<img src="data:image/svg+xml;base64,...">` 会经后续安全清洗，
+/// svg data URL 在 `<img>` 上下文已被白名单放行。
+fn render_mermaid_events<'a>(
+    events: impl Iterator<Item = pulldown_cmark::Event<'a>>,
+) -> Vec<pulldown_cmark::Event<'a>> {
+    use pulldown_cmark::{CodeBlockKind, CowStr, Event, Tag, TagEnd};
+
+    let events: Vec<_> = events.collect();
+    let mut out = Vec::with_capacity(events.len());
+    let mut index = 0;
+    while index < events.len() {
+        let is_mermaid = match &events[index] {
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) => {
+                crate::components::mermaid::is_mermaid_info_string(Some(info))
+            }
+            _ => false,
+        };
+        if !is_mermaid {
+            out.push(events[index].clone());
+            index += 1;
+            continue;
+        }
+
+        // 收集围栏内的源码，连同闭合事件一起替换为一张图片。
+        let mut source = String::new();
+        let mut end = index + 1;
+        while end < events.len() && !matches!(events[end], Event::End(TagEnd::CodeBlock)) {
+            match &events[end] {
+                Event::Text(text) => source.push_str(text),
+                Event::SoftBreak | Event::HardBreak => source.push('\n'),
+                _ => {}
+            }
+            end += 1;
+        }
+        let has_closing_fence = end < events.len();
+        if has_closing_fence {
+            end += 1;
+        }
+
+        if let Some(svg) = crate::export::mermaid::render_svg(&source) {
+            let uri = crate::export::mermaid::svg_data_uri(&svg);
+            out.push(Event::Html(CowStr::Boxed(
+                format!("<img src=\"{uri}\" alt=\"Mermaid\">").into_boxed_str(),
+            )));
+        } else {
+            out.extend(events[index..end].iter().cloned());
+        }
+        index = end;
+    }
+    out
 }
 
 /// 把 Markdown 事件流里的原始 HTML 片段替换为清洗后的安全标记。
@@ -974,6 +1031,36 @@ mod tests {
         assert!(html.contains("color-scheme"), "html: {html:?}");
         // 无标题时不生成目录。
         assert!(!html.contains("<nav class=\"toc\">"), "html: {html:?}");
+    }
+
+    #[test]
+    fn standalone_html_renders_mermaid_as_image() {
+        let html = markdown_to_standalone_html(
+            "# T\n\n```mermaid\nflowchart TD\n  A --> B\n```\n",
+            "T",
+            false,
+            false,
+            "目录",
+            None,
+        );
+        assert!(
+            html.contains("<img src=\"data:image/svg+xml;base64,"),
+            "html: {html}"
+        );
+        assert!(!html.contains("language-mermaid"), "html: {html}");
+    }
+
+    #[test]
+    fn standalone_html_mermaid_failure_keeps_source() {
+        let html = markdown_to_standalone_html(
+            "```mermaid\n这不是图表\n```\n",
+            "T",
+            false,
+            false,
+            "目录",
+            None,
+        );
+        assert!(html.contains("这不是图表"), "html: {html}");
     }
 
     #[test]

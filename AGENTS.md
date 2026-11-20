@@ -60,5 +60,5 @@
 
 - 平台分支多用 `#[cfg(target_os = "macos")]`：`--detach` 重启自身、`on_open_urls` + 150ms 延迟启动窗口、`file_url`。非 macOS 改动后仍要在本机跑通测试，macOS 特有逻辑不要在 Windows/Linux 下强行验证。
 - `#[cfg(not(debug_assertions))] windows_subsystem = "windows"`：release 下 Windows 无控制台，`eprintln!` 调试信息看不到。
-- 已知被裁功能：版本更新检查（不要“补回”，也不要加回 `semver`）。HTML 单文件导出、PDF/DOCX 导出仍在，导出产物里的原始 HTML 必须经 `components::markdown::html::sanitize_html_fragment` 清洗，别绕过它直接 `push_html`。
+- 已知被裁功能：版本更新检查（不要“补回”，也不要加回 `semver`）。HTML 单文件导出、PDF/DOCX 导出仍在，导出产物里的原始 HTML 必须经 `components::markdown::html::sanitize_html_fragment` 清洗，别绕过它直接 `push_html`。Mermaid 导出统一走 `export/mermaid.rs`（HTML 内嵌 SVG data URI，PDF/DOCX 走 resvg 栅格化为 PNG），渲染失败回退等宽源码；新增导出格式时沿用该路径，别再让 Mermaid 退回 `Block::Code`。
 - 配置文件 `config.toml` 带 `version` 字段：解析失败时备份为 `config.toml.bak` 并重建默认配置，由 `PendingConfigRecovery` 在首个窗口弹窗告知；版本号高于当前实现时不得回写默认值。

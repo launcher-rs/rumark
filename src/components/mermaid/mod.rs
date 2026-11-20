@@ -192,6 +192,18 @@ fn render_mermaid_raw(source: &str) -> anyhow::Result<String> {
     Ok(svg)
 }
 
+/// 导出路径用：把 Mermaid 源码渲染为固定像素尺寸的 SVG。
+///
+/// 复用基础 SVG 缓存（与编辑器展示同源），再把根标签上的 `width="100%"` /
+/// `style` 等易失写法重写为 viewBox 对应的明确像素尺寸；HTML 内嵌与 PDF /
+/// DOCX 栅格化都以此为准，避免两张图在不同导出格式里尺寸口径不一致。
+pub(crate) fn render_mermaid_svg_for_export(source: &str) -> anyhow::Result<String> {
+    let path = mermaid_base_cache_path(&mermaid_cache_key(source))?;
+    let base_svg = render_mermaid_to_svg_cached_with(source, &path, render_mermaid_raw)?;
+    let (normalized, _) = scale_mermaid_svg_for_display(&base_svg, 1.0)?;
+    Ok(normalized)
+}
+
 /// 渲染 Mermaid，并额外返回布局供回归用例检查。
 /// 状态图的正交折线圆角由 Mermaid 渲染库直接输出（见 launcher-rs/mermaid-renderer）。
 fn render_mermaid_svg_with_layout(

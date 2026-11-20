@@ -2,7 +2,7 @@
 //!
 //! 经共享块模型直写原生 Word 文档：标题样式、真列表编号、网格表格、
 //! 目录域与中英文字体分区（西文 Calibri/Consolas、中文微软雅黑），
-//! 全程纯 Rust、无外部进程依赖。公式/流程图回退等宽原文，
+//! 全程纯 Rust、无外部进程依赖。公式回退等宽原文，Mermaid 图渲染为图片嵌入，
 //! 段落内图片解码转 PNG 嵌入（加载失败回退替代文本占位）。
 
 use std::path::PathBuf;
@@ -157,7 +157,12 @@ impl DocxWriter {
     /// 加载图片并转为按版心缩放的 PNG 内嵌对象（失败返回 `None` 走占位）。
     fn image_pic(&self, url: &str) -> Option<Pic> {
         let bytes = super::image::load_image_bytes(url, self.base_dir.as_deref())?;
-        let decoded = super::image::decode_image(&bytes)?;
+        self.image_pic_bytes(&bytes)
+    }
+
+    /// 把图片字节转为按版心缩放的 PNG 内嵌对象（文档图片与 Mermaid 共用）。
+    fn image_pic_bytes(&self, bytes: &[u8]) -> Option<Pic> {
+        let decoded = super::image::decode_image(bytes)?;
         let (width, height) = (decoded.width(), decoded.height());
         let mut png = Vec::new();
         decoded
@@ -210,6 +215,26 @@ impl DocxWriter {
                     doc = doc.add_paragraph(Paragraph::new().add_run(mono_run(line)));
                 }
                 doc
+            }
+            Block::Mermaid(source) => {
+                let pic = crate::export::mermaid::render_svg(source)
+                    .and_then(|svg| crate::export::mermaid::svg_to_png_bytes(&svg, 2.0))
+                    .and_then(|png| self.image_pic_bytes(&png));
+                if let Some(pic) = pic {
+                    return doc.add_paragraph(
+                        Paragraph::new()
+                            .align(AlignmentType::Center)
+                            .add_run(Run::new().add_image(pic)),
+                    );
+                }
+                // 渲染失败回退等宽源码，保证内容不丢失。
+                self.push_block(
+                    doc,
+                    &Block::Code {
+                        lang: Some("mermaid".to_string()),
+                        code: source.clone(),
+                    },
+                )
             }
             Block::Math(math) => {
                 let text = math.trim();
@@ -681,6 +706,27 @@ mod tests {
         assert!(document.contains("前文") && document.contains("后文"));
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn docx_renders_mermaid_as_image_not_source() {
+        let options = ExportOptions {
+            title: "mermaid".to_string(),
+            include_toc: false,
+            base_dir: None,
+        };
+        let bytes = render_docx_bytes("```mermaid\nflowchart TD\n  A --> B\n```\n", &options)
+            .expect("渲染成功");
+        let archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).expect("合法 zip");
+        assert!(
+            archive
+                .file_names()
+                .any(|name| name.starts_with("word/media/")),
+            "应内嵌图片"
+        );
+        let document = unpack_docx_part(&bytes, "word/document.xml");
+        assert!(document.contains("blip"), "图片引用落盘");
+        assert!(!document.contains("flowchart TD"), "源码不应写进正文");
     }
 
     #[test]

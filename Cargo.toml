@@ -43,6 +43,10 @@ docx-rs = { version = "0.4", optional = true }
 printpdf = { version = "0.12", default-features = false, features = ["text_layout"], optional = true }
 # 导出嵌图解码用：已在依赖树内（docx-rs/rgpui 均引入），不新增编译负担。
 image = { version = "0.25", optional = true, default-features = false, features = ["png", "jpeg", "gif", "bmp", "tiff", "webp"] }
+# Mermaid 导出栅格化用：resvg/usvg 已由 rgpui 引入同一版本，显式声明仅供导出路径直接调用。
+# feature 与 rgpui 的引入口径保持一致（不额外开 svgz / writer）。
+resvg = { version = "0.48", optional = true, default-features = false, features = ["text", "system-fonts", "memmap-fonts", "raster-images"] }
+usvg = { version = "0.48", optional = true, default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
 tree-sitter = { version = "=0.26.12", optional = true }
 tree-sitter-highlight = { version = "=0.26.12", optional = true }
 tree-sitter-rust = { version = "=0.24.2", optional = true }
@@ -67,8 +71,8 @@ tree-sitter-toml = { package = "adot-tree-sitter-toml", version = "=0.1.0", opti
 [features]
 default = ["code-highlight-core", "code-highlight-official", "code-highlight-config", "html-native", "export-pdf", "export-docx"]
 # 导出功能按格式独立门控：最小构建用 `--no-default-features` 裁掉两者。
-export-pdf = ["dep:printpdf", "dep:image"]
-export-docx = ["dep:docx-rs", "dep:image"]
+export-pdf = ["dep:printpdf", "dep:image", "dep:resvg", "dep:usvg"]
+export-docx = ["dep:docx-rs", "dep:image", "dep:resvg", "dep:usvg"]
 code-highlight-core = ["dep:tree-sitter", "dep:tree-sitter-highlight"]
 html-native = ["dep:tree-sitter", "dep:tree-sitter-html"]
 code-highlight-official = [

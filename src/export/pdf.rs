@@ -530,6 +530,24 @@ impl<'a> Layout<'a> {
                 }
                 self.gap(2.5);
             }
+            Block::Mermaid(source) => {
+                let png = crate::export::mermaid::render_svg(source)
+                    .and_then(|svg| crate::export::mermaid::svg_to_png_bytes(&svg, 2.0));
+                if let Some(png) = png {
+                    self.gap(2.0);
+                    if self.push_picture_bytes(&png, x, width) {
+                        return;
+                    }
+                }
+                // 渲染失败回退等宽源码，保证内容不丢失。
+                self.push_block(
+                    &Block::Code {
+                        lang: Some("mermaid".to_string()),
+                        code: source.clone(),
+                    },
+                    depth,
+                );
+            }
             Block::Math(math) => {
                 let text = math.trim();
                 if text.is_empty() {
@@ -687,7 +705,12 @@ impl<'a> Layout<'a> {
         let Some(bytes) = super::image::load_image_bytes(url, self.base_dir.as_deref()) else {
             return false;
         };
-        let Some(decoded) = super::image::decode_image(&bytes) else {
+        self.push_picture_bytes(&bytes, x_mm, width_mm)
+    }
+
+    /// 嵌入图片字节：文档图片与 Mermaid 渲染出的 PNG 共用同一套缩放与跨页逻辑。
+    fn push_picture_bytes(&mut self, bytes: &[u8], x_mm: f32, width_mm: f32) -> bool {
+        let Some(decoded) = super::image::decode_image(bytes) else {
             return false;
         };
         let (px_w, px_h) = (decoded.width(), decoded.height());
@@ -1260,6 +1283,20 @@ mod tests {
         assert!(text.contains("/XObject"), "应注册 XObject 资源");
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pdf_renders_mermaid_as_image_not_source() {
+        let options = ExportOptions {
+            title: "mermaid".to_string(),
+            include_toc: false,
+            base_dir: None,
+        };
+        let bytes = render_pdf_bytes("```mermaid\nflowchart TD\n  A --> B\n```\n", &options)
+            .expect("渲染成功");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("/Subtype/Image"), "应含图片 XObject");
+        assert!(!text.contains("flowchart TD"), "源码不应写进 PDF：{text}");
     }
 
     #[test]
