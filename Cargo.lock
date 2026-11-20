@@ -5881,7 +5881,7 @@ dependencies = [
 
 [[package]]
 name = "rumark"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "adot-tree-sitter-toml",
  "anyhow",
