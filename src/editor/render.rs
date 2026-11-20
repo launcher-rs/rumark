@@ -979,6 +979,8 @@ impl Render for Editor {
         self.apply_pending_scroll_into_view(window, cx);
         if self.should_defer_large_document_refresh() {
             self.stable_snapshot_stale = true;
+            // 排期空闲刷新：输入停顿后由定时器统一计算，不占下一次按键。
+            self.schedule_stale_snapshot_refresh(cx);
         } else if self.stable_snapshot_stale {
             // 首次精确映射按需刷新，空闲重绘和滚动不触发全篇派生。
         } else {

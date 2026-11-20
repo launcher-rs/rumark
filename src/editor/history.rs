@@ -1,6 +1,10 @@
 //! 撤销历史与选区快照恢复。
 
 use super::*;
+use crate::components::update_entity_forgiving;
+
+/// 大文档连续输入判定：距最后一次编辑不足该时长时视为仍在输入。
+pub(super) const INPUT_IDLE_DELAY: Duration = Duration::from_millis(300);
 
 impl Editor {
     /// 构造空选区快照。
@@ -118,11 +122,35 @@ impl Editor {
     /// 大文档连续输入时暂缓昂贵的全篇快照刷新，输入停顿后再统一计算。
     pub(super) fn should_defer_large_document_refresh(&self) -> bool {
         const LARGE_DOCUMENT_BLOCKS: usize = 256;
-        const INPUT_IDLE_DELAY: Duration = Duration::from_millis(300);
         self.document.visible_block_count() >= LARGE_DOCUMENT_BLOCKS
             && self
                 .last_document_edit
                 .is_some_and(|edited| edited.elapsed() < INPUT_IDLE_DELAY)
+    }
+
+    /// 安排一次空闲快照刷新。
+    ///
+    /// 大文档输入停顿后的全篇刷新（整篇派生 + 选区映射）约需数十毫秒；
+    /// 若留在下一次按键的 PrepareUndo 事件里同步执行，停顿后的第一键就会
+    /// 明显卡顿。这里改由空闲定时器触发：触发时若仍在输入则跳过，渲染帧
+    /// 会在下一帧继续排期，空闲真正到来时才付出这次成本。
+    pub(super) fn schedule_stale_snapshot_refresh(&mut self, cx: &mut Context<Self>) {
+        if self.snapshot_refresh_task.is_some() || !self.stable_snapshot_stale {
+            return;
+        }
+        let weak = cx.entity().downgrade();
+        self.snapshot_refresh_task = Some(cx.spawn(
+            async move |_this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                cx.background_executor().timer(INPUT_IDLE_DELAY).await;
+                let _ = update_entity_forgiving(&weak, cx, |editor, cx| {
+                    editor.snapshot_refresh_task = None;
+                    if editor.stable_snapshot_stale && !editor.should_defer_large_document_refresh()
+                    {
+                        editor.refresh_stable_document_snapshot(cx);
+                    }
+                });
+            },
+        ));
     }
 
     /// 连续输入历史已超出合并窗口时，下一次输入前必须先固化当前文本。

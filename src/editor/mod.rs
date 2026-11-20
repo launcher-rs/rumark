@@ -183,6 +183,8 @@ pub struct Editor {
     last_stable_source_text: Arc<str>,
     /// 大文档文字输入期间延后刷新全篇历史快照与来源映射。
     stable_snapshot_stale: bool,
+    /// 输入停顿后的空闲快照刷新任务：触发时若仍在输入则跳过并等下一帧重排。
+    snapshot_refresh_task: Option<Task<()>>,
     last_document_edit: Option<Instant>,
     history_restore_in_progress: bool,
     image_reference_definitions: Arc<ImageReferenceDefinitions>,
@@ -427,6 +429,7 @@ impl Editor {
             last_selection_snapshot: Self::empty_selection_snapshot(),
             last_stable_source_text: Arc::from(normalized),
             stable_snapshot_stale: false,
+            snapshot_refresh_task: None,
             last_document_edit: None,
             history_restore_in_progress: false,
             image_reference_definitions: Arc::default(),

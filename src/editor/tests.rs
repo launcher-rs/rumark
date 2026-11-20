@@ -5075,3 +5075,52 @@ async fn deferred_large_document_load_completes_in_budgeted_chunks(cx: &mut Test
         .join("\n\n");
     assert_deferred_load_matches_reference(cx, &lists);
 }
+
+#[rgpui::test]
+async fn idle_timer_refreshes_stale_snapshot_after_pause(cx: &mut TestAppContext) {
+    init_editor_test_app(cx);
+    // 覆盖大文档输入停顿后的空闲快照刷新：延后刷新期间快照保持陈旧，
+    // 空闲定时器触发后完成刷新，下一次按键不再承担整篇派生成本。
+    let markdown = (0..300)
+        .map(|index| format!("# Section {index}"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let (editor, cx) = cx.add_window_view(|_window, cx| Editor::from_markdown(cx, markdown, None));
+    redraw(cx);
+
+    editor.update(cx, |editor, cx| {
+        let block = editor
+            .document
+            .visible_block_at(0)
+            .expect("首个可见块应存在")
+            .clone();
+        block.update(cx, |block, _cx| {
+            block
+                .record
+                .set_title(InlineTextTree::plain("# Section 0 edited"));
+            block.refresh_render_cache();
+        });
+        editor.mark_dirty(cx);
+    });
+    redraw(cx);
+    editor.read_with(cx, |editor, _cx| {
+        assert!(
+            editor.stable_snapshot_stale,
+            "编辑后的渲染帧应进入延后刷新状态"
+        );
+        assert!(
+            editor.snapshot_refresh_task.is_some(),
+            "渲染帧应排期空闲快照刷新"
+        );
+    });
+
+    // 让真实时间越过空闲阈值，再推进测试时钟触发定时器任务。
+    std::thread::sleep(super::history::INPUT_IDLE_DELAY + Duration::from_millis(100));
+    cx.executor().advance_clock(Duration::from_millis(600));
+    cx.run_until_parked();
+
+    editor.read_with(cx, |editor, _cx| {
+        assert!(!editor.stable_snapshot_stale, "空闲定时器应完成快照刷新");
+        assert!(editor.snapshot_refresh_task.is_none());
+    });
+}
