@@ -1258,25 +1258,32 @@ impl Block {
     /// 检测编辑后标题中的 Markdown 快捷前缀，并据此转换块类型
     ///（如 `"- "` 转无序列表项）。
     /// 仅当当前类型为 [`BlockKind::Paragraph`] 时触发。
-    /// 返回可能更新的类型、去掉前缀的标题、新光标偏移及去掉的前缀长度。
+    /// 返回可能更新的类型、去掉前缀的标题、新光标偏移、去掉的前缀长度，
+    /// 以及有序列表项从快捷前缀解析出的原始编号（其余情况为 `None`）。
     fn normalize_after_title_edit(
         &self,
         mut next_title: InlineTextTree,
         cursor: usize,
-    ) -> (BlockKind, InlineTextTree, usize, usize) {
+    ) -> (BlockKind, InlineTextTree, usize, usize, Option<u64>) {
         if self.is_table_cell() {
-            return (self.kind(), next_title, cursor, 0);
+            return (self.kind(), next_title, cursor, 0, None);
         }
 
         if !self.uses_raw_text_editing() && self.kind() == BlockKind::Paragraph {
             let plain_text = next_title.plain_text();
             if let Some((kind, prefix_len)) = BlockKind::detect_block_shortcut(&plain_text) {
+                // 有序列表捕获用户输入的起始号（`3. ` → 3），与导入/粘贴路径
+                // 一致；其余块类型的编号无意义，留空。
+                let list_number = (kind == BlockKind::NumberedListItem)
+                    .then(|| BlockKind::numbered_list_shortcut_number(&plain_text))
+                    .flatten();
                 next_title.strip_visible_prefix(prefix_len);
                 return (
                     kind,
                     next_title,
                     cursor.saturating_sub(prefix_len),
                     prefix_len,
+                    list_number,
                 );
             }
         }
@@ -1290,11 +1297,12 @@ impl Block {
                     next_title,
                     cursor.saturating_sub(prefix_len),
                     prefix_len,
+                    None,
                 );
             }
         }
 
-        (self.kind(), next_title, cursor, 0)
+        (self.kind(), next_title, cursor, 0, None)
     }
 
     /// 判断引用行是否开启块语法。
@@ -1682,7 +1690,7 @@ impl Block {
         let keep_projection =
             self.projection.is_some() && self.edit_mode.supports_inline_projection();
 
-        let (next_kind, normalized_title, adjusted_cursor, shortcut_removed_len) =
+        let (next_kind, normalized_title, adjusted_cursor, shortcut_removed_len, shortcut_number) =
             self.normalize_after_title_edit(next_title, cursor_clean);
         let should_restart_numbered_list = old_kind == BlockKind::Paragraph
             && old_title_was_empty
@@ -1699,6 +1707,11 @@ impl Block {
 
         self.record.set_kind(next_kind);
         self.record.set_title(normalized_title);
+        // 交互输入的有序列表捕获原始起始号（`3. ` → 3），否则运行时从 1 起排，
+        // 与导入/粘贴路径不一致。非快捷前缀转换时不动既有编号。
+        if shortcut_number.is_some() {
+            self.record.set_list_number(shortcut_number);
+        }
         self.numbered_list_restart_requested = should_restart_numbered_list;
         self.sync_edit_mode_from_kind();
         self.refresh_render_cache();

@@ -355,8 +355,14 @@ impl Editor {
         };
         let matches = Self::compute_find_matches(&source, &query, match_case, whole_word);
         let Some(position) = matches.iter().position(|range| range.start >= anchor) else {
-            // 锚点后无匹配则回绕到首个。
-            self.apply_find_replacement(&source, &[], &replacement, 0, cx);
+            // 锚点后无匹配则回绕到首个：传空切片不会替换任何内容，与注释意图不符。
+            // 无匹配时 `compute_find_matches` 返回空，取首个需先判空。
+            if let Some(first) = matches.first() {
+                let target = first.clone();
+                self.apply_find_replacement(&source, &[target], &replacement, 0, cx);
+            } else {
+                cx.notify();
+            }
             return;
         };
         let target = matches[position].clone();

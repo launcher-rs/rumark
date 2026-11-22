@@ -30,6 +30,25 @@ mod close;
 mod context_menu;
 mod derive;
 mod document;
+mod document_host;
+/// 一窗多文档容器（薄壳 host），供 app_menu 建窗与动作路由使用。
+pub(crate) use document_host::{DocumentHost, WindowCloseFlow};
+
+/// 未保存对话框确认后的关闭目标。
+///
+/// 默认 `Window` 保持 standalone 编辑器（测试、无 host 路径）原语义；
+/// 多文档 host 创建的编辑器在关闭单个 tab 前切到 `Tab`，确认后由宿主移除该 tab。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum CloseScope {
+    #[default]
+    Window,
+    /// 主动关闭单个 tab。
+    Tab,
+    /// 关窗/退出流程中的某个脏 tab：确认后移除 tab 并推进下一轮。
+    WindowFlow,
+    /// 右键菜单批量关闭（关闭其他/右侧）流程中的某个脏 tab：确认后移除并推进下一轮。
+    BatchFlow,
+}
 mod editor_context;
 mod events;
 mod file_drop;
@@ -48,6 +67,7 @@ mod source_map;
 mod status_bar;
 mod table_edit;
 mod titlebar_menu;
+mod update;
 /// 测试用：统计右键弹出菜单的构造次数，用于回归“单次右键只弹一层菜单”。
 #[cfg(test)]
 pub(crate) static MENU_BUILD_COUNT: std::sync::atomic::AtomicUsize =
@@ -133,9 +153,17 @@ pub struct Editor {
     /// 上一帧挂载区间在滚动容器子节点中的位置。
     prev_mounted_run: Option<MountedRow>,
     close_guard_installed: bool,
+    /// 检查更新进行中，防止重复点击触发并发请求。
+    update_busy: bool,
     show_unsaved_changes_dialog: bool,
-    /// 为真时，下次保存成功后关闭窗口。
+    /// 为真时，下次保存成功后按 `close_scope` 关闭目标。
     pending_close_after_save: bool,
+    /// 保存/放弃后关闭的目标（窗口或所属 tab）。
+    close_scope: CloseScope,
+    /// 所属多文档容器；关闭 tab 时用它定位并移除本编辑器。
+    owner_host: Option<WeakEntity<DocumentHost>>,
+    /// 宿主是否启用了多标签页；关闭时拖入/点文件走「替换当前文档」。
+    multi_tab_enabled: bool,
     /// 关闭对话框取消时要恢复的焦点目标。
     close_dialog_restore_focus: Option<EntityId>,
     pending_drop_replace_path: Option<PathBuf>,
@@ -201,6 +229,10 @@ pub struct Editor {
     status_stats_cache: RefCell<Option<status_bar::StatusStats>>,
     /// 本窗口的图片缓存：成功结果按 LRU 限量，失败结果到期后自动重试。
     image_cache: Entity<image_cache::BoundedImageCache>,
+    /// 多文档 tab 模式下由窗口容器（DocumentHost）注入的条带视图（tab 条），
+    /// 在标题栏之后、正文之前渲染。standalone 编辑器为 `None`，行为与改造前一致。
+    /// 用 `AnyView` 而非 `AnyElement`：实体句柄可廉价克隆，且自带渲染与事件。
+    top_strip: Option<AnyView>,
 }
 
 /// 表格块与某个单元格编辑器之间的运行时绑定。
@@ -396,8 +428,12 @@ impl Editor {
             row_stride_width: None,
             prev_mounted_run: None,
             close_guard_installed: false,
+            update_busy: false,
             show_unsaved_changes_dialog: false,
             pending_close_after_save: false,
+            close_scope: CloseScope::Window,
+            owner_host: None,
+            multi_tab_enabled: true,
             close_dialog_restore_focus: None,
             pending_drop_replace_path: None,
             show_drop_replace_dialog: false,
@@ -443,6 +479,7 @@ impl Editor {
             fingerprint_cache: Cell::new(None),
             status_stats_cache: RefCell::new(None),
             image_cache,
+            top_strip: None,
         };
         editor.rebuild_table_runtimes(cx);
         editor.rebuild_image_runtimes(cx);
@@ -572,5 +609,12 @@ impl Editor {
             cx,
         );
         true
+    }
+
+    /// 注入多文档 tab 条带视图（由 DocumentHost 在建立窗口时设置一次）。
+    /// 传入 `None` 可清空，回到 standalone 外观。
+    pub(crate) fn set_top_strip(&mut self, strip: Option<AnyView>, cx: &mut Context<Self>) {
+        self.top_strip = strip;
+        cx.notify();
     }
 }

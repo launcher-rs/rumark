@@ -73,6 +73,11 @@ impl RumarkConfigDirs {
     pub(crate) fn app_config_file(&self) -> PathBuf {
         self.root.join("config.toml")
     }
+
+    /// 返回更新包落地目录（下载的可执行文件 `.new` 放这里）。
+    pub(crate) fn updates_dir(&self) -> PathBuf {
+        self.root.join("update")
+    }
 }
 
 /// 读取最近文件历史记录。

@@ -509,6 +509,11 @@ impl Editor {
         cx.notify();
     }
 
+    /// 文档是否有未保存修改（退出流程逐窗确认用）。
+    pub(crate) fn is_document_dirty(&self) -> bool {
+        self.document_dirty
+    }
+
     /// 标记文档为脏并排队到下一渲染帧刷新窗口标题与编辑状态。
     pub(super) fn mark_dirty(&mut self, cx: &mut Context<Self>) {
         self.last_document_edit = Some(Instant::now());
@@ -516,6 +521,7 @@ impl Editor {
             self.document_dirty = true;
             self.pending_window_edited = true;
             self.pending_window_title_refresh = true;
+            self.notify_host_window_chrome_refresh(cx);
             cx.notify();
         }
     }

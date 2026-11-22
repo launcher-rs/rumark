@@ -325,11 +325,10 @@ impl DocumentTree {
             Self::normalize_block_list(&mut children, cx);
 
             if block.read(cx).kind().supports_children() {
-                block.update(cx, {
-                    let children = children.clone();
-                    move |block, _cx| {
-                        block.children = children.clone();
-                    }
+                // children 已是 take_children 取出的新 Vec，直接 move 进去，
+                // 避免为闭包额外克隆一份（两个分支互斥，各自只消费一次）。
+                block.update(cx, move |block, _cx| {
+                    block.children = children;
                 });
             } else if !children.is_empty() {
                 blocks.splice(index + 1..index + 1, children);

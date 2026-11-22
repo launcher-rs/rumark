@@ -442,7 +442,11 @@ impl Editor {
     }
 
     /// 同步窗口的已编辑标记。
+    /// 多文档模式下由 `DocumentHost` 聚合所有 tab 统一设置，这里不再单独写。
     fn sync_window_edited_state(&mut self, window: &mut Window) {
+        if self.owner_host.is_some() {
+            return;
+        }
         if self.pending_window_edited {
             self.pending_window_edited = false;
             window.set_window_edited(true);
@@ -464,7 +468,11 @@ impl Editor {
     }
 
     /// 同步系统窗口标题（有挂起刷新时才执行）。
+    /// 多文档模式下由 `DocumentHost` 统一设置，这里不再单独写。
     fn sync_window_title(&mut self, window: &mut Window, i18n: &I18nSnapshot) {
+        if self.owner_host.is_some() {
+            return;
+        }
         if self.pending_window_title_refresh {
             self.pending_window_title_refresh = false;
             let title = Self::window_title(self.file_path.as_deref(), self.document_dirty, i18n);
@@ -1422,6 +1430,13 @@ impl Render for Editor {
                     .children(menu_buttons),
             ),
         );
+        // 多文档 tab 条带：由窗口容器注入，紧随标题栏之后、正文之前。
+        // standalone 编辑器没有条带，布局与改造前完全一致。
+        let base = if let Some(strip) = self.top_strip.clone() {
+            base.child(strip)
+        } else {
+            base
+        };
         let workspace_width =
             self.workspace_effective_panel_width(f32::from(window.viewport_size().width));
         let is_resizing_workspace = self.workspace.resize_drag.is_some();

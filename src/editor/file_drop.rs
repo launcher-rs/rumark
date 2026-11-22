@@ -43,7 +43,42 @@ impl Editor {
             .collect()
     }
 
-    /// 处理外部路径拖放：Markdown 替换文档，图片插入光标处，其余提示。
+    /// 在所属 host 中以新 tab 打开 Markdown 文件。
+    ///
+    /// standalone 编辑器（无宿主）返回 `false`，调用方走原「替换当前文档」路径；
+    /// 读文件失败也返回 `false`，由原路径统一弹出错误提示。
+    pub(super) fn open_dropped_markdown_in_host_tab(
+        &self,
+        path: &Path,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(host) = self.owner_host.clone() else {
+            return false;
+        };
+        if !self.multi_tab_enabled {
+            // 单文档模式：交回调用方走「替换当前文档」。
+            return false;
+        }
+        // 先在同步阶段读一次文件：读失败交回调用方走原替换路径，由它统一弹
+        // 错误提示（延后之后再想弹窗就拿不到当前 window 了）。
+        if super::read_markdown_file(path).is_err() {
+            return false;
+        }
+        // recent 记录只依赖 App 状态，可在同步阶段完成（Context<Editor> deref 到 App）。
+        crate::app_menu::record_recent_file_from_editor(path, cx);
+        // 拖放回调期间当前 Editor 正处于 update 中；host 的空白复用判断要
+        // read 活动 Editor（往往就是当前这个），同步调用会触发实体重入
+        // panic（entity_map：无法在 read 时操作正在被更新的实体）。
+        // 延后一拍，等当前 update 结束后再操作 host。
+        let path = path.to_path_buf();
+        cx.spawn(async move |_, cx| {
+            let _ = host.update(cx, |host, cx| host.open_path_in_tab(&path, cx));
+        })
+        .detach();
+        true
+    }
+
+    /// 处理外部路径拖放：多文档窗口中 Markdown 进新 tab，图片插入光标处，其余提示。
     pub(crate) fn on_external_paths_drop(
         &mut self,
         paths: &ExternalPaths,
@@ -51,7 +86,9 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         if let Some(path) = Self::first_dropped_markdown_path(paths.paths()) {
-            self.request_dropped_markdown_replace(path, window, cx);
+            if !self.open_dropped_markdown_in_host_tab(&path, cx) {
+                self.request_dropped_markdown_replace(path, window, cx);
+            }
             return;
         }
 
@@ -285,6 +322,7 @@ impl Editor {
         self.history_restore_in_progress = false;
         // 当前 Markdown 已直接保存为稳定快照，避免载入结束时又强制生成整篇映射。
         self.sync_workspace_after_document_path_change(cx);
+        self.notify_host_window_chrome_refresh(cx);
         cx.notify();
     }
 

@@ -33,6 +33,7 @@ mod i18n;
 mod net;
 mod text_offsets;
 mod theme;
+mod update;
 #[cfg(target_os = "windows")]
 mod windows_integration;
 

@@ -150,6 +150,7 @@ impl Editor {
         self.pending_close_after_save = false;
         self.close_dialog_restore_focus = None;
         self.sync_workspace_after_document_path_change(cx);
+        self.notify_host_window_chrome_refresh(cx);
         cx.notify();
     }
 
@@ -193,6 +194,7 @@ impl Editor {
         let (default_dir, suggested_name) = self.save_dialog_defaults();
         let prompt = cx.prompt_for_new_path(&default_dir, suggested_name.as_deref());
         let weak_editor = cx.entity().downgrade();
+        let weak_editor_for_close = weak_editor.clone();
         let weak_editor_for_cancel = weak_editor.clone();
         let weak_editor_for_error = weak_editor.clone();
         let weak_editor_for_write_error = weak_editor.clone();
@@ -292,10 +294,14 @@ impl Editor {
             });
             let _ = cx.update_window(
                 window_handle,
-                move |_view: AnyView, window: &mut Window, _cx: &mut App| {
+                move |_view: AnyView, window: &mut Window, cx: &mut App| {
                     window.set_window_edited(false);
                     if should_close_after_save {
-                        window.remove_window();
+                        // 关闭目标可能是窗口，也可能是所属 tab；后者需要 Editor 的
+                        // Context 才能定位 host，故回到编辑器实体上分派。
+                        let _ = weak_editor_for_close.update(cx, |this, cx| {
+                            this.finish_close(window, cx);
+                        });
                     }
                 },
             );
@@ -312,7 +318,7 @@ impl Editor {
             let should_close_after_save = self.pending_close_after_save;
             if self.save_to_existing_path(&path, window, cx) {
                 if should_close_after_save {
-                    window.remove_window();
+                    self.finish_close(window, cx);
                 }
             } else if should_close_after_save {
                 self.discard_pending_close_after_save(cx);
@@ -709,26 +715,42 @@ fn render_export_toc(headings: &[ExportHeading], toc_title: &str) -> String {
     let mut toc = String::from("<nav class=\"toc\">\n<strong>");
     toc.push_str(&html_escape(toc_title));
     toc.push_str("</strong>\n");
-    let mut depth = 0;
+    // 嵌套 `<ul>` 必须放进父 `<li>` 内才符合 HTML 规范：让每个 `<li>` 延迟闭合，
+    // 降层时先关 `<li>` 再关 `<ul>`，避免 `<ul>` 直接挂在 `<ul>` 下的非法结构
+    //（旧实现连续 push `<ul>`，浏览器虽容错但语义错乱）。跳级标题压平到下一层，
+    // 防止中间层级缺位时出现空嵌套。
+    let mut open_depth = 0usize;
     for heading in headings {
-        let level = heading.level.clamp(1, 6) as usize;
-        while depth < level {
-            toc.push_str("<ul>\n");
-            depth += 1;
-        }
-        while depth > level {
-            toc.push_str("</ul>\n");
-            depth -= 1;
+        let raw_level = heading.level.clamp(1, 6) as usize;
+        let level = if open_depth == 0 {
+            1
+        } else {
+            raw_level.min(open_depth + 1)
+        };
+        if level > open_depth {
+            for _ in 0..(level - open_depth) {
+                toc.push_str("<ul>\n");
+            }
+            open_depth = level;
+        } else if level == open_depth {
+            toc.push_str("</li>\n");
+        } else {
+            toc.push_str("</li>\n");
+            for _ in 0..(open_depth - level) {
+                toc.push_str("</ul>\n");
+                toc.push_str("</li>\n");
+            }
+            open_depth = level;
         }
         toc.push_str("<li><a href=\"#");
         toc.push_str(&html_escape(&heading.slug));
         toc.push_str("\">");
         toc.push_str(&html_escape(&heading.label));
-        toc.push_str("</a></li>\n");
+        toc.push_str("</a>\n");
     }
-    while depth > 0 {
+    for _ in 0..open_depth {
+        toc.push_str("</li>\n");
         toc.push_str("</ul>\n");
-        depth -= 1;
     }
     toc.push_str("</nav>\n");
     toc
@@ -1103,6 +1125,16 @@ mod tests {
         assert!(html.contains("href=\"#a\""), "html: {html:?}");
         assert!(html.contains("href=\"#a-1\""), "html: {html:?}");
         assert!(html.contains("id=\"a\""), "html: {html:?}");
+    }
+
+    #[test]
+    fn export_toc_nests_ul_inside_li() {
+        // 嵌套 <ul> 必须落在 <li> 内：不得出现 `<ul>` 直接跟 `<ul>` 的非法结构。
+        let markdown = "# A\n\n## B\n\n### C\n\n## D\n\n# E\n";
+        let html = markdown_to_standalone_html(markdown, "T", false, true, "目录", None);
+        assert!(!html.contains("<ul>\n<ul>"), "存在裸露的嵌套 ul：{html:?}");
+        // 每个子 ul 前应有未闭合的 <li>（以 `</a>\n<ul>` 形式出现）。
+        assert!(html.contains("</a>\n<ul>"), "子列表未嵌进 li：{html:?}");
     }
 
     #[test]

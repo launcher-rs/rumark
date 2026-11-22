@@ -19,8 +19,9 @@ repository = "https://github.com/launcher-rs/rumark"
 anyhow = "1"
 base64 = "0.23"
 uuid = "1.23"
-rgpui = { version = "1.7", features = ["inspector"] }
-rgpui-platform = { version = "1.7" }
+# rgpui 与 rgpui-platform 必须同版本，避免双版本类型冲突；Cargo.lock 锁定精确版本。
+rgpui = { version = "1.8.1", features = ["inspector"] }
+rgpui-platform = "1.8.1"
 unicode-segmentation = "1.13"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -38,6 +39,8 @@ ratex-svg = { version = "0.1.9", features = ["embed-fonts", "standalone"] }
 # 本地联调：在 [patch.crates-io] 里临时指向旁边 checkout 的该仓，不要长期改回 git 依赖。
 mermaid-renderer = "0.1"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "default-tls"] }
+# 检查更新：解压 GitHub Release 的单文件 zip 包（原先仅测试用，现正式构建也需要）。
+zip = "2"
 sys-locale = "0.3"
 docx-rs = { version = "0.4", optional = true }
 printpdf = { version = "0.12", default-features = false, features = ["text_layout"], optional = true }
@@ -104,9 +107,9 @@ winreg = "0.56"
 embed-resource = "3.0.12"
 
 [dev-dependencies]
-rgpui = { version = "1.7", features = ["test-support"] }
-# 仅测试用：解包生成的 docx 校验 document.xml 结构，不进正式构建。
-zip = "2"
+rgpui = { version = "1.8.1", features = ["test-support"] }
+# 1.8 起 test-support 必须同时在 platform 上转发，否则窗口级测试辅助方法缺失。
+rgpui-platform = { version = "1.8.1", features = ["test-support"] }
 
 # 本 crate 开一档优化：块布局、文本测量与逐帧重绘这些热路径在 opt-level 0 下慢
 # 一个数量级；opt-level 1 相比 2 的运行时差别很小，但增量编译快得多。

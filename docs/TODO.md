@@ -5,23 +5,26 @@
 
 ## 1. 工作区状态与改动分组
 
+2026-11-21 **检查更新功能（未提交）**：新增 `src/update.rs`（纯逻辑：语义版本比较、平台资产名、镜像 URL 拼接、Release JSON 解析、reqwest blocking 下载与 zip 解压；内置镜像 ghfast.top/ghproxy.net + 直连兜底，实测 moeyy 已失效）+ `src/editor/update.rs`（UI 驱动：`cx.spawn` + `run_blocking` 独立线程跑网络、`window.prompt` 弹结果/下载/错误，忙态防重入）。Help 菜单加「检查更新」（`CheckForUpdates` 动作）、偏好设置加「更新」页（自定义镜像多行输入 + 检查按钮），偏好文件新增 `update.custom_mirrors`。**手动触发、不自动检查**。zip 从 dev-dep 提为正式依赖。验证：1046 passed（原 1041 + 5 个 update 单测）、clippy --all-targets 0 警告。设计见 `docs/auto-update.md`。遗留：Linux/macOS 的 tar.gz 解包未实现（提示手动下载）；跨进程自动替换 exe 脚本未做（当前落地 `.new` + 手动替换说明）。
+
+2026-11-21 ~ 11-22 **rgpui 1.8 兼容性测试与正式版切换（未提交）**：发版前先把 `Cargo.toml` 的 `rgpui`、`rgpui-platform`（含 dev-dependencies）从 crates.io `1.7` 临时切到 git `https://github.com/launcher-rs/rgpui` 的 `feat/1.8.0` 分支做兼容性测试（锁定 `#924299da`）——`cargo test --bin rumark` **1041 passed / 0 failed / 9 ignored**，无需任何 rumark 侧 API 适配，确认 1.8 向后兼容。1.8 正式发布后（2026-11-22）已切回 crates.io：`rgpui` / `rgpui-platform` 均为 `version = "1.8.1"`（1.8.0 发布后用户指定再升到 1.8.1；主依赖保留 `inspector`，dev-dependencies 保留 `test-support` 且 1.8 起必须在 platform 上显式转发），`Cargo.lock` 锁定 registry 源 `rgpui v1.8.1`，**无任何 git 依赖残留**。1.8.0 切换验证：`cargo test --bin rumark` **1053 passed / 0 failed / 9 ignored**、clippy `--all-targets -D warnings` 0 警告、fmt `--check`、`--no-default-features` 全绿（crates.io 版与 git 测试分支 API 完全一致，无需适配）。1.8.1 用 `cargo update -p rgpui --precise 1.8.1` 升级：rgpui 全家桶（含 platform/macros/wgpu/web/linux/windows/dom）同步到 1.8.1，依赖树调整较大（字体栈换 zed-font-kit→rust-fontconfig/skrifa，新增 x11rb/zbus/rgpui-xim，移除 sha2/shlex/tiny-skia-path 等）。升级后全套验证同样全绿：`cargo check --bin rumark --tests`、`cargo test --bin rumark` **1053 passed / 0 failed / 9 ignored**、clippy `--all-targets -D warnings` 0 警告、fmt `--check`、`--no-default-features`，无需 rumark 侧 API 适配。注意：1.8 引入 `aws-lc-sys`（TLS 链）导致首次全量编译很慢；Windows 上 `cargo update` 写 lock 偶发 os error 5（被并发 `cargo check` 占用），重试即可。
+
 2026-11-21 **整体代码审查修复批次（未提交）**：发布 0.2.4 前的全面审查（2 个并行子代理 + 人工复核）发现并修复 2 个 P0、3 个 P1、5 个 P2。① P0：`document.rs` 导入器 Setext 分支无段落守卫（`# 标题\n---` 打开→保存即损坏）——分支移到所有块类型判定之后（段落兜底前），顺带拦截列表项后顶格分隔线被懒续行吞掉（`collect_list_item_region`，CommonMark 分隔线可打断段落）；② P0：`events.rs` `RequestMergeIntoPrev` 无前块类型守卫（段首退格把文本 set_title 进分隔线/表格，保存即丢）——用 `is_atomic_block()` 拦截；③ P1：有序列表起始号保留——`BlockRecord.list_number`（解析时捕获）+ `sync_block_list` 分组起始号感知（组内按位置续排，CommonMark 只认首项）；④ P1：HTML 导出 svg/tiff/ico 丢图——`is_safe_data_url` 拆出 `is_supported_image_data_url` 仅对 `img[src]` 放行（`a[href]` 不放行 svg：顶层文档可执行内嵌脚本），`embedded_mime_for_extension` 与清洗白名单对齐；⑤ P1：代码围栏变体保留——`BlockRecord.code_fence` + `code_fence_markdown`（原文变体对当前内容可安全闭合时原样保留，冲突回退重算），tree.rs/source_map.rs 共用；⑥ P2：Mermaid 空正文两行围栏映射比序列化多一行（后续块偏移漂移，曾致越界 panic 的同类）——`push_mermaid_block_mapping` 对无正文行走 `build_empty_fence_mapping`；⑦ P2：数学/Mermaid 非聚焦块补 `last_bounds` 兜底（跨块选区按点命中）；⑧ P2：DOCX 每个有序列表独立编号定义（起始号落盘，嵌套列表栈式压弹）；⑨ P2 三处每键热点：引用块 Changed 走树修订号守卫（`quote_metadata_revision`，纯文本编辑跳过全树重建）、引用重建按块级 `may_affect_global_references` 标志门控（sync 时刷新，撤销恢复也能拿到准确初值）、单表编辑改 `rebuild_table_runtime_for_block` 作用域化（全量重建只留载入/撤销/视图切换）；⑩ P2：嵌套列表缩进从「每层 2 空格」改为「父项标记正文列宽」（`1. ` 下 3 列、`10. ` 下 4 列，`marker_content_columns`；`markdown_line` 参数语义 depth→columns；tree/source_map/selection 三处镜像同步改；引用/提示框内部仍归零由 `> ` 前缀承担，脚注子块 +4 列保持既有绝对语义）。验证：fmt/clippy 0 警告、1014 passed（原 1007 + 新增 7 回归）、`--no-default-features` 绿。
 
 2026-11-21 **Mermaid 导出成图（未提交）**：用户反馈「导出为其他格式时 Mermaid 只有源码文字」。① `components/mermaid` 新增 `render_mermaid_svg_for_export`，复用基础 SVG 缓存并把根尺寸重写为明确像素（渲染器原输出常见 `width="100%"`，不能直接栅格化）；② 新增 `export/mermaid.rs`：SVG data URI（HTML 用）+ resvg/usvg 栅格化 PNG（PDF/DOCX 用，进程级系统字体库缓存，否则 usvg 默认空字体表会把中文标签画成空白），resvg/usvg 作为可选依赖挂两个导出 feature（两库已在 lock 中由 rgpui 引入，非新增重型依赖）；③ `export::Block` 新增 `Mermaid` 变体，PDF/DOCX 按版心嵌 PNG、失败回退等宽源码，HTML 事件流把 mermaid 围栏替换为 `<img src="data:image/svg+xml;base64,...">`（清洗白名单已放行 svg data URI）；④ 视觉核对：中文流程图 PNG 节点/连线/中文标签清晰，HTML img 标签保留且源码未泄漏。验证：fmt/clippy(-D warnings) 0 警告、1023 passed（原 1014 + 新增 9）、`--no-default-features` 绿、diff --check 干净、改动 `.rs` 均 CRLF 无 BOM。后续注意：HTML 导出仍在主线程同步渲染，大图首次导出会卡一下（与「保存/HTML 导出移后台」旧遗留同源）。
 
-### 3.3a 审查遗留（2026-11-21，低优先，未修）
+### 3.3a 审查遗留（2026-11-21，低优先）
 
-- 列表项懒续行仍会吞顶格的 ATX 标题/引用/围栏行（本次只拦了分隔线；CommonMark 语义下这些块起始行也应终止条目，`collect_list_item_region`）。
-- Mermaid 块正文里输入裸 ```` ``` ```` 行，保存重载后图表会在该行截断（Markdown 反引号围栏固有行为；代码块路径靠 `safe_code_fence` 加长围栏规避，Mermaid 保留原围栏无此处理，可考虑编辑时同样加长）。
-- 脚注定义嵌在列表项内且含 2+ 子块时，树序列化子块缩进（绝对 4 列）与源码映射（相对 +4）在嵌套列表下本就不一致（映射偏长，既有偏差，本次未扩大修复面）。
-- PDF `wrap_text` 行首长 URL（超长单词）会溢出版心右缘（`export/pdf.rs`）。
-- DOCX 目录标题「目录」自身是 Heading1，Word 刷新 TOC 域会把它收进目录；HTML 导出 TOC 嵌套 `<ul>` 直接挂在 `<ul>` 下不经 `<li>`（HTML 不合法，浏览器容错）。
-- `find.rs` `replace_current_find_match` 回绕分支传 `&[]` 不替换（注释说回绕到首个）——当前不可达的死代码，改 `&matches[..1]` 或删除。
+2026-11-21 **第二批审查遗留修复（未提交）**：接 0.2.4 发布后的收口，修复上一批留存的 7 项并清理死代码。① Mermaid 块正文输入裸 ```` ``` ```` 行导致保存重载后图表截断——`rebuilt_mermaid_fallback` 按正文最长同类围栏 run 加长开闭围栏（沿用原围栏字符与 info 串），与代码块 `safe_code_fence` 同策略；② PDF `wrap_text` 行首长 URL 溢出——单元自身超出版心时强制按字硬断，不再因 `current.is_empty()` 整段塞入；③ DOCX 目录标题改 `Title` 样式，不再被 TOC 域（Heading1-3）自收录；④ HTML 导出 TOC 改为 `<ul>` 嵌在父 `<li>` 内的合法结构（旧实现连续 `<ul>` 裸露嵌套），跳级标题压平避免空嵌套；⑤ `find.rs` 替换回绕分支由传 `&[]`（不替换）改为替换首个匹配，并判空；⑥ 交互路径输入 `3. ` 捕获原始编号（`numbered_list_shortcut_number` + `set_list_number`），与导入/粘贴路径一致；⑦ `normalize_block_list` 双克隆 children 改 move。`document.rs` `collect_quote_block` 不可达空行分支删除（region 由 `collect_quote_raw_region` 保证无空行）。验证：fmt/clippy(-D warnings) 0 警告、1028 passed（原 1023 + 新增 5）、4 个新增回归测试逐条确认。
+
+**评估后保留（低优先 / 需单独回归，暂不修）**：
+
+- 脚注定义嵌在列表项内且含 2+ 子块时，树序列化子块缩进（绝对 4 列）与源码映射（相对 +4）在嵌套列表下本就不一致（映射偏长，既有偏差）。
 - 渲染模式查找基于规范 Markdown，围栏 info 串等不可见语法区也会命中并可被替换（设计取舍，可文档化或过滤纯语法命中）。
-- `RequestFocus` 点击路径 notify 全部可见块（万级块文档每击 O(N) 实体更新，`events.rs`）；`normalize_block_list` 对每个容器块双克隆 children（可 `std::mem::take`）；两处自动补尾段落无撤销捕获（`ensure_trailing_paragraph_after_structural` 与空白处点击）；拖拽选区每 mousemove 全量扫描可见块 bounds（可用行计划按 y 定位）；undo/redo 不去重。
-- `document.rs` `collect_quote_block` 空行分支不可达（死代码）；`model.rs` `markdown_line` 的 FootnoteDefinition 分支输出与实际序列化不一致（仅复制回退路径可达）。
-- 交互路径输入 `3. ` 转有序项时未捕获原始编号（从 1 起排；导入器/粘贴路径不受影响）。
-- `may_change_global_references` 场景：文档含定义时普通段落打字已不重建（本次修复），但含 `]:`/`[^` 字样的普通文本（如行内代码示例）每次编辑仍触发重建——可用「集合实际未变则跳过」的指纹短路进一步优化。
+- `model.rs` `markdown_line` 的 FootnoteDefinition 分支输出（`[^id]: `）与 `tree.rs` 实际序列化不一致——但脚注块有专门源码映射（`push_footnote_definition_head_mapping`），跨块复制走逐字映射，该分支仅无映射的罕见回退路径可达，收益极低。
+- `may_change_global_references` 场景：文档含定义时普通段落打字已不重建，但含 `]:`/`[^` 字样的普通文本（如行内代码示例）每次编辑仍触发 `rebuild_image_runtimes`——底层 `derive.rs` 已对引用集合做「相等则复用 Arc」短路，再优化收益有限。
+- `RequestFocus` 点击路径 notify 全部可见块（万级块文档每击 O(N)）；两处自动补尾段落无撤销捕获（`ensure_trailing_paragraph_after_structural` 与空白处点击，需确认是否已在撤销捕获窗口内）；拖拽选区每 mousemove 全量扫描可见块 bounds；undo/redo 不去重。以上均为交互性能/语义边界，需单独回归，不在本批改动面内。
+- 列表项懒续行吞顶格 ATX 标题/引用/围栏行——已由提交 `13c2bcc` 修复（含回归测试 `top_level_blocks_break_list_item_lazy_continuation`），无需再处理。
 
 2026-11-19 **Mermaid 渲染库拆分独立仓（未提交）**：`crates/mermaid-rs-renderer` 抽出为独立仓 [launcher-rs/mermaid-renderer](https://github.com/launcher-rs/mermaid-renderer)（GitHub 主仓 + Gitee 镜像），包名改 `mermaid-renderer`、库名改 `mermaid_renderer`，版本 `0.1.0`，暂不发布 crates.io、暂不打标签；拆分时清掉了 62 个误提交的 0 字节文件（文件名带 U+F00D 私用区字符），并重写了历史去掉它们。rumark 侧改 crates.io 版本依赖（`mermaid-renderer = "0.1"`），删除 vendor 目录与 workspace 成员，`src/components/mermaid/mod.rs` 引用同步改名，AGENTS/README/CONTRIBUTING/TODO 同步。已发布 0.1.0 到 crates.io。验证：新仓 `fmt/clippy/test` 全绿（含 10 个 suite）；rumark 侧待跑。
 
@@ -105,28 +108,41 @@
 - **跨窗口拖拽没有原生支持**：拖拽态是 App 级共享（`rgpui app.rs:685` 的 `active_drag`），但鼠标事件与放置监听按窗口各自派发（`rgpui window.rs:5400` 的 `dispatch_mouse_event`），未发现跨窗口 drop 路由。**这是本需求风险最高、最可能需要平台层补齐的点**。
 - `src/editor/workspace.rs` 是**左侧工作区侧边栏**（文件树 + 大纲），与多文档管理无关，别混。
 
-### 4.2 需要先拍板的问题
+### 4.2 已拍板的问题
 
-1. tab 拖出/拖回**是否属于第一期**。若要多花钱：先做跨窗口拖拽 spike，决定走「平台层补齐」还是「先只给等效命令」（`Move Tab to New Window` / `Merge Window into Active Window`）。
-2. 拖入文件、侧栏点文件的语义是否改为「新建 tab」（现在会替换当前文档，多文档下这个行为会很别扭）。
-3. 关窗与退出语义：逐 tab 确认未保存，还是先问一次「全部保存」；`handle_window_closed`（`src/app_menu.rs:1039`）现在「最后一个窗口关闭即退应用」，拖出/拖回会频繁开关窗口，要防止误退出。
-4. 会话持久化（重开恢复 tab 集合）暂列第二期。
+1. tab 拖出/拖回放第二期，第一期只做「一窗多文档 + 同窗切换/关闭」。用户选择**薄壳 host** 渲染架构：窗口根改 `DocumentHost`，活动 `Editor` 作为子元素正常挂载、`Editor::render` 不动，tab 条经 `top_strip` 插槽插在标题栏下方。
+2. 拖入文件、侧栏点文件的语义在第一期改为「新建 tab」（有宿主时）；standalone 编辑器保持原「替换当前文档」语义。
+3. 关窗与退出语义：逐 tab 串行确认未保存（一次一个对话框），任一取消即中止整个流程。
+4. 会话持久化（重开恢复 tab 集合）列后续期，不做。
 
-### 4.3 建议分期
+### 4.3 分期与进度
 
-**第一期：一窗多文档 tab（不含跨窗口拖拽）**
+**第一期：一窗多文档 tab（不含跨窗口拖拽）—— 已完成（未提交）**
 
-1. 新增窗口级文档容器（如 `DocumentHost`）：持有 `Vec<Entity<Editor>>` + 活动索引 + 脏标记，作为窗口根视图；`open_editor_window`（`src/app_menu.rs:52`）改为挂这个容器。
-2. 路由改造清单：`with_active_editor`（`src/app_menu.rs:396`）、`dispatch_menu_action`（`:560`）、`try_load_into_active_blank_window`（`:87`）、`open_file_preferring_blank_window`（`:120`）、`current_window_candidates`（`:464`）/`request_close_current_editor_window`（`:507`）/`request_quit_application`（`:529`）、`src/editor/render.rs:1187-1235` 的动作注册链、CLI 开窗循环（`src/main.rs:248-274`）。
-3. tab 条用 `TabBar`/`Tab` 渲染（视觉可照 `src/editor/workspace.rs:503` 的 `Tabs` 用法），实现切换/关闭/脏点；窗口标题与 `edited` 状态改为「活动 tab 的路径」「任一 tab 脏」。
-4. 快捷键：`ToggleViewMode` 默认占着 `ctrl-tab`/`cmd-tab`（`src/components/actions.rs:585`、`:1160-1161`），要重排，把 `ctrl-tab`/`cmd-tab` 让给 tab 切换；另加 `ctrl-w` 关 tab（现在 `ctrl-w` 绑给工作区抽屉，见 `src/components/actions.rs:592`，需另选键）。
-5. 拖入文件（`src/editor/file_drop.rs:31`）与侧栏点文件（`workspace.rs:378`）改为新建 tab。
-6. 验收：手动开 3 个文件验证切换/关闭/保存互不影响、关窗逐 tab 提示；新增文档容器层单测（新增/切换/关闭后脏状态与活动索引正确）。
+1. ✅ 新增 `src/editor/document_host.rs`：薄壳 `DocumentHost`（`Vec<TabEntry>` + `active` + `TabStrip`），窗口根由 `Editor` 改为 host；`open_editor_window` 返回 `WindowHandle<DocumentHost>`。standalone 编辑器（测试路径）完全不变。
+2. ✅ 路由改造：`with_active_editor` / `with_active_host` / `request_close_editor_window` / `request_quit_application` / `try_load_into_active_blank_window`（空白 tab 就地载入）；菜单与 CLI 开窗循环适配新返回类型。
+3. ✅ tab 条用 `TabBar`/`Tab` 渲染，点击切换、`×` 关闭（走脏检查）、脏点（标签前缀 `●`）、无路径显示「未命名」。
+4. ✅ 键位重排：`ctrl-tab`/`cmd-tab` 让给「下一个 tab」，`ctrl/cmd-shift-tab` 上一个，`ctrl/cmd-alt-n` 新建，`ctrl/cmd-f4` 关闭；`ToggleViewMode` 改 `ctrl-/`、`ctrl/cmd-alt-v`。新增 `NewTab`/`CloseTab`/`NextTab`/`PreviousTab` 动作 + 菜单项 + `zh-CN`/`en-US` 文案。
+5. ✅ 拖入 Markdown / 侧栏点文件：有宿主时经 `DocumentHost::open_path_in_tab` 新建 tab（空白 tab 复用），否则替换当前文档。
+6. ✅ 关闭状态机：Editor 加 `close_scope`（Window/Tab/WindowFlow）+ `owner_host` 弱引用；关单 tab 与关窗/退出均走未保存确认，保存/放弃后按目标关闭 tab 或推进下一个脏 tab，取消则中止。用 spawn 打破 host→editor→host 的重入。
+7. ✅ 验收：新增/切换/关闭/回绕/空白复用/保存只写活动 tab/键位动作等单测；全量 `cargo test -p rumark` 通过。
 
-**第二期：tab 拖出成窗口 / 拖回合并**
+2026-11-21 **用户实测反馈收尾（未提交）**：① 拖入 Markdown 崩溃——根因是在 `Editor::update` 中同步 `host.update` 又读回同一 Editor，触发实体重入；改为先同步校验文件/记录 recent，`host.update` 用 `cx.spawn` 延后，并加回归测试（修复前可复现同一 panic）。② tab 条贴左边缘——`TabStrip` 外层补 `pl(TITLE_BAR_LEFT_PADDING)` / `pr(12px)`，抵消 `TabBar` 默认 `px(-1.)` 的负 padding，与标题栏菜单按钮对齐。③ tab 点击无效——点击派发从单个 `Tab::on_click` 改为 `TabBar::on_change`（框架文档明确设置后由栏统一处理选中），并用真实坐标点击单测锁住；关闭按钮仍以 `stop_propagation` 独立处理。④ 新增偏好 `editor.multi_tab_enabled`（`AppPreferences` / `PreferencesFile` / `EditorSettings` / File-Startup Switch，默认 true，写入 `config.toml`，重开窗口生效）：关闭时 `DocumentHost` 只保留一个 tab、不注入 tab 条，tab 动作无操作，关闭走原「关闭窗口」语义，窗口返回类型不变以免回归。⑤ 偏好设置窗口由 800×560 调大到 900×640。验证：`cargo test --bin rumark` 1040 passed / 0 failed、`cargo clippy --all-targets -- -D warnings` 0 警告、`cargo fmt --check` 通过、改动 `.rs` 均 CRLF 无 BOM。
 
-7. 跨窗口拖拽 spike：用 `App::windows()`/`window_stack()`（`rgpui app.rs:1216/1228`）+ 鼠标屏幕坐标判定指针落在哪个窗口，再看能否复用 App 级 `active_drag`（`app.rs:685`）完成跨窗口 drop；**结论写回本文件**（可行性、需要的框架改动、替代方案）。
-8. 若原生不可行，先提供等效键盘/菜单命令，把「拖拽」留到平台层支持之后。
+2026-11-21 **窗口脏状态聚合（未提交）**：`DocumentHost` 现在每帧汇总所有 tab 的 `document_dirty` 写入系统 edited 标记与标题脏标记；标题文件名仍取活动 tab。Editor 在 host 模式下不再自行写窗口标题/edited；子 Editor 脏状态变化时通过 `App::notify(host.entity_id())` 通知 host，避免 `editor.update → host.update → editor.read` 重入。新增 `window_chrome_aggregates_dirty_state_across_tabs`：非活动 tab 变脏时标题仍带标记，全部干净后标记清除。
+
+**第一期遗留（低优先）—— 2026-11-21 已完成（未提交）**
+
+- ✅ 同窗拖拽重排、tab 条中键关闭、右键菜单：用框架 `Tab` 的 `on_drag`/`drag_over`/`on_drop` + 自持 `PopupMenu`（照 `table_axis_menu.rs` 的 deferred+anchored 模式）实现。`TabStrip` 加 `menu` 字段；右键菜单含「关闭/关闭其他/关闭右侧/新窗口打开」，i18n 加 4 个 key（zh-CN/en-US 一致）。拖拽用 `TabDragData`（框架已导出），落点即目标 tab 下标，`move_tab(from,to)` 让被拖 tab 保持活动。中键关闭走 `request_close_tab_at`。
+- ✅ 关闭非活动 tab 不切换：`request_close_tab_at(index, window, cx)` 直接对指定 editor 设 `CloseScope::Tab` 走确认，`close_editor_tab` 按实体定位移除，全程不改 `active`；× 按钮、中键、右键「关闭」共用此路径。单文档模式退化为关窗。
+- ✅ 批量关闭（右键「关闭其他/右侧」）：`DocumentHost.pending_batch_close` 存待关 editor 集合，`advance_batch_close` 先移除干净 tab、脏 tab 逐个设 `CloseScope::BatchFlow` 弹确认，确认后由 `close_editor_tab` 推进下一个；取消时 `cancel_batch_close` 清空。close.rs 的取消分支按 scope 分派 WindowFlow/BatchFlow。
+- ✅ 多窗口混合退出：`MenuState` 加 `quit_remaining`/`quitting`，`request_quit_application` 收集所有编辑器窗口（host + standalone）进队列，`advance_quit_window` 逐个请求关闭；`DocumentHost::advance_window_close` 的 Quit 流程不再直接 `cx.quit()`，只 remove 本窗口，`handle_window_closed` 推进下一个、归零时 quit；用户在任一窗口点「继续编辑」经 `cancel_quit_flow` 中止整个退出。新增 4 个 host 层测试（拖拽重排、非活动关闭、关闭其他/右侧）+ 2 个真实坐标 UI 测试（中键关闭、右键菜单）。
+- 手动开 3 文件逐屏目检尚未做（仅自动化单测覆盖）。
+
+**第二期：tab 拖出成窗口 / 拖回合并（未开始）**
+
+8. ✅ 跨窗口拖拽 spike（2026-11-21 完成，结论：原生不可行）：rgpui 1.8 的拖拽**状态**是 App 级共享（`app.rs:804` `active_drag`），但**事件派发与命中检测是单窗口级**——`Window::dispatch_event` 按单个 `&mut self` 派发、监听器只取自本窗口 `rendered_frame`（`window.rs:5572/5733-5792`），`on_drop` 用本窗口 `hitbox.is_hovered(window)` 判定（`elements/div.rs:2869-2899`）；Windows 平台按下即 `SetCapture`（`rgpui-windows/src/events.rs:509`），整个拖拽过程的 move/up 被锁在源窗口 HWND；`MouseDownEvent.position` 是窗口客户区局部坐标（`interactive.rs:137`），没有「屏幕点 → 窗口」的 App 级 API（全仓 `window_at*` 搜索无结果）。因此标准 `on_drag`/`on_drop` 无法实现跨窗口 tab 拖出/拖回；纯应用层只能靠 `Window::dispatch_event`（pub）+ `AnyWindowHandle::update` + `window.bounds()` 近似换算来合成跨窗口事件，但 bounds 含非客户区、多显示器/DPI/重叠/焦点切换均需自理，且 drag ghost 绑在源窗口越过边界即被裁剪——能跑特例但不可靠，不建议。
+9. 若原生不可行，先提供等效键盘/菜单命令，把「拖拽」留到平台层支持之后。**建议路线**：第二期先用纯应用层命令实现 tab「移出新窗口 / 合入目标窗口」——`cx.open_window` 建窗、`cx.windows()` 遍历 + `downcast::<DocumentHost>()` + `AnyWindowHandle::update` 跨窗口改 tab 列表，`Entity<Editor>` 是 App 级可跨窗口共享；复杂度低到中、零框架改动。原生跨窗口拖拽需框架三处增强：① 平台拖拽期放开 `SetCapture`/透传全局屏幕坐标（`rgpui-windows/events.rs:503-539` + macOS/Linux 对应）；② 新增 `App::window_at_point(screen)` 与 `Window` 局部↔屏幕坐标换算（处理非客户区与 DPI）；③ 把 active_drag 的 MouseMove/MouseUp 按屏幕点路由到目标窗口、drag ghost 改覆盖层。`active_drag` 已是 App 级，①+③ 后 `div.rs` 现有 drop 命中逻辑基本可复用。
 
 ## 5. 验证流程（每次改完照跑）
 

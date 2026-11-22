@@ -356,3 +356,20 @@ enum CloseFlow {
 6. **未决**：tab 上限与超宽滚动行为；tab 是否显示脏点/关闭按钮（取决于框架 `Tab` 能力）；
    同一文件开两个 tab 时保存冲突如何处理（建议：保存后就地刷新另一个同路径 tab，
    或直接禁止重复打开同一路径——倾向「允许重复，保存后不自动同步」，简单可预期）。
+
+## 9. 落地补充（2026-11-21）
+
+第一期已按「薄壳 host」落地；与本文早期草案的差异和后续修正记录在此。
+
+- 窗口根为 `DocumentHost`，活动 `Editor` 作为唯一子元素挂载，`Editor::render` 保持不变；
+  tab 条经 `top_strip` 插槽插入标题栏下方，不在 host 中复制标题栏/状态栏逻辑。
+- tab 条用 `TabBar::on_change` 统一派发点击与左右方向键（`Tab::on_click` 单点派发会导致
+  选中态不同步）；外层补 `pl(TITLE_BAR_LEFT_PADDING)` / `pr(12px)`，抵消 `TabBar` 默认
+  `px(-1.)` 的负 padding，避免首个 tab 贴住窗口边缘。
+- 关闭单 tab / 关窗 / 退出共用一套 `CloseScope` 状态机；`Editor::update` 内访问 host
+  必须通过 `cx.spawn` 延后，否则拖入文件等路径会触发实体重入 panic。
+- 偏好 `editor.multi_tab_enabled`（默认 `true`）可在「文件与启动」页关闭；关闭后新窗口
+  退化为单文档行为（不注入 tab 条、tab 动作无操作、关闭走原关窗语义），窗口返回类型
+  仍是 `DocumentHost`，避免为「完全恢复旧窗口类型」引入额外回归面。该设置对新窗口生效。
+- 偏好设置窗口尺寸由 800×560 调整为 900×640。
+- 窗口标题与系统 edited 标记由 host 汇总所有 tab 的脏状态统一写入（标题文件名仍取活动 tab）。子 Editor 脏状态变化只按实体 ID 通知 host，不 `update` host，避免编辑器 update 期间重入。

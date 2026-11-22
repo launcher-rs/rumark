@@ -745,6 +745,35 @@ async fn paragraph_shortcut_creates_parenthesized_numbered_list_directly(cx: &mu
 }
 
 #[rgpui::test]
+async fn paragraph_shortcut_captures_ordered_list_start_number(cx: &mut TestAppContext) {
+    // 交互路径输入 `3. ` 应捕获原始编号，与导入/粘贴路径一致，否则运行时从 1 起排。
+    let block = cx.new(|cx| Block::with_record(cx, BlockRecord::paragraph(String::new())));
+
+    block.update(cx, |block, cx| {
+        block.apply_title_edit(
+            InlineTextTree::plain("3. item"),
+            8,
+            None,
+            None,
+            None,
+            false,
+            cx,
+        );
+    });
+
+    let (kind, number, text) = block.read_with(cx, |block, _cx| {
+        (
+            block.kind(),
+            block.record.list_number,
+            block.rendered_text().to_string(),
+        )
+    });
+    assert_eq!(kind, BlockKind::NumberedListItem);
+    assert_eq!(number, Some(3));
+    assert_eq!(text, "item");
+}
+
+#[rgpui::test]
 async fn bullet_shortcut_upgrades_to_task_item_after_box_prefix(cx: &mut TestAppContext) {
     let block = cx.new(|cx| Block::with_record(cx, BlockRecord::paragraph(String::new())));
 

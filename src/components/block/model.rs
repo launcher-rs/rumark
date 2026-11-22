@@ -482,6 +482,15 @@ impl BlockKind {
         let separator = *value.as_bytes().get(digit_len + 1)?;
         matches!(separator, b' ' | b'\t').then_some(digit_len + 2)
     }
+
+    /// 从有序列表快捷前缀中解析用户输入的原始编号（如 `"3. item"` 取 `3`）。
+    /// 与 [`Self::numbered_list_shortcut_prefix_len`] 共用同一套合法性判定，
+    /// 供交互输入路径把编号写入 `list_number`，与导入/粘贴路径行为对齐。
+    pub fn numbered_list_shortcut_number(value: &str) -> Option<u64> {
+        Self::numbered_list_shortcut_prefix_len(value)?;
+        let digit_len = value.bytes().take_while(|b| b.is_ascii_digit()).count();
+        value[..digit_len].parse::<u64>().ok()
+    }
 }
 
 /// 与编辑器运行时无关的块持久数据。
@@ -800,14 +809,44 @@ impl BlockRecord {
     fn rebuilt_mermaid_fallback(&self) -> String {
         let body = self.title.plain_text();
         if let Some(raw) = self.raw_fallback.as_deref()
-            && parse_mermaid_fence_source(raw).is_some()
+            && let Some(source) = parse_mermaid_fence_source(raw)
         {
             let open_line = raw.split('\n').next().unwrap_or_default();
             let close_line = raw.split('\n').next_back().unwrap_or_default();
+            // 正文里若出现与围栏同字符、长度达到围栏长度的裸标记行，按 CommonMark
+            // 它会被当成闭合围栏，导致保存重载后图表从该行截断（代码块靠加长围栏
+            // 规避，Mermaid 同样处理）。仅加长围栏字符，保留 info 串与变体。
+            let fence_char = open_line.chars().next().unwrap_or('`');
+            if matches!(fence_char, '`' | '~') {
+                let fence_len = open_line.chars().take_while(|ch| *ch == fence_char).count();
+                let longest = longest_fence_marker_run(&body, fence_char);
+                if longest >= fence_len.max(3) {
+                    let new_len = longest + 1;
+                    let info = source.info.trim();
+                    let open_line = format!("{}{}", fence_char.to_string().repeat(new_len), info);
+                    let close_line = fence_char.to_string().repeat(new_len);
+                    return format!("{open_line}\n{body}\n{close_line}");
+                }
+            }
             return format!("{open_line}\n{body}\n{close_line}");
         }
         format!("```mermaid\n{body}\n```")
     }
+}
+
+/// 统计正文中指定围栏字符的最长连续长度（判断裸围栏行是否会提前闭合）。
+fn longest_fence_marker_run(text: &str, marker: char) -> usize {
+    let mut longest = 0usize;
+    let mut current = 0usize;
+    for ch in text.chars() {
+        if ch == marker {
+            current += 1;
+            longest = longest.max(current);
+        } else {
+            current = 0;
+        }
+    }
+    longest
 }
 
 /// 缩进多行文本。
@@ -1077,6 +1116,19 @@ mod tests {
             record.markdown_line(0, None),
             "~~~MMD\npie\ntitle 占比\n~~~"
         );
+    }
+
+    #[test]
+    fn mermaid_edit_lengthens_fence_when_body_has_bare_fence_line() {
+        // 正文含裸 ``` 行时加长围栏，避免保存重载后图表在该行被提前闭合截断。
+        let mut record = BlockRecord::mermaid("```mermaid\nflowchart LR\nA --> B\n```");
+        record.set_title(InlineTextTree::plain("flowchart LR\n```\nA --> B"));
+        let output = record.markdown_line(0, None);
+        // 围栏从三反引号加长为四，正文里的裸三反引号不再构成闭合。
+        assert_eq!(output, "````mermaid\nflowchart LR\n```\nA --> B\n````");
+        // 加长后仍能被解析回同一正文（保存重载无损）。
+        let reparsed = parse_mermaid_fence_source(&output).expect("加长后的围栏应可解析");
+        assert_eq!(reparsed.body, "flowchart LR\n```\nA --> B");
     }
 
     #[test]

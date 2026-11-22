@@ -1437,11 +1437,7 @@ impl Editor {
         let region = &lines[start..end];
         let mut dequoted = Vec::with_capacity(region.len());
         for line in region {
-            if line.trim().is_empty() {
-                dequoted.push(String::new());
-                continue;
-            }
-
+            // region 由 collect_quote_raw_region 收集，遇空行即停，故无需空行分支。
             let Some(content) = strip_one_quote_level(line) else {
                 return (raw_block(cx, region.join("\n")), end);
             };

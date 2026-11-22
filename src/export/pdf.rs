@@ -769,17 +769,13 @@ impl<'a> Layout<'a> {
                     || current.ends_with(' ')
                     || current.ends_with('\u{3000}')
                     || is_cjk_boundary(&piece);
-                if current_pt + piece_pt <= width_pt || current.is_empty() {
-                    current.push_str(&piece);
-                    current_pt += piece_pt;
-                } else if breakable {
-                    lines.push(std::mem::take(&mut current));
-                    // 行首空格不保留，避免缩进漂移。
-                    let trimmed = piece.trim_start_matches([' ', '\u{3000}']);
-                    current.push_str(trimmed);
-                    current_pt = self.fonts.text_width_pt(trimmed, size_pt);
-                } else {
-                    // 英文长词：按字硬断。
+                // 单元自身超出版心（如行首长 URL）时必须按字硬断：原先
+                // `current.is_empty()` 分支会把这种超长词整段塞入且不折行，
+                // 导致行首长 URL 溢出版心右缘。
+                let needs_hard_break = piece_pt > width_pt
+                    || (current_pt + piece_pt > width_pt && !current.is_empty() && !breakable);
+                if needs_hard_break {
+                    // 超长词：按字硬断。
                     for ch in piece.chars() {
                         let ch_string = ch.to_string();
                         let ch_pt = self.fonts.text_width_pt(&ch_string, size_pt);
@@ -790,6 +786,15 @@ impl<'a> Layout<'a> {
                         current.push(ch);
                         current_pt += ch_pt;
                     }
+                } else if current_pt + piece_pt <= width_pt || current.is_empty() {
+                    current.push_str(&piece);
+                    current_pt += piece_pt;
+                } else if breakable {
+                    lines.push(std::mem::take(&mut current));
+                    // 行首空格不保留，避免缩进漂移。
+                    let trimmed = piece.trim_start_matches([' ', '\u{3000}']);
+                    current.push_str(trimmed);
+                    current_pt = self.fonts.text_width_pt(trimmed, size_pt);
                 }
             }
             lines.push(std::mem::take(&mut current));
@@ -1243,6 +1248,32 @@ mod tests {
         // 25mm × 2.8346 ≈ 70.87pt，单字 10pt → 每行 7 字。
         assert_eq!(lines[0].chars().count(), 7, "首行字数错误：{lines:?}");
         assert!(lines.iter().all(|line| line.chars().count() <= 7));
+    }
+
+    #[test]
+    fn wrap_text_breaks_leading_long_url_within_content_width() {
+        // 行首超长 URL（单个无空格词）必须按字硬断，不能整段塞入导致溢出版心。
+        let fonts = Fonts {
+            parsed: None,
+            units_per_em: 1000.0,
+            space_width_units: 1000.0,
+        };
+        let mut doc = printpdf::PdfDocument::new("wrap-url-test");
+        let layout = Layout::new(
+            &fonts,
+            PdfFontHandle::Builtin(BuiltinFont::Helvetica),
+            &mut doc,
+            None,
+        );
+        let url = format!("https://example.com/{}", "a".repeat(40));
+        let lines = layout.wrap_text(&url, 10.0, 25.0);
+        // 假字体每字 10pt、版心约 70.87pt → 每行最多 7 字符。
+        assert!(lines.len() > 1, "长 URL 应折行：{lines:?}");
+        assert!(
+            lines.iter().all(|line| line.chars().count() <= 7),
+            "每行不得超出版心：{lines:?}"
+        );
+        assert_eq!(lines.concat(), url, "折行不应丢字符");
     }
 
     #[test]

@@ -43,8 +43,10 @@ pub(crate) fn render_docx_bytes(
         .add_abstract_numbering(bullet_abstract_numbering())
         .add_numbering(Numbering::new(BULLET_ABSTRACT_ID, BULLET_ABSTRACT_ID));
     if options.include_toc && !headings.is_empty() {
+        // 目录标题用 Title 样式而非 Heading1：TOC 域按 Heading1-3 收集条目，
+        // 若自身也用 Heading1，Word 刷新域时会把「目录」一节收进目录里。
         doc = doc
-            .add_paragraph(Paragraph::new().style("Heading1").add_run(body_run("目录")))
+            .add_paragraph(Paragraph::new().style("Title").add_run(body_run("目录")))
             .add_table_of_contents(
                 TableOfContents::new()
                     .heading_styles_range(1, 3)

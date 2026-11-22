@@ -14,3 +14,5 @@ temp
 assets/fonts/*.ttf
 assets/fonts/*.otf
 assets/fonts/*.ttc
+.workbuddy/
+vibe_images/

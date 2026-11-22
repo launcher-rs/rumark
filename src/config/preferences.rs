@@ -9,6 +9,7 @@ use std::time::SystemTime;
 use anyhow::Context as _;
 use rgpui::components::Select;
 use rgpui::components::{HotkeyListInput, HotkeyListInputState, HotkeyValue};
+use rgpui::input_ui::{Input, InputEvent, InputState};
 use rgpui::title_bar::TitleBar;
 use rgpui::*;
 use serde::{Deserialize, Serialize};
@@ -203,11 +204,15 @@ pub(crate) struct AppPreferences {
     pub(crate) default_language_id: String,
     pub(crate) default_theme_id: String,
     pub(crate) table_headers_visible: bool,
+    /// 是否启用一窗多文档标签页（关闭时窗口退回单文档行为）。
+    pub(crate) multi_tab_enabled: bool,
     pub(crate) image_paste_behavior: ImagePasteBehavior,
     pub(crate) export_include_toc: bool,
     pub(crate) export_theme: ExportThemeMode,
     pub(crate) keybindings: BTreeMap<String, Vec<String>>,
     pub(crate) status_bar: StatusBarPreferences,
+    /// 检查更新时自定义的下载镜像前缀（每行一个；留空用内置镜像）。
+    pub(crate) custom_mirrors: Vec<String>,
 }
 
 impl Default for AppPreferences {
@@ -218,11 +223,13 @@ impl Default for AppPreferences {
             default_language_id: FALLBACK_LANGUAGE_ID.into(),
             default_theme_id: FALLBACK_THEME_ID.into(),
             table_headers_visible: true,
+            multi_tab_enabled: true,
             image_paste_behavior: ImagePasteBehavior::None,
             export_include_toc: true,
             export_theme: ExportThemeMode::FollowEditor,
             keybindings: BTreeMap::new(),
             status_bar: StatusBarPreferences::default(),
+            custom_mirrors: Vec::new(),
         }
     }
 }
@@ -240,7 +247,9 @@ struct StatusBarSettings {
 /// 与 [`AppPreferences`] 同步的运行时编辑器设置，供渲染路径免磁盘读取。
 pub struct EditorSettings {
     table_headers_visible: bool,
+    multi_tab_enabled: bool,
     status_bar_settings: StatusBarSettings,
+    custom_mirrors: Vec<String>,
 }
 
 impl Global for EditorSettings {}
@@ -248,17 +257,29 @@ impl Global for EditorSettings {}
 impl EditorSettings {
     /// 初始化全局编辑器设置。
     pub fn init(cx: &mut App, table_headers_visible: bool) {
-        let status_bar = read_app_preferences()
-            .ok()
-            .map(|p| p.status_bar)
-            .unwrap_or_default();
-        Self::set_global(cx, table_headers_visible, &status_bar);
+        let (multi_tab_enabled, status_bar, custom_mirrors) = read_app_preferences()
+            .map(|p| (p.multi_tab_enabled, p.status_bar, p.custom_mirrors))
+            .unwrap_or((true, StatusBarPreferences::default(), Vec::new()));
+        Self::set_global(
+            cx,
+            table_headers_visible,
+            multi_tab_enabled,
+            &status_bar,
+            &custom_mirrors,
+        );
     }
 
     /// 写入全局编辑器设置。
-    fn set_global(cx: &mut App, table_headers_visible: bool, status_bar: &StatusBarPreferences) {
+    fn set_global(
+        cx: &mut App,
+        table_headers_visible: bool,
+        multi_tab_enabled: bool,
+        status_bar: &StatusBarPreferences,
+        custom_mirrors: &[String],
+    ) {
         cx.set_global(Self {
             table_headers_visible,
+            multi_tab_enabled,
             status_bar_settings: StatusBarSettings {
                 status_bar_enabled: status_bar.enabled,
                 status_bar_show_word_count: status_bar.show_word_count,
@@ -267,6 +288,7 @@ impl EditorSettings {
                 status_bar_show_mode_switch: status_bar.show_mode_switch,
                 custom_buttons: status_bar.custom_buttons.clone(),
             },
+            custom_mirrors: custom_mirrors.to_vec(),
         });
     }
 
@@ -290,7 +312,18 @@ impl EditorSettings {
                 custom_buttons: s.status_bar_settings.custom_buttons.clone(),
             })
             .unwrap_or_default();
-        Self::set_global(cx, table_headers_visible, &status_bar);
+        let multi_tab_enabled = cx
+            .try_global::<Self>()
+            .map(|s| s.multi_tab_enabled)
+            .unwrap_or(true);
+        let custom_mirrors = Self::custom_mirrors(cx);
+        Self::set_global(
+            cx,
+            table_headers_visible,
+            multi_tab_enabled,
+            &status_bar,
+            &custom_mirrors,
+        );
         match read_app_preferences() {
             Ok(mut preferences) => {
                 preferences.table_headers_visible = table_headers_visible;
@@ -299,6 +332,73 @@ impl EditorSettings {
                 }
             }
             Err(err) => eprintln!("failed to read table header preference: {err}"),
+        }
+    }
+
+    /// 是否启用一窗多文档标签页，未安装全局时默认开启。
+    pub fn multi_tab_enabled(cx: &App) -> bool {
+        cx.try_global::<Self>()
+            .map(|settings| settings.multi_tab_enabled)
+            .unwrap_or(true)
+    }
+
+    /// 设置多标签页开关并持久化；对已打开的窗口不生效，需重开窗口。
+    pub fn set_multi_tab_enabled(cx: &mut App, enabled: bool) {
+        let table_headers_visible = Self::table_headers_visible(cx);
+        let status_bar = Self::status_bar_preferences(cx);
+        let custom_mirrors = Self::custom_mirrors(cx);
+        Self::set_global(
+            cx,
+            table_headers_visible,
+            enabled,
+            &status_bar,
+            &custom_mirrors,
+        );
+        match read_app_preferences() {
+            Ok(mut preferences) => {
+                preferences.multi_tab_enabled = enabled;
+                if let Err(err) = save_app_preferences(&preferences) {
+                    eprintln!("failed to save multi-tab preference: {err}");
+                }
+            }
+            Err(err) => eprintln!("failed to read multi-tab preference: {err}"),
+        }
+    }
+
+    /// 当前自定义的更新镜像前缀；未安装全局时为空（使用内置镜像）。
+    pub fn custom_mirrors(cx: &App) -> Vec<String> {
+        cx.try_global::<Self>()
+            .map(|settings| settings.custom_mirrors.clone())
+            .unwrap_or_default()
+    }
+
+    /// 设置自定义更新镜像前缀并持久化。
+    /// 偏好窗口当前直接写 global 并统一保存，此入口供未来独立调用（如命令行）保留。
+    #[allow(dead_code)]
+    pub fn set_custom_mirrors(cx: &mut App, mirrors: Vec<String>) {
+        let table_headers_visible = Self::table_headers_visible(cx);
+        let multi_tab_enabled = Self::multi_tab_enabled(cx);
+        let status_bar = Self::status_bar_preferences(cx);
+        let mirrors = mirrors
+            .into_iter()
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty())
+            .collect::<Vec<_>>();
+        Self::set_global(
+            cx,
+            table_headers_visible,
+            multi_tab_enabled,
+            &status_bar,
+            &mirrors,
+        );
+        match read_app_preferences() {
+            Ok(mut preferences) => {
+                preferences.custom_mirrors = mirrors;
+                if let Err(err) = save_app_preferences(&preferences) {
+                    eprintln!("failed to save custom update mirrors: {err}");
+                }
+            }
+            Err(err) => eprintln!("failed to read custom update mirrors: {err}"),
         }
     }
 
@@ -327,6 +427,13 @@ struct PreferencesFile {
     export: ExportPreferencesFile,
     status_bar: StatusBarPreferencesFile,
     keybindings: BTreeMap<String, Vec<String>>,
+    update: UpdatePreferencesFile,
+}
+
+#[derive(Serialize, Default)]
+struct UpdatePreferencesFile {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    custom_mirrors: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -337,7 +444,23 @@ struct StartupPreferencesFile {
 #[derive(Serialize)]
 struct EditorPreferencesFile {
     table_headers_visible: bool,
+    /// 缺省为 true；序列化时省略以便旧配置升级后保持开启。
+    #[serde(skip_serializing_if = "is_true")]
+    multi_tab_enabled: bool,
     image_paste_behavior: String,
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+/// 多行文本框内容 → 去空白、去空行的镜像前缀列表。
+fn mirrors_from_text(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 #[derive(Serialize)]
@@ -397,6 +520,7 @@ impl From<&AppPreferences> for PreferencesFile {
             },
             editor: EditorPreferencesFile {
                 table_headers_visible: value.table_headers_visible,
+                multi_tab_enabled: value.multi_tab_enabled,
                 image_paste_behavior: value.image_paste_behavior.as_str().into(),
             },
             export: ExportPreferencesFile {
@@ -405,6 +529,9 @@ impl From<&AppPreferences> for PreferencesFile {
             },
             status_bar: StatusBarPreferencesFile::from(&value.status_bar),
             keybindings: normalize_shortcut_config(&value.keybindings),
+            update: UpdatePreferencesFile {
+                custom_mirrors: value.custom_mirrors.clone(),
+            },
         }
     }
 }
@@ -610,6 +737,11 @@ fn app_preferences_from_toml_value(
         .and_then(|editor| editor.get("table_headers_visible"))
         .and_then(|value| value.as_bool())
         .unwrap_or(true);
+    let multi_tab_enabled = value
+        .get("editor")
+        .and_then(|editor| editor.get("multi_tab_enabled"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true);
     let image_paste_behavior = value
         .get("editor")
         .and_then(|editor| editor.get("image_paste_behavior"))
@@ -680,16 +812,32 @@ fn app_preferences_from_toml_value(
         })
         .unwrap_or_default();
 
+    let custom_mirrors = value
+        .get("update")
+        .and_then(|update| update.get("custom_mirrors"))
+        .and_then(|value| value.as_array())
+        .map(|array| {
+            array
+                .iter()
+                .filter_map(|item| item.as_str().map(str::trim))
+                .filter(|item| !item.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
     AppPreferences {
         startup_open,
         default_language_id,
         default_theme_id,
         table_headers_visible,
+        multi_tab_enabled,
         image_paste_behavior,
         export_include_toc,
         export_theme,
         keybindings,
         status_bar,
+        custom_mirrors,
     }
 }
 
@@ -839,6 +987,7 @@ pub(crate) fn import_language_config_and_select(
 }
 
 /// 保存偏好设置窗口的修改。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn save_preferences_from_window(
     startup_open: StartupOpenPreference,
     default_theme_id: &str,
@@ -847,6 +996,7 @@ pub(crate) fn save_preferences_from_window(
     export_theme: ExportThemeMode,
     keybindings: BTreeMap<String, Vec<String>>,
     status_bar: &StatusBarPreferences,
+    custom_mirrors: &[String],
 ) -> anyhow::Result<AppPreferences> {
     let dirs = RumarkConfigDirs::from_system()?;
     save_preferences_from_window_with_dirs(
@@ -857,6 +1007,7 @@ pub(crate) fn save_preferences_from_window(
         export_theme,
         keybindings,
         status_bar,
+        custom_mirrors,
         &dirs,
     )
 }
@@ -871,6 +1022,7 @@ fn save_preferences_from_window_with_dirs(
     export_theme: ExportThemeMode,
     keybindings: BTreeMap<String, Vec<String>>,
     status_bar: &StatusBarPreferences,
+    custom_mirrors: &[String],
     dirs: &RumarkConfigDirs,
 ) -> anyhow::Result<AppPreferences> {
     let (mut preferences, _recovery) =
@@ -885,6 +1037,7 @@ fn save_preferences_from_window_with_dirs(
     let mut status_bar = status_bar.clone();
     status_bar.custom_buttons = preferences.status_bar.custom_buttons.clone();
     preferences.status_bar = status_bar;
+    preferences.custom_mirrors = custom_mirrors.to_vec();
     save_app_preferences_with_dirs(&preferences, dirs)?;
     Ok(preferences)
 }
@@ -907,6 +1060,7 @@ enum PreferencesNav {
     Export,
     Shortcuts,
     StatusBar,
+    Update,
 }
 
 /// 独立的偏好设置窗口视图。
@@ -939,6 +1093,11 @@ pub(crate) struct PreferencesWindow {
     saved_status_bar_show_cursor_position: bool,
     saved_status_bar_show_sidebar_toggle: bool,
     saved_status_bar_show_mode_switch: bool,
+    /// 自定义更新镜像（多行文本，每行一个前缀）及其保存基线。
+    custom_mirrors_text: String,
+    saved_custom_mirrors_text: String,
+    /// 镜像输入框的框架状态（在渲染时延迟创建，因构造期无 window）。
+    mirrors_input: Option<Entity<InputState>>,
 }
 
 /// 快捷键字符串转框架值（解析失败的条目丢弃，与旧规范化语义一致）。
@@ -1024,6 +1183,9 @@ impl PreferencesWindow {
             saved_status_bar_show_cursor_position: preferences.status_bar.show_cursor_position,
             saved_status_bar_show_sidebar_toggle: preferences.status_bar.show_sidebar_toggle,
             saved_status_bar_show_mode_switch: preferences.status_bar.show_mode_switch,
+            custom_mirrors_text: preferences.custom_mirrors.join("\n"),
+            saved_custom_mirrors_text: preferences.custom_mirrors.join("\n"),
+            mirrors_input: None,
         }
     }
 
@@ -1041,6 +1203,7 @@ impl PreferencesWindow {
             || self.status_bar_show_cursor_position != self.saved_status_bar_show_cursor_position
             || self.status_bar_show_sidebar_toggle != self.saved_status_bar_show_sidebar_toggle
             || self.status_bar_show_mode_switch != self.saved_status_bar_show_mode_switch
+            || self.custom_mirrors_text != self.saved_custom_mirrors_text
     }
 
     /// 停止全部快捷键录制（切换偏好页时调用，避免后台残留录制态）。
@@ -1092,6 +1255,13 @@ impl PreferencesWindow {
     /// 切换到状态栏偏好页。
     fn set_nav_status_bar(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.nav = PreferencesNav::StatusBar;
+        self.stop_all_hotkey_recordings(cx);
+        cx.notify();
+    }
+
+    /// 切换到更新偏好页。
+    fn set_nav_update(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.nav = PreferencesNav::Update;
         self.stop_all_hotkey_recordings(cx);
         cx.notify();
     }
@@ -1196,6 +1366,13 @@ impl PreferencesWindow {
                 show_mode_switch: self.status_bar_show_mode_switch,
                 custom_buttons: Vec::new(),
             },
+            &mirrors_from_text(
+                &self
+                    .mirrors_input
+                    .as_ref()
+                    .map(|input| input.read(cx).value().to_string())
+                    .unwrap_or_else(|| self.custom_mirrors_text.clone()),
+            ),
         ) {
             Ok(preferences) => preferences,
             Err(err) => {
@@ -1251,6 +1428,7 @@ impl PreferencesWindow {
                 preferences.status_bar.show_sidebar_toggle;
             settings.status_bar_settings.status_bar_show_mode_switch =
                 preferences.status_bar.show_mode_switch;
+            settings.custom_mirrors = preferences.custom_mirrors.clone();
         });
         cx.refresh_windows();
         window.activate_window();
@@ -1266,6 +1444,7 @@ impl PreferencesWindow {
         self.saved_status_bar_show_cursor_position = self.status_bar_show_cursor_position;
         self.saved_status_bar_show_sidebar_toggle = self.status_bar_show_sidebar_toggle;
         self.saved_status_bar_show_mode_switch = self.status_bar_show_mode_switch;
+        self.saved_custom_mirrors_text = self.custom_mirrors_text.clone();
         cx.notify();
     }
 
@@ -1363,6 +1542,13 @@ impl PreferencesWindow {
                     });
                 }
             });
+        // 多标签页开关：即时持久化，重开窗口生效（运行中的窗口保持当前模式）。
+        let multi_tab_toggle = Switch::new(ElementId::Name("preferences-toggle-multi-tab".into()))
+            .checked(crate::config::EditorSettings::multi_tab_enabled(cx))
+            .color(theme.button_primary)
+            .on_change(move |checked: bool, _, cx| {
+                crate::config::EditorSettings::set_multi_tab_enabled(cx, checked);
+            });
         let page = div()
             .w_full()
             .flex()
@@ -1372,7 +1558,19 @@ impl PreferencesWindow {
                 &i18n.t("pref_startup_label", &[]),
                 select,
                 theme,
-            ));
+            ))
+            .child(Self::setting_row(
+                &i18n.t("pref_multi_tab_label", &[]),
+                multi_tab_toggle,
+                theme,
+            ))
+            .child(
+                div()
+                    .w_full()
+                    .text_size(px(ThemeTypography::DEFAULT.dialog_body_size))
+                    .text_color(theme.muted_foreground)
+                    .child(i18n.t("pref_multi_tab_hint", &[])),
+            );
         #[cfg(target_os = "windows")]
         let page = page
             .child(Self::setting_row(
@@ -1633,6 +1831,10 @@ impl PreferencesWindow {
             ShortcutCommand::OpenFile => i18n.t("keys_open_file", &[]),
             ShortcutCommand::QuitApplication => i18n.t("keys_quit_application", &[]),
             ShortcutCommand::CloseWindow => i18n.t("keys_close_window", &[]),
+            ShortcutCommand::NewTab => i18n.t("keys_new_tab", &[]),
+            ShortcutCommand::CloseTab => i18n.t("keys_close_tab", &[]),
+            ShortcutCommand::NextTab => i18n.t("keys_next_tab", &[]),
+            ShortcutCommand::PreviousTab => i18n.t("keys_previous_tab", &[]),
             ShortcutCommand::DismissTransientUi => i18n.t("keys_dismiss_transient_ui", &[]),
             ShortcutCommand::ToggleViewMode => i18n.t("keys_toggle_view_mode", &[]),
             ShortcutCommand::ToggleWorkspace => i18n.t("keys_toggle_workspace", &[]),
@@ -2015,6 +2217,87 @@ impl PreferencesWindow {
 
         Self::settings_page("preferences-page-status-bar", items)
     }
+
+    /// 镜像输入框变更：把最新文本同步到草稿字段，供脏检查与保存使用。
+    fn on_mirrors_input_change(
+        &mut self,
+        _input: Entity<InputState>,
+        _event: &InputEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(value) = self
+            .mirrors_input
+            .as_ref()
+            .map(|input| input.read(cx).value().to_string())
+        {
+            self.custom_mirrors_text = value;
+            cx.notify();
+        }
+    }
+
+    /// 「更新」偏好页：自定义镜像前缀 + 手动检查更新按钮。
+    fn render_update_page(
+        &mut self,
+        window: &mut Window,
+        theme: &Theme,
+        i18n: &crate::i18n::I18nSnapshot,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if self.mirrors_input.is_none() {
+            let initial = self.saved_custom_mirrors_text.clone();
+            let input = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .multi_line(true)
+                    .default_value(initial)
+            });
+            cx.subscribe(&input, Self::on_mirrors_input_change).detach();
+            self.mirrors_input = Some(input);
+        }
+        let mirrors_input = self
+            .mirrors_input
+            .as_ref()
+            .expect("mirrors input initialized");
+        let d = &ThemeDimensions::DEFAULT;
+
+        let items = div()
+            .flex()
+            .flex_col()
+            .gap(px(d.dialog_gap))
+            .child(
+                div()
+                    .text_size(px(ThemeTypography::DEFAULT.dialog_body_size))
+                    .font_weight(ThemeTypography::DEFAULT.dialog_button_weight)
+                    .child(i18n.t("pref_update_title", &[])),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(d.dialog_gap * 0.5))
+                    .child(
+                        div()
+                            .text_size(px(ThemeTypography::DEFAULT.dialog_body_size))
+                            .font_weight(ThemeTypography::DEFAULT.dialog_button_weight)
+                            .child(i18n.t("pref_update_mirrors_label", &[])),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(ThemeTypography::DEFAULT.dialog_body_size * 0.85))
+                            .text_color(theme.muted_foreground)
+                            .child(i18n.t("pref_update_mirrors_hint", &[])),
+                    )
+                    .child(div().w_full().h(px(120.0)).child(Input::new(mirrors_input))),
+            )
+            .child(
+                Button::new("pref-update-check-button")
+                    .label(i18n.t("pref_update_check_button", &[]))
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        cx.dispatch_action(&crate::components::CheckForUpdates);
+                    })),
+            );
+
+        Self::settings_page("preferences-page-update", items)
+    }
 }
 
 impl Render for PreferencesWindow {
@@ -2094,6 +2377,14 @@ impl Render for PreferencesWindow {
                         &theme,
                         Self::set_nav_status_bar,
                         cx,
+                    ))
+                    .child(self.nav_button(
+                        "preferences-nav-update",
+                        i18n.t("pref_nav_update", &[]),
+                        self.nav == PreferencesNav::Update,
+                        &theme,
+                        Self::set_nav_update,
+                        cx,
                     )),
             )
             .child(
@@ -2123,6 +2414,9 @@ impl Render for PreferencesWindow {
                             .into_any_element(),
                         PreferencesNav::StatusBar => self
                             .render_status_bar_page(&theme, &i18n, cx)
+                            .into_any_element(),
+                        PreferencesNav::Update => self
+                            .render_update_page(window, &theme, &i18n, cx)
                             .into_any_element(),
                     })
                     .child(
@@ -2176,7 +2470,7 @@ fn open_preferences_window_with_state(
     preferences: AppPreferences,
     theme_options: Vec<ThemeCatalogEntry>,
 ) -> WindowHandle<PreferencesWindow> {
-    let bounds = Bounds::centered(None, size(px(660.0), px(420.0)), cx);
+    let bounds = Bounds::centered(None, size(px(900.0), px(640.0)), cx);
     let handle = cx
         .open_window(rumark_window_options(bounds), move |_window, cx| {
             cx.new(move |cx| PreferencesWindow::new(preferences, theme_options, cx))
@@ -2513,11 +2807,13 @@ mod tests {
             default_language_id: "zh-CN".into(),
             default_theme_id: "rumark-light".into(),
             table_headers_visible: false,
+            multi_tab_enabled: false,
             image_paste_behavior: ImagePasteBehavior::CopyToAssetsFolder,
             export_include_toc: false,
             export_theme: ExportThemeMode::Dark,
             keybindings: BTreeMap::new(),
             status_bar: StatusBarPreferences::default(),
+            custom_mirrors: Vec::new(),
         };
 
         save_app_preferences_with_dirs(&preferences, &dirs)
@@ -2620,11 +2916,13 @@ mod tests {
             default_language_id: "zh-CN".into(),
             default_theme_id: "rumark".into(),
             table_headers_visible: true,
+            multi_tab_enabled: true,
             image_paste_behavior: ImagePasteBehavior::None,
             export_include_toc: true,
             export_theme: ExportThemeMode::FollowEditor,
             keybindings: BTreeMap::new(),
             status_bar: StatusBarPreferences::default(),
+            custom_mirrors: Vec::new(),
         };
         save_app_preferences_with_dirs(&preferences, &dirs)
             .expect("preferences should save to config.toml");
@@ -2637,6 +2935,7 @@ mod tests {
             ExportThemeMode::Dark,
             BTreeMap::from([("save_document".to_string(), vec!["ctrl-alt-s".to_string()])]),
             &StatusBarPreferences::default(),
+            &[],
             &dirs,
         )
         .expect("window preferences should save");
@@ -2687,6 +2986,7 @@ mod tests {
             ExportThemeMode::FollowEditor,
             BTreeMap::new(),
             &StatusBarPreferences::default(),
+            &[],
             &dirs,
         )
         .expect("window preferences should save");
@@ -2710,7 +3010,7 @@ mod tests {
         };
         cx.update(|cx| {
             // 运行时全局快照必须携带自定义按钮，否则状态栏永远拿不到它们。
-            EditorSettings::set_global(cx, true, &status_bar);
+            EditorSettings::set_global(cx, true, true, &status_bar, &[]);
             let snapshot = EditorSettings::status_bar_preferences(cx);
             assert_eq!(snapshot.custom_buttons, custom);
         });

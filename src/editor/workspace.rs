@@ -430,10 +430,12 @@ impl Editor {
         cx.notify();
     }
 
-    /// 打开工作区中的文件（脏文档先弹窗确认）。
+    /// 打开工作区中的文件：多文档窗口进新 tab，standalone 替换当前文档（脏则先确认）。
     fn open_workspace_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         self.workspace.selected = Some(WorkspaceSelection::File(path.clone()));
-        self.request_dropped_markdown_replace(path, window, cx);
+        if !self.open_dropped_markdown_in_host_tab(&path, cx) {
+            self.request_dropped_markdown_replace(path, window, cx);
+        }
     }
 
     /// 获取侧边栏当前生效宽度（用户拖过用拖拽值，否则跟随视口自动计算）。
