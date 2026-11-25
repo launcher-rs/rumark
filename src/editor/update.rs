@@ -449,6 +449,7 @@ fn restart_args_after_update(
 mod tests {
     use super::{drain_latest_progress, restart_args_after_update};
     use crate::update::DownloadProgress;
+    use std::path::PathBuf;
 
     fn progress(downloaded: u64) -> DownloadProgress {
         DownloadProgress {

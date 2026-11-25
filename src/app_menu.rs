@@ -727,7 +727,7 @@ fn continue_pending_application_quit(cx: &mut App) {
 /// 窗口保存或放弃后继续退出请求。
 pub(crate) fn resume_pending_application_quit(cx: &mut Context<Editor>) {
     cx.spawn(async move |_this, cx| {
-        cx.update(|cx| continue_pending_application_quit(cx));
+        cx.update(continue_pending_application_quit);
     })
     .detach();
 }

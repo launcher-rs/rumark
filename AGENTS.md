@@ -12,6 +12,7 @@
 - 测试：`cargo test -p rumark`（单元测试全在源码内 `#[cfg(test)]` 模块，无独立 `tests/` 目录）
 - 单测聚焦：`cargo test -p rumark <模块路径::测试名>`，如 `cargo test -p rumark editor::document`
 - 校验顺序：`cargo fmt --check` → `cargo clippy -p rumark --all-targets` → `cargo test -p rumark`
+- 推送前必须先执行 `cargo fmt --check` 和 `cargo clippy -p rumark --all-targets`；有格式错误、编译错误或 Clippy 警告时先修复，再推送。
 - 手动渲染回归：用 `docs/render-sample.md` 打开验证（覆盖 CommonMark + GFM 扩展、嵌套、边界用例）
 - 待办与进度交接：`docs/TODO.md`（未提交状态、待决事项、待办任务、验证基线、已知陷阱）
 
