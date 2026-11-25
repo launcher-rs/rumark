@@ -209,6 +209,8 @@ fn main() {
         crate::theme::init(cx, &preferences.default_theme_id);
         config::EditorSettings::init(cx, preferences.table_headers_visible);
         net::install_http_client(cx);
+        // 注册 rgpui 输入控件的 Enter、Backspace、Delete 等按键动作。
+        rgpui::input_ui::init(cx);
         init_editor(cx, &preferences.keybindings);
         // 工作区文件树的键盘导航（上/下/左/右）绑定。
         rgpui::tree::init(cx);

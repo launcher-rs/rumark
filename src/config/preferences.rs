@@ -9,7 +9,8 @@ use std::time::SystemTime;
 use anyhow::Context as _;
 use rgpui::components::Select;
 use rgpui::components::{HotkeyListInput, HotkeyListInputState, HotkeyValue};
-use rgpui::input_ui::{Input, InputEvent, InputState};
+use rgpui::input_ui::{InputEvent, InputState, TextArea};
+use rgpui::prelude::FluentBuilder;
 use rgpui::title_bar::TitleBar;
 use rgpui::*;
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,7 @@ use crate::components::{
 };
 use crate::i18n::{I18nManager, language_id_from_preferences};
 use crate::theme::{ThemeCatalogEntry, ThemeDimensions, ThemeTypography};
+use crate::update as updater;
 
 const FALLBACK_THEME_ID: &str = "rumark-light";
 const FALLBACK_LANGUAGE_ID: &str = "en-US";
@@ -209,9 +211,9 @@ pub(crate) struct AppPreferences {
     pub(crate) export_theme: ExportThemeMode,
     pub(crate) keybindings: BTreeMap<String, Vec<String>>,
     pub(crate) status_bar: StatusBarPreferences,
-    /// 检查更新时自定义的下载镜像前缀（每行一个；留空用内置镜像）。
+    /// 检查更新时自定义的镜像前缀（每行一个；直连失败后才按此顺序回退）。
     pub(crate) custom_mirrors: Vec<String>,
-    /// 是否启用镜像中转；默认关闭，仅直连。
+    /// 是否启用镜像回退；检查与下载始终先走官方直连。
     pub(crate) use_mirrors: bool,
 }
 
@@ -228,8 +230,9 @@ impl Default for AppPreferences {
             export_theme: ExportThemeMode::FollowEditor,
             keybindings: BTreeMap::new(),
             status_bar: StatusBarPreferences::default(),
-            custom_mirrors: Vec::new(),
-            use_mirrors: false,
+            custom_mirrors: updater::recommended_mirrors(),
+            // 实测镜像作为直连失败后的回退；不信任第三方中转时可在偏好页关闭。
+            use_mirrors: true,
         }
     }
 }
@@ -257,9 +260,14 @@ impl Global for EditorSettings {}
 impl EditorSettings {
     /// 初始化全局编辑器设置。
     pub fn init(cx: &mut App, table_headers_visible: bool) {
+        let fallback = AppPreferences::default();
         let (status_bar, custom_mirrors, use_mirrors) = read_app_preferences()
             .map(|p| (p.status_bar, p.custom_mirrors, p.use_mirrors))
-            .unwrap_or((StatusBarPreferences::default(), Vec::new(), false));
+            .unwrap_or((
+                StatusBarPreferences::default(),
+                fallback.custom_mirrors,
+                fallback.use_mirrors,
+            ));
         Self::set_global(
             cx,
             table_headers_visible,
@@ -332,18 +340,18 @@ impl EditorSettings {
         }
     }
 
-    /// 当前自定义的更新镜像前缀；未安装全局时为空（使用内置镜像）。
+    /// 当前自定义的更新镜像前缀；未安装全局时返回推荐镜像。
     pub fn custom_mirrors(cx: &App) -> Vec<String> {
         cx.try_global::<Self>()
             .map(|settings| settings.custom_mirrors.clone())
-            .unwrap_or_default()
+            .unwrap_or_else(updater::recommended_mirrors)
     }
 
-    /// 是否启用镜像中转；未安装全局时默认关闭。
+    /// 是否启用镜像回退；未安装全局时沿用默认开启设置。
     pub fn use_mirrors(cx: &App) -> bool {
         cx.try_global::<Self>()
             .map(|settings| settings.use_mirrors)
-            .unwrap_or(false)
+            .unwrap_or(true)
     }
 
     /// 设置自定义更新镜像前缀并持久化。
@@ -405,9 +413,9 @@ struct PreferencesFile {
 
 #[derive(Serialize, Default)]
 struct UpdatePreferencesFile {
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    /// 空列表必须显式写入，否则读回时会被当成「老配置」而填入默认镜像。
     custom_mirrors: Vec<String>,
-    /// 默认关闭；老配置文件读不到该字段时按 false 处理。
+    /// 老配置文件读不到该字段时按新默认值（开启回退）处理。
     use_mirrors: bool,
 }
 
@@ -422,13 +430,16 @@ struct EditorPreferencesFile {
     image_paste_behavior: String,
 }
 
-/// 多行文本框内容 → 去空白、去空行的镜像前缀列表。
+/// 多行文本框内容 → 去尾部斜杠、去空行与重复项的镜像前缀列表。
 fn mirrors_from_text(text: &str) -> Vec<String> {
-    text.lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_string)
-        .collect()
+    let mut mirrors = Vec::new();
+    for line in text.lines() {
+        let mirror = line.trim().trim_end_matches('/');
+        if !mirror.is_empty() && !mirrors.iter().any(|item: &String| item == mirror) {
+            mirrors.push(mirror.to_string());
+        }
+    }
+    mirrors
 }
 
 #[derive(Serialize)]
@@ -787,13 +798,14 @@ fn app_preferences_from_toml_value(
                 .map(str::to_string)
                 .collect::<Vec<_>>()
         })
-        .unwrap_or_default();
+        // 旧配置没有镜像字段时按新默认值填入实测前缀，避免升级后失去回退能力。
+        .unwrap_or_else(updater::recommended_mirrors);
 
     let use_mirrors = value
         .get("update")
         .and_then(|update| update.get("use_mirrors"))
         .and_then(|value| value.as_bool())
-        .unwrap_or(false);
+        .unwrap_or(true);
 
     AppPreferences {
         startup_open,
@@ -1069,11 +1081,14 @@ pub(crate) struct PreferencesWindow {
     /// 自定义更新镜像（多行文本，每行一个前缀）及其保存基线。
     custom_mirrors_text: String,
     saved_custom_mirrors_text: String,
-    /// 是否启用镜像中转（默认关闭），草稿与保存基线。
+    /// 是否启用镜像回退（直连优先，直连失败后才用），草稿与保存基线。
     use_mirrors: bool,
     saved_use_mirrors: bool,
-    /// 镜像输入框的框架状态（在渲染时延迟创建，因构造期无 window）。
-    mirrors_input: Option<Entity<InputState>>,
+    /// 「检查镜像」后台探测的进度与结果。
+    mirror_probe_checking: bool,
+    mirror_probe_results: Vec<updater::MirrorProbe>,
+    /// 设置窗口持有的镜像多行输入状态。
+    mirrors_input: Entity<InputState>,
 }
 
 /// 快捷键字符串转框架值（解析失败的条目丢弃，与旧规范化语义一致）。
@@ -1107,6 +1122,7 @@ impl PreferencesWindow {
     fn new(
         preferences: AppPreferences,
         theme_options: Vec<ThemeCatalogEntry>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let selected_theme_id = if theme_options
@@ -1131,6 +1147,15 @@ impl PreferencesWindow {
                 cx.new(|cx| HotkeyListInputState::with_hotkeys(cx, values)),
             );
         }
+        // 输入状态与偏好窗口同生命周期，页面切换时保留尚未保存的编辑内容。
+        let mirrors_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .multi_line(true)
+                .submit_on_enter(false)
+                .default_value(preferences.custom_mirrors.join("\n"))
+        });
+        cx.subscribe(&mirrors_input, Self::on_mirrors_input_change)
+            .detach();
         Self {
             nav: PreferencesNav::File,
             startup_open,
@@ -1163,7 +1188,9 @@ impl PreferencesWindow {
             saved_custom_mirrors_text: preferences.custom_mirrors.join("\n"),
             use_mirrors: preferences.use_mirrors,
             saved_use_mirrors: preferences.use_mirrors,
-            mirrors_input: None,
+            mirror_probe_checking: false,
+            mirror_probe_results: Vec::new(),
+            mirrors_input,
         }
     }
 
@@ -1345,13 +1372,7 @@ impl PreferencesWindow {
                 show_mode_switch: self.status_bar_show_mode_switch,
                 custom_buttons: Vec::new(),
             },
-            &mirrors_from_text(
-                &self
-                    .mirrors_input
-                    .as_ref()
-                    .map(|input| input.read(cx).value().to_string())
-                    .unwrap_or_else(|| self.custom_mirrors_text.clone()),
-            ),
+            &mirrors_from_text(self.mirrors_input.read(cx).value().as_ref()),
             self.use_mirrors,
         ) {
             Ok(preferences) => preferences,
@@ -2184,20 +2205,39 @@ impl PreferencesWindow {
         _event: &InputEvent,
         cx: &mut Context<Self>,
     ) {
-        if let Some(value) = self
-            .mirrors_input
-            .as_ref()
-            .map(|input| input.read(cx).value().to_string())
-        {
-            self.custom_mirrors_text = value;
-            cx.notify();
-        }
+        self.custom_mirrors_text = self.mirrors_input.read(cx).value().to_string();
+        cx.notify();
     }
 
     /// 镜像开关变更（草稿态，保存按钮生效）。
     fn on_use_mirrors_change(&mut self, checked: bool, cx: &mut Context<Self>) {
         self.use_mirrors = checked;
         cx.notify();
+    }
+
+    /// 「检查镜像」：后台逐个探测候选的 API 与安装包，结果写回「更新」页。
+    fn check_mirrors(&mut self, cx: &mut Context<Self>) {
+        if self.mirror_probe_checking {
+            return;
+        }
+        self.mirror_probe_checking = true;
+        self.mirror_probe_results.clear();
+        cx.notify();
+
+        let config = updater::updater_config(
+            mirrors_from_text(&self.custom_mirrors_text),
+            self.use_mirrors,
+        );
+        let weak = cx.entity().downgrade();
+        cx.spawn(async move |_this, cx| {
+            let results = updater::run_blocking(move || updater::probe_mirrors(&config)).await;
+            let _ = weak.update(cx, |this, cx| {
+                this.mirror_probe_checking = false;
+                this.mirror_probe_results = results;
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// 把内置推荐镜像填入自定义输入框，用户仍可继续编辑顺序和内容。
@@ -2207,15 +2247,9 @@ impl PreferencesWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let text = crate::update::DEFAULT_MIRRORS
-            .iter()
-            .filter(|mirror| !mirror.is_empty())
-            .copied()
-            .collect::<Vec<_>>()
-            .join("\n");
-        if let Some(input) = &self.mirrors_input {
-            input.update(cx, |input, cx| input.set_value(text.clone(), window, cx));
-        }
+        let text = updater::RECOMMENDED_MIRRORS.join("\n");
+        self.mirrors_input
+            .update(cx, |input, cx| input.set_value(text.clone(), window, cx));
         self.custom_mirrors_text = text;
         cx.notify();
     }
@@ -2223,25 +2257,12 @@ impl PreferencesWindow {
     /// 「更新」偏好页：镜像开关 + 自定义镜像前缀 + 手动检查更新按钮。
     fn render_update_page(
         &mut self,
-        window: &mut Window,
+        _window: &mut Window,
         theme: &Theme,
         i18n: &crate::i18n::I18nSnapshot,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if self.mirrors_input.is_none() {
-            let initial = self.saved_custom_mirrors_text.clone();
-            let input = cx.new(|cx| {
-                InputState::new(window, cx)
-                    .multi_line(true)
-                    .default_value(initial)
-            });
-            cx.subscribe(&input, Self::on_mirrors_input_change).detach();
-            self.mirrors_input = Some(input);
-        }
-        let mirrors_input = self
-            .mirrors_input
-            .as_ref()
-            .expect("mirrors input initialized");
+        let mirrors_input = &self.mirrors_input;
         let d = &ThemeDimensions::DEFAULT;
 
         let items = div()
@@ -2271,14 +2292,85 @@ impl PreferencesWindow {
                             .text_color(theme.muted_foreground)
                             .child(i18n.t("pref_update_mirrors_hint", &[])),
                     )
-                    .child(div().w_full().h(px(120.0)).child(Input::new(mirrors_input)))
+                    .child(div().w_full().child(TextArea::new(mirrors_input).rows(4)))
                     .child(
-                        Button::new("pref-update-fill-default-mirrors")
-                            .label(i18n.t("pref_update_fill_default_mirrors", &[]))
-                            .on_click(cx.listener(Self::fill_default_mirrors)),
-                    ),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(d.dialog_button_gap))
+                            .child(
+                                div()
+                                    .text_size(px(ThemeTypography::DEFAULT.dialog_body_size * 0.85))
+                                    .text_color(
+                                        if self.custom_mirrors_text
+                                            == self.saved_custom_mirrors_text
+                                        {
+                                            theme.muted_foreground
+                                        } else {
+                                            theme.button_primary
+                                        },
+                                    )
+                                    .child(
+                                        if self.custom_mirrors_text
+                                            == self.saved_custom_mirrors_text
+                                        {
+                                            i18n.t("pref_update_saved", &[])
+                                        } else {
+                                            i18n.t("pref_update_unsaved", &[])
+                                        },
+                                    ),
+                            )
+                            .child(
+                                Button::new("pref-update-fill-default-mirrors")
+                                    .label(i18n.t("pref_update_fill_default_mirrors", &[]))
+                                    .on_click(cx.listener(Self::fill_default_mirrors)),
+                            ),
+                    )
+                    .when(!self.mirror_probe_results.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .id("pref-update-mirror-probe-results")
+                                .w_full()
+                                .h(px(88.0))
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.0))
+                                .p(px(6.0))
+                                .border_1()
+                                .border_color(theme.border)
+                                .overflow_y_scrollbar()
+                                .children(self.mirror_probe_results.iter().map(|probe| {
+                                    let name = if probe.mirror.is_empty() {
+                                        i18n.t("pref_update_direct", &[])
+                                    } else {
+                                        probe.mirror.clone()
+                                    };
+                                    let api = if probe.api_ok {
+                                        i18n.t("pref_update_api_ok", &[])
+                                    } else {
+                                        i18n.t("pref_update_api_failed", &[])
+                                    };
+                                    let download = if probe.download_ok {
+                                        i18n.t("pref_update_download_ok", &[])
+                                    } else {
+                                        i18n.t("pref_update_download_failed", &[])
+                                    };
+                                    let suffix = if probe.detail.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!("（{}）", probe.detail)
+                                    };
+                                    div()
+                                        .text_size(px(
+                                            ThemeTypography::DEFAULT.dialog_body_size * 0.8
+                                        ))
+                                        .text_color(theme.muted_foreground)
+                                        .child(format!("{name}：{api} / {download}{suffix}"))
+                                })),
+                        )
+                    }),
             )
-            // 镜像中转默认关闭；开启后才按自定义 → 内置 → 直连的顺序尝试。
+            // 官方直连优先；只有直连失败且开启回退时才按这里的顺序尝试镜像。
             .child({
                 let entity = cx.entity().clone();
                 div()
@@ -2305,11 +2397,26 @@ impl PreferencesWindow {
                     )
             })
             .child(
-                Button::new("pref-update-check-button")
-                    .label(i18n.t("pref_update_check_button", &[]))
-                    .on_click(cx.listener(|_, _, _, cx| {
-                        cx.dispatch_action(&crate::components::CheckForUpdates);
-                    })),
+                div()
+                    .flex()
+                    .gap(px(d.dialog_button_gap))
+                    .child(
+                        Button::new("pref-update-check-mirrors")
+                            .label(if self.mirror_probe_checking {
+                                i18n.t("pref_update_checking_mirrors", &[])
+                            } else {
+                                i18n.t("pref_update_check_mirrors", &[])
+                            })
+                            .disabled(self.mirror_probe_checking)
+                            .on_click(cx.listener(|this, _, _, cx| this.check_mirrors(cx))),
+                    )
+                    .child(
+                        Button::new("pref-update-check-button")
+                            .label(i18n.t("pref_update_check_button", &[]))
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.dispatch_action(&crate::components::CheckForUpdates);
+                            })),
+                    ),
             );
 
         Self::settings_page("preferences-page-update", items)
@@ -2488,8 +2595,8 @@ fn open_preferences_window_with_state(
 ) -> WindowHandle<PreferencesWindow> {
     let bounds = Bounds::centered(None, size(px(900.0), px(640.0)), cx);
     let handle = cx
-        .open_window(rumark_window_options(bounds), move |_window, cx| {
-            cx.new(move |cx| PreferencesWindow::new(preferences, theme_options, cx))
+        .open_window(rumark_window_options(bounds), move |window, cx| {
+            cx.new(move |cx| PreferencesWindow::new(preferences, theme_options, window, cx))
         })
         .expect("preferences window should open");
 
@@ -2530,6 +2637,7 @@ mod tests {
     use crate::config::RumarkConfigDirs;
     use crate::i18n::I18nManager;
     use crate::theme::ThemeCatalogEntry;
+    use crate::update as updater;
     use rgpui::TestAppContext;
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -2814,8 +2922,10 @@ mod tests {
     }
 
     #[test]
-    fn mirror_toggle_preference_roundtrips_and_defaults_off() {
-        assert!(!AppPreferences::default().use_mirrors);
+    fn mirror_toggle_preference_roundtrips_and_defaults_to_direct_first() {
+        let defaults = AppPreferences::default();
+        assert!(defaults.use_mirrors, "镜像作为直连失败后的回退默认开启");
+        assert_eq!(defaults.custom_mirrors, updater::recommended_mirrors());
 
         let root =
             std::env::temp_dir().join(format!("rumark-mirror-preference-{}", uuid::Uuid::new_v4()));

@@ -38,14 +38,24 @@ impl super::Editor {
         self.update_status = UpdateStatus::checking();
         cx.notify();
 
-        let config = updater_config(cx);
+        let configs = update_configs(cx);
+        let staged_config = configs[0].clone();
         let weak = cx.entity().downgrade();
         let window_handle = window.window_handle();
 
         cx.spawn(async move |_this, cx: &mut AsyncApp| {
-            let result =
-                updater::run_blocking(move || updater::check(&config, updater::CURRENT_VERSION))
-                    .await;
+            let result = updater::run_blocking(move || {
+                updater::try_configs(configs, |config| {
+                    updater::check(config, updater::CURRENT_VERSION)
+                })
+            })
+            .await;
+            // 结果已拿到：提示框会等待用户点击，先收起状态栏进度，
+            // 避免「已是最新版本」弹窗旁边还挂着「正在检查更新…」。
+            let _ = weak.update(cx, |editor, cx| {
+                editor.update_status = UpdateStatus::default();
+                cx.notify();
+            });
             let i18n = cx.update(|cx| cx.global::<I18nManager>().snapshot());
             let ok_label = i18n.t("dialog_ok", &[]);
 
@@ -54,12 +64,11 @@ impl super::Editor {
                     let remote_version = check.remote.version_string();
                     // 若上次下载后点了「稍后」，本地仍留着对应版本的暂存文件。
                     // 检测到就直接提供「安装已下载」入口，避免重复下载。
-                    let staged_version = cx.update(|cx| {
+                    let staged_version = cx.update(|_cx| {
                         let dirs = RumarkConfigDirs::from_system().ok()?;
-                        let config = updater_config(cx);
                         updater::load_staged_update(
                             &dirs.updates_dir(),
-                            &config.executable_name,
+                            &staged_config.executable_name,
                             &remote_version,
                         )?;
                         Some(remote_version.clone())
@@ -94,11 +103,6 @@ impl super::Editor {
                     show_prompt(cx, window_handle, &title, &err.to_string(), &[&ok_label]).await;
                 }
             }
-
-            let _ = weak.update(cx, |editor, cx| {
-                editor.update_status = UpdateStatus::default();
-                cx.notify();
-            });
         })
         .detach();
     }
@@ -118,7 +122,7 @@ impl super::Editor {
         match choice {
             UpdateChoice::Later => {}
             UpdateChoice::OpenRelease => {
-                let config = updater_config(cx);
+                let config = updater::updater_config(Vec::new(), false);
                 cx.spawn(async move |_this, _cx: &mut AsyncApp| {
                     let _ =
                         updater::run_blocking(move || updater::open_release_page(&config)).await;
@@ -130,7 +134,7 @@ impl super::Editor {
                 // 直接走安装确认，跳过下载，避免重复下载浪费时间。
                 let staged = dialog.staged_version.as_deref().and_then(|version| {
                     let dirs = RumarkConfigDirs::from_system().ok()?;
-                    let config = updater_config(cx);
+                    let config = updater::updater_config(Vec::new(), false);
                     updater::load_staged_update(
                         &dirs.updates_dir(),
                         &config.executable_name,
@@ -156,8 +160,7 @@ impl super::Editor {
                 let Some(asset) = dialog.asset else {
                     let i18n = cx.global::<I18nManager>().snapshot();
                     let title = i18n.t("update_error", &[]);
-                    let detail =
-                        format!("Release 中未找到当前平台的资产 {}", config_asset_name(cx));
+                    let detail = format!("Release 中未找到当前平台的资产 {}", config_asset_name());
                     let ok = i18n.t("dialog_ok", &[]);
                     std::mem::drop(window.prompt(
                         PromptLevel::Info,
@@ -185,7 +188,7 @@ impl super::Editor {
         self.update_status = UpdateStatus::downloading();
         cx.notify();
 
-        let config = updater_config(cx);
+        let configs = update_configs(cx);
         let (tx, rx) = mpsc::channel::<updater::DownloadProgress>();
 
         // 进度泵：后台线程只做 mpsc::send，这里定时切回 UI 线程更新实体。
@@ -228,8 +231,10 @@ impl super::Editor {
                     .unwrap_or_else(|_| std::env::temp_dir())
             });
             let result = updater::run_blocking(move || {
-                updater::download_and_stage(&config, &asset, &version, &dest, |progress| {
-                    let _ = job_tx.send(progress);
+                updater::try_configs(configs, |config| {
+                    updater::download_and_stage(config, &asset, &version, &dest, |progress| {
+                        let _ = job_tx.send(progress);
+                    })
                 })
             })
             .await;
@@ -305,17 +310,17 @@ impl super::Editor {
     }
 }
 
-/// 在 async 上下文中读取当前偏好，组装组件配置。
-fn updater_config(cx: &App) -> rgpui_extra::updater::Config {
-    updater::updater_config(
+/// 从当前偏好组装候选配置：官方直连优先，镜像只在开启回退且直连失败时使用。
+fn update_configs(cx: &App) -> Vec<rgpui_extra::updater::Config> {
+    updater::fallback_configs(
         EditorSettings::custom_mirrors(cx),
         EditorSettings::use_mirrors(cx),
     )
 }
 
-/// 在 `Context<Editor>` 中只取资产名（错误提示用）。
-fn config_asset_name(cx: &App) -> String {
-    updater_config(cx).asset_name()
+/// 资产名与偏好无关，始终用直连配置读取即可。
+fn config_asset_name() -> String {
+    updater::updater_config(Vec::new(), false).asset_name()
 }
 
 /// 弹出简单提示并等待用户点击，返回按钮索引。
