@@ -51,6 +51,9 @@ impl Editor {
     pub(crate) fn discard_pending_close_after_save(&mut self, cx: &mut Context<Self>) {
         let had_pending_close = self.pending_close_after_save;
         self.pending_close_after_save = false;
+        if had_pending_close {
+            crate::app_menu::cancel_pending_application_quit(cx);
+        }
         self.hide_unsaved_changes_dialog(cx);
         if had_pending_close {
             self.restore_focus_after_close_dialog(cx);
@@ -96,6 +99,7 @@ impl Editor {
         self.hide_unsaved_changes_dialog(cx);
         window.close_dialog(cx);
         self.restore_focus_after_close_dialog(cx);
+        crate::app_menu::cancel_pending_application_quit(cx);
     }
 
     /// 点击放弃并关闭：不保存直接移除窗口。
@@ -109,6 +113,7 @@ impl Editor {
         self.close_dialog_restore_focus = None;
         self.hide_unsaved_changes_dialog(cx);
         window.remove_window();
+        crate::app_menu::resume_pending_application_quit(cx);
     }
 
     /// 点击保存并关闭：标记挂起保存等待保存完成后关闭。

@@ -49,6 +49,12 @@ pub(crate) struct MenuState {
 
 impl Global for MenuState {}
 
+/// 正在逐窗处理的应用退出请求。
+#[derive(Default)]
+struct PendingApplicationQuit(bool);
+
+impl Global for PendingApplicationQuit {}
+
 /// 按给定 Markdown 内容与可选路径打开编辑器窗口。
 pub(crate) fn open_editor_window(
     cx: &mut App,
@@ -656,33 +662,57 @@ fn request_close_current_editor_window(cx: &mut App) {
 
 /// 逐窗确认后请求退出应用。
 pub(crate) fn request_quit_application(cx: &mut App) {
-    let candidates = current_window_candidates(cx);
-    if candidates.is_empty() {
-        cx.quit();
+    cx.set_global(PendingApplicationQuit(true));
+    cx.spawn(async move |cx| {
+        cx.update(continue_pending_application_quit);
+    })
+    .detach();
+}
+
+/// 继续关闭其余窗口；保存或放弃一个未保存窗口后会再次调用。
+fn continue_pending_application_quit(cx: &mut App) {
+    if !cx.global::<PendingApplicationQuit>().0 {
         return;
     }
 
-    // 见 `request_close_current_editor_window`：必须延后执行，否则同步 `update`
-    // 必失败，导致单窗口下退出/关闭菜单静默失效。
-    cx.spawn(async move |cx| {
-        for window in candidates {
-            let Some(window) = window.downcast::<Editor>() else {
-                continue;
-            };
+    for window in current_window_candidates(cx) {
+        let Some(window) = window.downcast::<Editor>() else {
+            continue;
+        };
 
-            let should_close = window
-                .update(cx, |editor, window, cx| {
-                    editor.on_window_should_close(window, cx)
-                })
-                .unwrap_or(false);
-            if !should_close {
-                return;
-            }
+        let should_close = window
+            .update(cx, |editor, window, cx| {
+                editor.on_window_should_close(window, cx)
+            })
+            .unwrap_or(false);
+        if !should_close {
+            return;
         }
+    }
 
-        cx.update(|cx| cx.quit());
+    cx.update_global::<PendingApplicationQuit, _>(|pending, _cx| pending.0 = false);
+    cx.quit();
+}
+
+/// 窗口保存或放弃后继续退出请求。
+pub(crate) fn resume_pending_application_quit(cx: &mut Context<Editor>) {
+    cx.spawn(async move |_this, cx| {
+        cx.update(|cx| continue_pending_application_quit(cx));
     })
     .detach();
+}
+
+/// 从应用级保存回调恢复退出请求。
+pub(crate) fn resume_pending_application_quit_app(cx: &mut App) {
+    cx.spawn(async move |cx| {
+        cx.update(continue_pending_application_quit);
+    })
+    .detach();
+}
+
+/// 用户取消未保存对话框时中止整应用退出请求。
+pub(crate) fn cancel_pending_application_quit(cx: &mut Context<Editor>) {
+    cx.update_global::<PendingApplicationQuit, _>(|pending, _cx| pending.0 = false);
 }
 
 /// 按当前应用状态执行应用菜单动作。
@@ -1187,6 +1217,7 @@ fn handle_window_closed(cx: &mut App, _: WindowId) {
 /// 安装菜单状态、动作处理与原生菜单栏。
 pub(crate) fn init(cx: &mut App) {
     cx.set_global(MenuState::default());
+    cx.set_global(PendingApplicationQuit::default());
     let subscription = cx.on_window_closed(handle_window_closed);
     cx.global_mut::<MenuState>().window_closed_subscription = Some(subscription);
 

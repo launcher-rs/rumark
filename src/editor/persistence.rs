@@ -292,10 +292,11 @@ impl Editor {
             });
             let _ = cx.update_window(
                 window_handle,
-                move |_view: AnyView, window: &mut Window, _cx: &mut App| {
+                move |_view: AnyView, window: &mut Window, cx: &mut App| {
                     window.set_window_edited(false);
                     if should_close_after_save {
                         window.remove_window();
+                        crate::app_menu::resume_pending_application_quit_app(cx);
                     }
                 },
             );
@@ -313,6 +314,7 @@ impl Editor {
             if self.save_to_existing_path(&path, window, cx) {
                 if should_close_after_save {
                     window.remove_window();
+                    crate::app_menu::resume_pending_application_quit(cx);
                 }
             } else if should_close_after_save {
                 self.discard_pending_close_after_save(cx);

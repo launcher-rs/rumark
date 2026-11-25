@@ -368,15 +368,14 @@ async fn confirm_and_install(
         return false;
     }
 
-    // 收集当前命令行参数（不含 argv[0]），让重启后恢复已打开的文档。
-    let restart_args = std::env::args().skip(1).collect::<Vec<_>>();
     let current_exe =
         cx.update(|_| std::env::current_exe().unwrap_or_else(|_| PathBuf::from("rumark")));
     let options = updater::InstallOptions {
         current_exe,
         staged_exe: path,
         process_id: std::process::id(),
-        restart_args,
+        // 更新后按正常的空文档启动，不重放中文文件路径或试图重建多个窗口。
+        restart_args: restart_args_after_update(),
     };
 
     match updater::spawn_install_helper(&options) {
@@ -418,9 +417,14 @@ fn drain_latest_progress(
     (latest, disconnected)
 }
 
+/// 更新后启动新实例时不重放文件路径，避免 Windows Unicode 参数损坏并统一窗口状态。
+fn restart_args_after_update() -> Vec<String> {
+    Vec::new()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::drain_latest_progress;
+    use super::{drain_latest_progress, restart_args_after_update};
     use crate::update::DownloadProgress;
 
     fn progress(downloaded: u64) -> DownloadProgress {
@@ -458,5 +462,10 @@ mod tests {
         let (latest, disconnected) = drain_latest_progress(&rx);
         assert!(latest.is_none());
         assert!(!disconnected);
+    }
+
+    #[test]
+    fn update_restart_does_not_replay_document_paths() {
+        assert!(restart_args_after_update().is_empty());
     }
 }
