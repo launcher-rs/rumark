@@ -2001,7 +2001,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e35d6e78f4cebb90e51d543db8fe41528851d6deeef6ef21ebd4bfdc1e784776"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2830,12 +2830,6 @@ checksum = "47d60b12902ba28e2730cd37e95b8c9223af2808df9e902d4df49588d1470606"
 dependencies = [
  "byteorder",
 ]
-
-[[package]]
-name = "hashbrown"
-version = "0.14.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
 
 [[package]]
 name = "hashbrown"
@@ -5066,7 +5060,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5559,9 +5553,9 @@ dependencies = [
 
 [[package]]
 name = "rgpui"
-version = "1.8.3"
+version = "1.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68b7ae4ac24372b81cab48bed2922b4dcd81aa60ec399b8fdad9a4117cd033d1"
+checksum = "8ca02889ba06b411376b70fba5c4e16eccccac8d5d0c776f9d46ad522623755f"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -5679,9 +5673,9 @@ dependencies = [
 
 [[package]]
 name = "rgpui-dom"
-version = "1.8.3"
+version = "1.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34ebebee24ddd138fcd65a43a8d7751e145334d401194bbf28cc5b4de6c56217"
+checksum = "26a34c1eab337d67aa9a3d019cdcccfbe41fcf59123948862175ea9d54554c22"
 dependencies = [
  "js-sys",
  "rgpui",
@@ -5693,7 +5687,7 @@ dependencies = [
 [[package]]
 name = "rgpui-extra"
 version = "0.1.0"
-source = "git+https://github.com/launcher-rs/rgpui-extra.git#c0a57ee7cefa655c00fbb5565414a7843d463902"
+source = "git+https://github.com/launcher-rs/rgpui-extra.git#eaa7e8b5b5bb45f9d138272e6032c9a89d52c993"
 dependencies = [
  "anyhow",
  "flate2",
@@ -5733,9 +5727,9 @@ dependencies = [
 
 [[package]]
 name = "rgpui-linux"
-version = "1.8.3"
+version = "1.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "902f2c90875ce5f5518e2ceeb6203d4954c0a45735d826b0f4ea12e6208fb283"
+checksum = "a94759edb5b95b1e7da8c4b9b6dc19e2091e1f1e7d7b250efee36931783da25c"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -5782,9 +5776,9 @@ dependencies = [
 
 [[package]]
 name = "rgpui-macos"
-version = "1.8.3"
+version = "1.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6124abff2d80db58eb7137ae60ed1c8b2a46c3bb495e751c649e8a5beaff5ab0"
+checksum = "8658b9b3e234589d4c7ae3b538880968bcc54702b2cc0405d365ac45ea70deb6"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -5828,9 +5822,9 @@ dependencies = [
 
 [[package]]
 name = "rgpui-macros"
-version = "1.8.3"
+version = "1.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "665549262d185ea7752c12130e99ce3291031d9710b45f0c79638de7b271d542"
+checksum = "09ff03150154fcc7b4ff45935ef0b9a4a5a69a52237c693809a9532235341c59"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
@@ -5840,9 +5834,9 @@ dependencies = [
 
 [[package]]
 name = "rgpui-platform"
-version = "1.8.3"
+version = "1.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ecf2b2c94eb4c16ff440e692b1f777eb0dd83d0ef15c43cc9c61620d5bd3462"
+checksum = "e83dd2d0e27a0d346e9da571bf85b5d9c3d77ee6f033ff1ffdb8396260b9efb8"
 dependencies = [
  "console_error_panic_hook",
  "rgpui",
@@ -5854,9 +5848,9 @@ dependencies = [
 
 [[package]]
 name = "rgpui-web"
-version = "1.8.3"
+version = "1.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8cf5d1849bf373d491889a2af40757255c4e4384d392740a2844549f05afd8c7"
+checksum = "ab76a1bc4dc422fcd91c7115d775d90a144a69b7d6d316e3f2dbda9c91d75d5a"
 dependencies = [
  "anyhow",
  "futures",
@@ -5877,9 +5871,9 @@ dependencies = [
 
 [[package]]
 name = "rgpui-wgpu"
-version = "1.8.3"
+version = "1.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d117ba1789474c525624e4d94c8428d0d5d400726e82d5a18318f6150c4ab2b"
+checksum = "b90cefe23a0686f2d2d42cc71a5278cdd60673dca7ef4279de585f44e986f623"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -5909,9 +5903,9 @@ dependencies = [
 
 [[package]]
 name = "rgpui-windows"
-version = "1.8.3"
+version = "1.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93336b7517172cf6aeacb6b34f89ef2de134184829c61cf6ce9a82983249634d"
+checksum = "f2151abe03e7e7c104ace561bea38768dfe575063259a084eb6840d6aa633789"
 dependencies = [
  "accesskit",
  "accesskit_windows",
@@ -5938,16 +5932,34 @@ dependencies = [
 
 [[package]]
 name = "rgpui-xim"
-version = "0.4.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e89ba26b9de4a2610073ff01854e8dd34c2f18e3c87040ac4acf6def21322849"
+checksum = "9521163c4ba609230b25d5157e1c331cd85e0ef6fc6af8bbdd213c8f2048ffe7"
 dependencies = [
  "ahash",
- "hashbrown 0.14.5",
+ "hashbrown 0.17.1",
  "log",
+ "rgpui-xim-ctext",
+ "rgpui-xim-parser",
  "x11rb 0.14.0",
- "xim-ctext",
- "xim-parser",
+]
+
+[[package]]
+name = "rgpui-xim-ctext"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb87498234fc204907ef91d8d096a48e3e84c41c7990cb433ac3103d0168f52e"
+dependencies = [
+ "encoding_rs",
+]
+
+[[package]]
+name = "rgpui-xim-parser"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8baa0d46a45b9653a29eb7c147d9a06217ea52bf1025ad009df9e4e29542cbb"
+dependencies = [
+ "bitflags 2.13.2",
 ]
 
 [[package]]
@@ -5990,7 +6002,7 @@ dependencies = [
 
 [[package]]
 name = "rumark"
-version = "0.2.6"
+version = "0.2.5"
 dependencies = [
  "adot-tree-sitter-toml",
  "anyhow",
@@ -6128,7 +6140,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6185,7 +6197,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6982,7 +6994,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -8281,7 +8293,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -8722,24 +8734,6 @@ name = "xcursor"
 version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "163b33ed8786455e2fa5d72f554057ce3f3182425434f756cd39c99839d88e23"
-
-[[package]]
-name = "xim-ctext"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ac61a7062c40f3c37b6e82eeeef835d5cc7824b632a72784a89b3963c33284c"
-dependencies = [
- "encoding_rs",
-]
-
-[[package]]
-name = "xim-parser"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5dcee45f89572d5a65180af3a84e7ddb24f5ea690a6d3aa9de231281544dd7b7"
-dependencies = [
- "bitflags 2.13.2",
-]
 
 [[package]]
 name = "xkbcommon"

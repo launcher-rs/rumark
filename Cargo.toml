@@ -6,7 +6,7 @@ resolver = "3"
 
 [package]
 name = "rumark"
-version = "0.2.6"
+version = "0.2.5"
 edition = "2024"
 license = "Apache-2.0"
 description = "拾墨 Rumark：基于 rgpui 的块式 Markdown 编辑器"
@@ -20,8 +20,8 @@ anyhow = "1"
 base64 = "0.23"
 uuid = "1.23"
 # rgpui 与 rgpui-platform 必须同版本，避免双版本类型冲突；Cargo.lock 锁定精确版本。
-rgpui = { version = "1.8.3", features = ["inspector"] }
-rgpui-platform = "1.8.3"
+rgpui = { version = "1.8.4", features = ["inspector"] }
+rgpui-platform = "1.8.4"
 unicode-segmentation = "1.13"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -110,9 +110,9 @@ winreg = "0.56"
 embed-resource = "3.0.12"
 
 [dev-dependencies]
-rgpui = { version = "1.8.3", features = ["test-support"] }
+rgpui = { version = "1.8.4", features = ["test-support"] }
 # 1.8 起 test-support 必须同时在 platform 上转发，否则窗口级测试辅助方法缺失。
-rgpui-platform = { version = "1.8.3", features = ["test-support"] }
+rgpui-platform = { version = "1.8.4", features = ["test-support"] }
 
 # 本 crate 开一档优化：块布局、文本测量与逐帧重绘这些热路径在 opt-level 0 下慢
 # 一个数量级；opt-level 1 相比 2 的运行时差别很小，但增量编译快得多。
