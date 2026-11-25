@@ -1172,9 +1172,7 @@ async fn app_menu_opened_windows_activate_and_close_independently(cx: &mut TestA
 
     assert!(
         second_window
-            .update(cx, |host, _window, cx| {
-                host.active_editor().read(cx).close_guard_installed
-            })
+            .update(cx, |editor, _window, _cx| editor.close_guard_installed)
             .expect("second editor window should be open")
     );
 
@@ -1221,12 +1219,9 @@ async fn app_menu_opened_file_window_reinstalls_close_guard_after_registration(
     assert_ne!(first_window.window_id(), second_window.window_id());
 
     second_window
-        .update(cx, |host, window, cx| {
-            let editor = host.active_editor();
-            editor.update(cx, |editor, cx| {
-                assert!(editor.close_guard_installed);
-                assert!(editor.on_window_should_close(window, cx));
-            });
+        .update(cx, |editor, window, cx| {
+            assert!(editor.close_guard_installed);
+            assert!(editor.on_window_should_close(window, cx));
         })
         .expect("second editor window should be open");
 
@@ -1262,23 +1257,20 @@ async fn app_menu_opened_dirty_file_window_prompts_only_that_window(cx: &mut Tes
     cx.run_until_parked();
 
     second_window
-        .update(cx, |host, window, cx| {
-            let editor = host.active_editor();
-            editor.update(cx, |editor, cx| {
-                editor.mark_dirty(cx);
-                assert!(!editor.on_window_should_close(window, cx));
-            });
+        .update(cx, |editor, window, cx| {
+            editor.mark_dirty(cx);
+            assert!(!editor.on_window_should_close(window, cx));
         })
         .expect("second editor window should be open");
 
     first_window
-        .update(cx, |host, _window, cx| {
-            assert!(!host.active_editor().read(cx).show_unsaved_changes_dialog);
+        .update(cx, |editor, _window, _cx| {
+            assert!(!editor.show_unsaved_changes_dialog);
         })
         .expect("first editor window should be open");
     second_window
-        .update(cx, |host, _window, cx| {
-            assert!(host.active_editor().read(cx).show_unsaved_changes_dialog);
+        .update(cx, |editor, _window, _cx| {
+            assert!(editor.show_unsaved_changes_dialog);
         })
         .expect("second editor window should be open");
 
@@ -1298,23 +1290,20 @@ async fn app_menu_opened_dirty_window_close_guard_prompts_only_that_window(
     cx.run_until_parked();
 
     second_window
-        .update(cx, |host, window, cx| {
-            let editor = host.active_editor();
-            editor.update(cx, |editor, cx| {
-                editor.mark_dirty(cx);
-                assert!(!editor.on_window_should_close(window, cx));
-            });
+        .update(cx, |editor, window, cx| {
+            editor.mark_dirty(cx);
+            assert!(!editor.on_window_should_close(window, cx));
         })
         .expect("second editor window should be open");
 
     first_window
-        .update(cx, |host, _window, cx| {
-            assert!(!host.active_editor().read(cx).show_unsaved_changes_dialog);
+        .update(cx, |editor, _window, _cx| {
+            assert!(!editor.show_unsaved_changes_dialog);
         })
         .expect("first editor window should be open");
     second_window
-        .update(cx, |host, _window, cx| {
-            assert!(host.active_editor().read(cx).show_unsaved_changes_dialog);
+        .update(cx, |editor, _window, _cx| {
+            assert!(editor.show_unsaved_changes_dialog);
         })
         .expect("second editor window should be open");
 }
@@ -1376,13 +1365,10 @@ async fn open_file_reuses_active_blank_window_instead_of_opening_another(cx: &mu
     // 不应新建窗口：内容直接载入原空白窗口。
     assert_eq!(cx.update(|cx| cx.windows().len()), 1);
     window
-        .update(cx, |host, _window, cx| {
-            let editor = host.active_editor();
-            editor.update(cx, |editor, cx| {
-                assert_eq!(editor.file_path.as_deref(), Some(opened_path.as_path()));
-                assert_eq!(editor.current_document_source(cx), "opened content");
-                assert!(!editor.is_blank_document(cx));
-            });
+        .update(cx, |editor, _window, cx| {
+            assert_eq!(editor.file_path.as_deref(), Some(opened_path.as_path()));
+            assert_eq!(editor.current_document_source(cx), "opened content");
+            assert!(!editor.is_blank_document(cx));
         })
         .expect("window should stay open");
 
@@ -1413,12 +1399,9 @@ async fn open_file_opens_new_window_when_active_window_has_content(cx: &mut Test
 
     assert_eq!(cx.update(|cx| cx.windows().len()), 2);
     first
-        .update(cx, |host, _window, cx| {
-            let editor = host.active_editor();
-            editor.update(cx, |editor, cx| {
-                assert_eq!(editor.current_document_source(cx), "已有内容");
-                assert!(editor.file_path.is_none());
-            });
+        .update(cx, |editor, _window, cx| {
+            assert_eq!(editor.current_document_source(cx), "已有内容");
+            assert!(editor.file_path.is_none());
         })
         .expect("first window should stay open");
 
@@ -3552,16 +3535,15 @@ async fn ctrl_tab_toggles_view_mode(cx: &mut TestAppContext) {
     let (editor, cx) =
         cx.add_window_view(|_window, cx| Editor::from_markdown(cx, "alpha".to_string(), None));
 
-    // `ctrl-tab` 已让给「下一个文档 tab」；视图切换默认改为 `ctrl-alt-v`。
     redraw(cx);
-    cx.simulate_keystrokes("ctrl-alt-v");
+    cx.simulate_keystrokes("ctrl-tab");
     redraw(cx);
 
     editor.update(cx, |editor, _cx| {
         assert!(matches!(editor.view_mode, ViewMode::Source));
     });
 
-    cx.simulate_keystrokes("ctrl-alt-v");
+    cx.simulate_keystrokes("ctrl-tab");
     redraw(cx);
 
     editor.update(cx, |editor, _cx| {
@@ -3616,7 +3598,7 @@ async fn workspace_shortcut_toggles_in_both_editor_modes(cx: &mut TestAppContext
             assert_eq!(editor.current_document_source(cx), "alpha");
         });
         if mode == ViewMode::Rendered {
-            cx.simulate_keystrokes("ctrl-alt-v");
+            cx.simulate_keystrokes("ctrl-tab");
         }
     }
 }
@@ -5107,9 +5089,9 @@ fn assert_deferred_load_matches_reference(cx: &mut TestAppContext, markdown: &st
         editor.read_with(cx, |editor, _cx| editor.document_loading),
         "延迟载入开始后应处于加载态"
     );
-    // 测试时钟不会自动流逝：推进 100ms 启动延迟并驱动载入循环（预算内一批
-    // 处理完全部剩余批次时只需一个 tick，但仍需再推进一步让循环收尾）。
-    cx.executor().advance_clock(Duration::from_millis(150));
+    // 测试时钟不会自动流逝：先推进加载视图的最短展示时长，再驱动载入循环
+    // （预算内一批处理完全部剩余批次时只需一个 tick，仍需再推进一步收尾）。
+    cx.executor().advance_clock(super::MIN_LOADING_DISPLAY);
     cx.run_until_parked();
     cx.executor().advance_clock(Duration::from_millis(50));
     cx.run_until_parked();
@@ -5198,184 +5180,55 @@ async fn idle_timer_refreshes_stale_snapshot_after_pause(cx: &mut TestAppContext
     });
 }
 
+/// 大文件加载态用动画占位视图替换正文：Spinner 与呼吸动画在此路径构造，
+/// 加载完成切回正文同样不应崩溃（rgpui 动画 API 的集成冒烟）。
 #[rgpui::test]
-async fn save_document_action_targets_only_active_tab(cx: &mut TestAppContext) {
+async fn document_loading_view_renders_with_animation(cx: &mut TestAppContext) {
     init_editor_test_app(cx);
-    cx.update(|cx| {
-        crate::theme::init(cx, "rumark-light");
-        crate::app_menu::init(cx);
+    let (editor, cx) = cx.add_window_view(|_window, cx| {
+        let mut editor = Editor::from_markdown(cx, "placeholder".to_string(), None);
+        editor.document_loading = true;
+        editor
     });
-
-    let first_path = temp_markdown_path("host-save-active-first");
-    let second_path = temp_markdown_path("host-save-active-second");
-    fs::write(&first_path, "first original").expect("write first markdown");
-    fs::write(&second_path, "second original").expect("write second markdown");
-
-    let (host, cx) = cx.add_window_view(|_window, cx| {
-        super::DocumentHost::new("first original".to_string(), Some(first_path.clone()), cx)
-    });
-    cx.update(|window, _cx| window.activate_window());
-    cx.run_until_parked();
-
-    // 第二个 tab 指向第二个文件并改名；第一个 tab 也标记脏但不应被写。
-    host.update(cx, |host, cx| {
-        host.add_tab("second original".to_string(), Some(second_path.clone()), cx);
-    });
-    host.update(cx, |host, cx| {
-        host.set_active(0, cx);
-        host.active_editor()
-            .update(cx, |editor, cx| editor.mark_dirty(cx));
-        host.set_active(1, cx);
-        host.active_editor().update(cx, |editor, cx| {
-            let first = editor.document.first_root().expect("current root").clone();
-            first.update(cx, |block, _cx| {
-                block
-                    .record
-                    .set_title(InlineTextTree::plain("second changed".to_string()));
-                block.refresh_render_cache();
-            });
-            editor.mark_dirty(cx);
-        });
-    });
-    cx.run_until_parked();
 
     cx.update(|window, cx| {
-        window.dispatch_action(Box::new(SaveDocument), cx);
+        window.draw(cx).clear(cx);
     });
     cx.run_until_parked();
+    editor.read_with(cx, |editor, _cx| {
+        assert!(editor.document_loading, "加载态应保持到真实文档就绪");
+    });
 
-    // 只有活动 tab（第二个文件）被写；第一个文件内容保持原样。
-    assert_eq!(
-        fs::read_to_string(&second_path).expect("read second markdown"),
-        "second changed"
-    );
-    assert_eq!(
-        fs::read_to_string(&first_path).expect("read first markdown"),
-        "first original"
-    );
-
-    let _ = crate::config::remove_recent_file(&first_path);
-    let _ = crate::config::remove_recent_file(&second_path);
-    let _ = fs::remove_file(&first_path);
-    let _ = fs::remove_file(&second_path);
+    // 加载完成后 document_loading 清零，正文恢复渲染。
+    editor.update(cx, |editor, cx| {
+        editor.document_loading = false;
+        cx.notify();
+    });
+    cx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+    });
+    cx.run_until_parked();
 }
 
-#[rgpui::test]
-async fn tab_actions_create_switch_and_close_tabs(cx: &mut TestAppContext) {
-    init_editor_test_app(cx);
-    cx.update(|cx| {
-        crate::theme::init(cx, "rumark-light");
-        crate::app_menu::init(cx);
-    });
+#[test]
+fn update_dialog_overlay_renders_when_version_available() {
+    let mut cx = TestAppContext::single();
+    init_editor_test_app(&mut cx);
+    let editor = cx.new(|cx| Editor::from_markdown(cx, String::new(), None));
+    let i18n = cx.update(|cx| cx.global::<I18nManager>().snapshot());
 
-    let (host, cx) =
-        cx.add_window_view(|_window, cx| super::DocumentHost::new("first".to_string(), None, cx));
-    cx.update(|window, _cx| window.activate_window());
-    cx.run_until_parked();
+    editor.update(&mut cx, |editor, cx| {
+        assert!(editor.render_update_dialog_overlay(&i18n, cx).is_none());
 
-    // Ctrl-Alt-N：新建 tab。
-    cx.simulate_keystrokes("ctrl-alt-n");
-    cx.run_until_parked();
-    host.read_with(cx, |host, cx| {
-        assert_eq!(host.tab_count(), 2);
-        assert_eq!(
-            host.active_editor().read(cx).current_document_source(cx),
-            ""
-        );
-    });
-
-    // Ctrl-Tab：切回第一个；Ctrl-Shift-Tab：再回第二个。
-    cx.simulate_keystrokes("ctrl-tab");
-    cx.run_until_parked();
-    host.read_with(cx, |host, cx| {
-        assert_eq!(
-            host.active_editor().read(cx).current_document_source(cx),
-            "first"
-        );
-    });
-    cx.simulate_keystrokes("ctrl-shift-tab");
-    cx.run_until_parked();
-    host.read_with(cx, |host, cx| {
-        assert_eq!(
-            host.active_editor().read(cx).current_document_source(cx),
-            ""
-        );
-    });
-
-    // Ctrl-F4：关闭当前空白 tab，剩一个。
-    cx.simulate_keystrokes("ctrl-f4");
-    cx.run_until_parked();
-    host.read_with(cx, |host, cx| {
-        assert_eq!(host.tab_count(), 1);
-        assert_eq!(
-            host.active_editor().read(cx).current_document_source(cx),
-            "first"
-        );
-    });
-}
-
-#[rgpui::test]
-async fn dropping_markdown_into_host_editor_does_not_reenter(cx: &mut TestAppContext) {
-    init_editor_test_app(cx);
-    let path = temp_markdown_path("drop_into_host_no_reenter");
-    std::fs::write(&path, "# dropped content").expect("write temp markdown");
-
-    // 活动 tab 非空白，确保 open_path_in_tab 走「新建 tab」路径（会遍历 read 各 editor）。
-    let (host, cx) = cx.add_window_view(|_window, cx| {
-        crate::editor::DocumentHost::new("original content".to_string(), None, cx)
-    });
-    let active = host.read_with(cx, |host, _cx| host.active_editor());
-
-    // 真实拖放回调运行在 Editor 的 update 上下文里。修复前这里会同步
-    // editor.update -> host.update -> active_editor().read 同一实体，触发
-    // entity_map「无法在 read 正在被更新的实体」panic。
-    active.update(cx, |editor, cx| {
-        assert!(editor.open_dropped_markdown_in_host_tab(&path, cx));
-    });
-    cx.run_until_parked();
-
-    host.read_with(cx, |host, cx| {
-        assert_eq!(host.tab_count(), 2, "拖入的文件应打开为新 tab");
-        assert_eq!(
-            host.active_editor().read(cx).current_document_source(cx),
-            "# dropped content"
-        );
-    });
-
-    let _ = crate::config::remove_recent_file(&path);
-    let _ = std::fs::remove_file(&path);
-}
-
-#[rgpui::test]
-async fn clicking_document_tab_switches_active(cx: &mut TestAppContext) {
-    init_editor_test_app(cx);
-    cx.update(|cx| {
-        crate::theme::init(cx, "rumark-light");
-    });
-    let (host, cx) =
-        cx.add_window_view(|_window, cx| super::DocumentHost::new("first".to_string(), None, cx));
-    cx.update(|_window, cx| {
-        host.update(cx, |host, cx| {
-            host.add_tab("second".to_string(), None, cx);
+        editor.update_dialog = Some(super::update::UpdateDialogState {
+            current: "0.2.3".into(),
+            remote: "0.2.4".into(),
+            published: "2026-11-20T00:00:00Z".into(),
+            notes: "line 1\nline 2".into(),
+            asset: None,
+            staged_version: None,
         });
-    });
-    cx.update(|window, _cx| window.activate_window());
-    cx.run_until_parked();
-    redraw(cx);
-
-    // 标题栏 34px，tab 条紧随其下；点击第一个 tab 的文字区域。
-    let point = rgpui::point(rgpui::px(30.0), rgpui::px(49.0));
-    cx.simulate_click(point, rgpui::Modifiers::none());
-    cx.run_until_parked();
-    redraw(cx);
-
-    cx.update(|_window, cx| {
-        host.read_with(cx, |host, cx| {
-            assert_eq!(
-                host.active_editor().read(cx).current_document_source(cx),
-                "first",
-                "点击第一个 tab 文字应切换到它"
-            );
-        });
+        let overlay = editor.render_update_dialog_overlay(&i18n, cx);
+        assert!(overlay.is_some(), "有新版时应渲染更新对话框覆盖层");
     });
 }

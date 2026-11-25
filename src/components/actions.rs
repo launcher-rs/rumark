@@ -62,10 +62,6 @@ actions!(
         AddThemeConfig,
         QuitApplication,
         CloseWindow,
-        NewTab,
-        CloseTab,
-        NextTab,
-        PreviousTab,
         ShowAbout,
         CheckForUpdates,
         InstallCliTool,
@@ -203,10 +199,6 @@ pub(crate) enum ShortcutCommand {
     OpenFile,
     QuitApplication,
     CloseWindow,
-    NewTab,
-    CloseTab,
-    NextTab,
-    PreviousTab,
     DismissTransientUi,
     ToggleViewMode,
     ToggleWorkspace,
@@ -600,36 +592,6 @@ const KEY_BINDINGS: &[ShortcutDefinition] = &[
         context: None,
     },
     ShortcutDefinition {
-        command: ShortcutCommand::NewTab,
-        id: "new_tab",
-        category: ShortcutCategory::File,
-        // `ctrl-t` 已归「插入表格」，新建 tab 用 alt 组合避免冲突。
-        default_keys: &["cmd-alt-n", "ctrl-alt-n"],
-        context: None,
-    },
-    ShortcutDefinition {
-        command: ShortcutCommand::CloseTab,
-        id: "close_tab",
-        category: ShortcutCategory::File,
-        // 不用 `cmd-w`（保留给关窗），也不用 `ctrl-w`（保留给工作区抽屉）。
-        default_keys: &["cmd-f4", "ctrl-f4"],
-        context: None,
-    },
-    ShortcutDefinition {
-        command: ShortcutCommand::NextTab,
-        id: "next_tab",
-        category: ShortcutCategory::Navigation,
-        default_keys: &["cmd-tab", "ctrl-tab"],
-        context: None,
-    },
-    ShortcutDefinition {
-        command: ShortcutCommand::PreviousTab,
-        id: "previous_tab",
-        category: ShortcutCategory::Navigation,
-        default_keys: &["cmd-shift-tab", "ctrl-shift-tab"],
-        context: None,
-    },
-    ShortcutDefinition {
         command: ShortcutCommand::DismissTransientUi,
         id: "dismiss_transient_ui",
         category: ShortcutCategory::Other,
@@ -640,8 +602,7 @@ const KEY_BINDINGS: &[ShortcutDefinition] = &[
         command: ShortcutCommand::ToggleViewMode,
         id: "toggle_view_mode",
         category: ShortcutCategory::Navigation,
-        // `ctrl-tab`/`cmd-tab` 让给「下一个文档 tab」（见 NextTab）。
-        default_keys: &["ctrl-/", "ctrl-alt-v", "cmd-alt-v"],
+        default_keys: &["ctrl-/", "ctrl-tab", "cmd-tab"],
         context: None,
     },
     ShortcutDefinition {
@@ -1099,10 +1060,6 @@ fn key_binding_for(
         ShortcutCommand::OpenFile => KeyBinding::new(key, OpenFile, context),
         ShortcutCommand::QuitApplication => KeyBinding::new(key, QuitApplication, context),
         ShortcutCommand::CloseWindow => KeyBinding::new(key, CloseWindow, context),
-        ShortcutCommand::NewTab => KeyBinding::new(key, NewTab, context),
-        ShortcutCommand::CloseTab => KeyBinding::new(key, CloseTab, context),
-        ShortcutCommand::NextTab => KeyBinding::new(key, NextTab, context),
-        ShortcutCommand::PreviousTab => KeyBinding::new(key, PreviousTab, context),
         ShortcutCommand::DismissTransientUi => KeyBinding::new(key, DismissTransientUi, context),
         ShortcutCommand::ToggleViewMode => KeyBinding::new(key, ToggleViewMode, context),
         ShortcutCommand::ToggleWorkspace => KeyBinding::new(key, ToggleWorkspace, context),
@@ -1216,33 +1173,10 @@ mod tests {
             resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::ToggleViewMode),
             vec![
                 "ctrl-/".to_string(),
-                "ctrl-alt-v".to_string(),
-                "cmd-alt-v".to_string()
+                "ctrl-tab".to_string(),
+                "cmd-tab".to_string()
             ]
         );
-    }
-
-    #[test]
-    fn tab_navigation_owns_tab_keys_without_conflicts() {
-        assert_eq!(
-            resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::NextTab),
-            vec!["cmd-tab".to_string(), "ctrl-tab".to_string()]
-        );
-        assert_eq!(
-            resolved_shortcut_keys(&BTreeMap::new(), ShortcutCommand::PreviousTab),
-            vec!["cmd-shift-tab".to_string(), "ctrl-shift-tab".to_string()]
-        );
-        for (command, key) in [
-            (ShortcutCommand::NextTab, "ctrl-tab"),
-            (ShortcutCommand::PreviousTab, "ctrl-shift-tab"),
-            (ShortcutCommand::CloseTab, "ctrl-f4"),
-            (ShortcutCommand::NewTab, "ctrl-alt-n"),
-        ] {
-            assert!(
-                shortcut_conflict_for(command, &[key.to_string()], &BTreeMap::new()).is_none(),
-                "{command:?} should not conflict on {key}"
-            );
-        }
     }
 
     #[test]

@@ -150,7 +150,6 @@ impl Editor {
         self.pending_close_after_save = false;
         self.close_dialog_restore_focus = None;
         self.sync_workspace_after_document_path_change(cx);
-        self.notify_host_window_chrome_refresh(cx);
         cx.notify();
     }
 
@@ -194,7 +193,6 @@ impl Editor {
         let (default_dir, suggested_name) = self.save_dialog_defaults();
         let prompt = cx.prompt_for_new_path(&default_dir, suggested_name.as_deref());
         let weak_editor = cx.entity().downgrade();
-        let weak_editor_for_close = weak_editor.clone();
         let weak_editor_for_cancel = weak_editor.clone();
         let weak_editor_for_error = weak_editor.clone();
         let weak_editor_for_write_error = weak_editor.clone();
@@ -294,14 +292,10 @@ impl Editor {
             });
             let _ = cx.update_window(
                 window_handle,
-                move |_view: AnyView, window: &mut Window, cx: &mut App| {
+                move |_view: AnyView, window: &mut Window, _cx: &mut App| {
                     window.set_window_edited(false);
                     if should_close_after_save {
-                        // 关闭目标可能是窗口，也可能是所属 tab；后者需要 Editor 的
-                        // Context 才能定位 host，故回到编辑器实体上分派。
-                        let _ = weak_editor_for_close.update(cx, |this, cx| {
-                            this.finish_close(window, cx);
-                        });
+                        window.remove_window();
                     }
                 },
             );
@@ -318,7 +312,7 @@ impl Editor {
             let should_close_after_save = self.pending_close_after_save;
             if self.save_to_existing_path(&path, window, cx) {
                 if should_close_after_save {
-                    self.finish_close(window, cx);
+                    window.remove_window();
                 }
             } else if should_close_after_save {
                 self.discard_pending_close_after_save(cx);

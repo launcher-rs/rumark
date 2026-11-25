@@ -1,4 +1,4 @@
-//! 外部文件拖放：Markdown 替换当前文档，图片插入光标处。
+//! 外部文件拖放：Markdown 空窗口就地载入、非空窗口另开新窗口，图片插入光标处。
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -43,42 +43,9 @@ impl Editor {
             .collect()
     }
 
-    /// 在所属 host 中以新 tab 打开 Markdown 文件。
+    /// 处理外部路径拖放：Markdown 按窗口占用情况决定落点，图片插入光标处，其余提示。
     ///
-    /// standalone 编辑器（无宿主）返回 `false`，调用方走原「替换当前文档」路径；
-    /// 读文件失败也返回 `false`，由原路径统一弹出错误提示。
-    pub(super) fn open_dropped_markdown_in_host_tab(
-        &self,
-        path: &Path,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let Some(host) = self.owner_host.clone() else {
-            return false;
-        };
-        if !self.multi_tab_enabled {
-            // 单文档模式：交回调用方走「替换当前文档」。
-            return false;
-        }
-        // 先在同步阶段读一次文件：读失败交回调用方走原替换路径，由它统一弹
-        // 错误提示（延后之后再想弹窗就拿不到当前 window 了）。
-        if super::read_markdown_file(path).is_err() {
-            return false;
-        }
-        // recent 记录只依赖 App 状态，可在同步阶段完成（Context<Editor> deref 到 App）。
-        crate::app_menu::record_recent_file_from_editor(path, cx);
-        // 拖放回调期间当前 Editor 正处于 update 中；host 的空白复用判断要
-        // read 活动 Editor（往往就是当前这个），同步调用会触发实体重入
-        // panic（entity_map：无法在 read 时操作正在被更新的实体）。
-        // 延后一拍，等当前 update 结束后再操作 host。
-        let path = path.to_path_buf();
-        cx.spawn(async move |_, cx| {
-            let _ = host.update(cx, |host, cx| host.open_path_in_tab(&path, cx));
-        })
-        .detach();
-        true
-    }
-
-    /// 处理外部路径拖放：多文档窗口中 Markdown 进新 tab，图片插入光标处，其余提示。
+    /// 空窗口就地载入；已有内容则另开窗口，避免静默替换用户正在看的文档。
     pub(crate) fn on_external_paths_drop(
         &mut self,
         paths: &ExternalPaths,
@@ -86,8 +53,10 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         if let Some(path) = Self::first_dropped_markdown_path(paths.paths()) {
-            if !self.open_dropped_markdown_in_host_tab(&path, cx) {
+            if self.is_blank_document(cx) {
                 self.request_dropped_markdown_replace(path, window, cx);
+            } else {
+                self.open_dropped_markdown_in_new_window(path, window, cx);
             }
             return;
         }
@@ -102,6 +71,37 @@ impl Editor {
             .global::<I18nManager>()
             .t("dialog_drop_replace_non_markdown", &[]);
         self.show_drop_open_failed_prompt(message, window, cx);
+    }
+
+    /// 当前窗口已有内容时，把拖入的 Markdown 放到新窗口打开。
+    ///
+    /// 与菜单「打开文件」保持同一套心智模型：有内容就新开窗口，不替换当前文档。
+    /// 拖入的正是当前已打开的文件时只激活当前窗口，避免同一文件出现多个可写窗口。
+    /// 开窗延后到下一个应用周期，避免拖放事件分发期间改动窗口栈。
+    fn open_dropped_markdown_in_new_window(
+        &self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .file_path
+            .as_deref()
+            .is_some_and(|current| current == path.as_path())
+        {
+            window.activate_window();
+            return;
+        }
+
+        let error_window = window.window_handle();
+        cx.spawn(async move |_: WeakEntity<Self>, cx: &mut AsyncApp| {
+            cx.update(|cx: &mut App| {
+                if let Err(err) = crate::app_menu::open_file_in_new_window(cx, &path) {
+                    crate::app_menu::show_read_failure_prompt(Some(error_window), &path, &err, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// 把拖入的图片按粘贴管线插入文档（遵循图片粘贴偏好）。
@@ -322,7 +322,6 @@ impl Editor {
         self.history_restore_in_progress = false;
         // 当前 Markdown 已直接保存为稳定快照，避免载入结束时又强制生成整篇映射。
         self.sync_workspace_after_document_path_change(cx);
-        self.notify_host_window_chrome_refresh(cx);
         cx.notify();
     }
 
@@ -649,7 +648,7 @@ mod tests {
 
     use crate::components::BlockKind;
     use crate::i18n::I18nManager;
-    use rgpui::TestAppContext;
+    use rgpui::{ExternalPaths, TestAppContext};
 
     /// 在独立临时目录里创建若干文件并返回其路径（测试辅助）。
     fn temp_markdown_dir(files: &[(&str, &str)]) -> Vec<PathBuf> {
@@ -803,5 +802,95 @@ mod tests {
         });
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 构造外部文件拖放负载（测试辅助）。
+    fn external_paths(path: &Path) -> ExternalPaths {
+        ExternalPaths(vec![path.to_path_buf()].into())
+    }
+
+    #[rgpui::test]
+    async fn dropped_markdown_loads_into_blank_window(cx: &mut TestAppContext) {
+        init_test_app(cx);
+        let paths = temp_markdown_dir(&[("dropped.md", "dropped body")]);
+        let dropped = paths[0].clone();
+        let (editor, cx) =
+            cx.add_window_view(|_window, cx| Editor::from_markdown(cx, String::new(), None));
+
+        editor.update_in(cx, |editor, window, cx| {
+            editor.on_external_paths_drop(&external_paths(&dropped), window, cx);
+        });
+
+        editor.update_in(cx, |editor, _window, cx| {
+            assert_eq!(editor.file_path.as_deref(), Some(dropped.as_path()));
+            assert_eq!(editor.current_document_source(cx), "dropped body");
+        });
+        assert_eq!(cx.cx.update(|cx| cx.windows().len()), 1);
+
+        let _ = crate::config::remove_recent_file(&dropped);
+        let _ = std::fs::remove_dir_all(dropped.parent().expect("temp dir"));
+    }
+
+    #[rgpui::test]
+    async fn dropped_markdown_opens_new_window_when_current_has_content(cx: &mut TestAppContext) {
+        init_test_app(cx);
+        let paths = temp_markdown_dir(&[("dropped.md", "dropped body")]);
+        let dropped = paths[0].clone();
+        let (editor, cx) = cx.add_window_view(|_window, cx| {
+            Editor::from_markdown(cx, "existing content".to_string(), None)
+        });
+
+        editor.update_in(cx, |editor, window, cx| {
+            editor.on_external_paths_drop(&external_paths(&dropped), window, cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(cx.cx.update(|cx| cx.windows().len()), 2);
+        editor.update_in(cx, |editor, _window, cx| {
+            assert_eq!(editor.current_document_source(cx), "existing content");
+            assert!(editor.file_path.is_none());
+        });
+
+        // 新窗口承载拖入的文件，原窗口内容保持不变。
+        let new_editor = cx
+            .cx
+            .update(|cx| {
+                cx.windows().into_iter().find_map(|window| {
+                    let editor = window.downcast::<Editor>()?;
+                    let is_dropped = editor
+                        .read_with(cx, |editor, _cx| {
+                            editor.file_path.as_deref() == Some(dropped.as_path())
+                        })
+                        .unwrap_or(false);
+                    is_dropped.then_some(editor)
+                })
+            })
+            .expect("dropped file window should exist");
+        new_editor
+            .update(cx, |editor, _window, cx| {
+                assert_eq!(editor.current_document_source(cx), "dropped body");
+            })
+            .expect("dropped file window should be updateable");
+
+        let _ = crate::config::remove_recent_file(&dropped);
+        let _ = std::fs::remove_dir_all(dropped.parent().expect("temp dir"));
+    }
+
+    #[rgpui::test]
+    async fn dropped_same_file_does_not_open_second_window(cx: &mut TestAppContext) {
+        init_test_app(cx);
+        let paths = temp_markdown_dir(&[("dropped.md", "dropped body")]);
+        let dropped = paths[0].clone();
+        let (editor, cx) = cx.add_window_view(|_window, cx| {
+            Editor::from_markdown(cx, "dropped body".to_string(), Some(dropped.clone()))
+        });
+
+        editor.update_in(cx, |editor, window, cx| {
+            editor.on_external_paths_drop(&external_paths(&dropped), window, cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(cx.cx.update(|cx| cx.windows().len()), 1);
+        let _ = std::fs::remove_dir_all(dropped.parent().expect("temp dir"));
     }
 }

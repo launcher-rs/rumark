@@ -340,20 +340,25 @@ impl Editor {
             .min(available_content_width)
     }
 
-    /// 构造系统窗口标题；有未保存修改时带上脏标记。
+    /// 构造系统窗口标题：文件名 + 所在文件夹名，有未保存修改时带上脏标记。
+    ///
+    /// 同名文档分布在不同目录时，仅靠文件名无法区分窗口，因此附上末级文件夹名。
     pub(super) fn window_title(
         file_path: Option<&Path>,
         is_dirty: bool,
         i18n: &crate::i18n::I18nSnapshot,
     ) -> String {
         let base_title = if let Some(path) = file_path {
-            format!(
-                "Rumark - {}",
-                path.file_name().map_or_else(
-                    || path.to_string_lossy().to_string(),
-                    |name| name.to_string_lossy().to_string()
-                )
-            )
+            let file_name = path.file_name().map_or_else(
+                || path.to_string_lossy().to_string(),
+                |name| name.to_string_lossy().to_string(),
+            );
+            match path.parent().and_then(Path::file_name) {
+                Some(folder) if !folder.to_string_lossy().is_empty() => {
+                    format!("Rumark - {file_name} ({})", folder.to_string_lossy())
+                }
+                _ => format!("Rumark - {file_name}"),
+            }
         } else {
             "Rumark".to_string()
         };
@@ -509,11 +514,6 @@ impl Editor {
         cx.notify();
     }
 
-    /// 文档是否有未保存修改（退出流程逐窗确认用）。
-    pub(crate) fn is_document_dirty(&self) -> bool {
-        self.document_dirty
-    }
-
     /// 标记文档为脏并排队到下一渲染帧刷新窗口标题与编辑状态。
     pub(super) fn mark_dirty(&mut self, cx: &mut Context<Self>) {
         self.last_document_edit = Some(Instant::now());
@@ -521,7 +521,6 @@ impl Editor {
             self.document_dirty = true;
             self.pending_window_edited = true;
             self.pending_window_title_refresh = true;
-            self.notify_host_window_chrome_refresh(cx);
             cx.notify();
         }
     }
@@ -620,19 +619,28 @@ mod tests {
     }
 
     #[test]
-    fn window_title_shows_file_name_and_dirty_marker() {
+    fn window_title_shows_file_name_folder_and_dirty_marker() {
         let manager = crate::i18n::I18nManager::new_with_language_id("en-US");
         let i18n = manager.snapshot();
 
         assert_eq!(Editor::window_title(None, false, &i18n), "Rumark");
         assert_eq!(
             Editor::window_title(Some(std::path::Path::new("/tmp/notes.md")), false, &i18n),
+            "Rumark - notes.md (tmp)"
+        );
+        assert_eq!(
+            Editor::window_title(Some(std::path::Path::new("docs/notes.md")), false, &i18n),
+            "Rumark - notes.md (docs)"
+        );
+        // 无父目录时不追加空括号。
+        assert_eq!(
+            Editor::window_title(Some(std::path::Path::new("notes.md")), false, &i18n),
             "Rumark - notes.md"
         );
 
         let dirty = Editor::window_title(Some(std::path::Path::new("/tmp/notes.md")), true, &i18n);
         let marker = i18n.t("win_dirty_marker", &[]);
-        assert_eq!(dirty, format!("{marker} Rumark - notes.md"));
+        assert_eq!(dirty, format!("{marker} Rumark - notes.md (tmp)"));
     }
 
     #[test]

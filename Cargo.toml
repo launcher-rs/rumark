@@ -1,4 +1,4 @@
-# workspace 根：rumark 主 crate 自身是根包成员。
+# workspace 根：rumark 主 crate（[profile.*] 必须定义在这里）。
 # [profile.*] 只能在 workspace 根定义，保留在本文件。
 [workspace]
 members = ["."]
@@ -6,7 +6,7 @@ resolver = "3"
 
 [package]
 name = "rumark"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2024"
 license = "Apache-2.0"
 description = "拾墨 Rumark：基于 rgpui 的块式 Markdown 编辑器"
@@ -20,8 +20,8 @@ anyhow = "1"
 base64 = "0.23"
 uuid = "1.23"
 # rgpui 与 rgpui-platform 必须同版本，避免双版本类型冲突；Cargo.lock 锁定精确版本。
-rgpui = { version = "1.8.1", features = ["inspector"] }
-rgpui-platform = "1.8.1"
+rgpui = { version = "1.8.3", features = ["inspector"] }
+rgpui-platform = "1.8.3"
 unicode-segmentation = "1.13"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -35,6 +35,9 @@ directories = "6"
 ratex-layout = "0.1.9"
 ratex-parser = "0.1.9"
 ratex-svg = { version = "0.1.9", features = ["embed-fonts", "standalone"] }
+# rgpui 扩展组件库；ui feature 提供更新对话框与状态栏进度模型。
+# 直接使用 github 源码（不再发 crates.io）；本地改动先推到 launcher-rs/rgpui-extra main。
+rgpui-extra = { git = "https://github.com/launcher-rs/rgpui-extra.git", features = ["ui"] }
 # Mermaid 渲染库由独立仓 launcher-rs/mermaid-renderer 维护，已发布到 crates.io。
 # 本地联调：在 [patch.crates-io] 里临时指向旁边 checkout 的该仓，不要长期改回 git 依赖。
 mermaid-renderer = "0.1"
@@ -107,9 +110,9 @@ winreg = "0.56"
 embed-resource = "3.0.12"
 
 [dev-dependencies]
-rgpui = { version = "1.8.1", features = ["test-support"] }
+rgpui = { version = "1.8.3", features = ["test-support"] }
 # 1.8 起 test-support 必须同时在 platform 上转发，否则窗口级测试辅助方法缺失。
-rgpui-platform = { version = "1.8.1", features = ["test-support"] }
+rgpui-platform = { version = "1.8.3", features = ["test-support"] }
 
 # 本 crate 开一档优化：块布局、文本测量与逐帧重绘这些热路径在 opt-level 0 下慢
 # 一个数量级；opt-level 1 相比 2 的运行时差别很小，但增量编译快得多。

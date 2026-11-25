@@ -9,18 +9,17 @@ use rgpui::*;
 
 use crate::app_identity::RUMARK_APP_ID;
 use crate::components::{
-    AddLanguageConfig, AddThemeConfig, CheckForUpdates, ClearRecentFiles, CloseTab, CloseWindow,
-    CopyHtml, CopyMarkdown, ExportDocx, ExportHtml, ExportPdf, InstallCliTool, NewTab, NewWindow,
-    NextTab, NoRecentFiles, OpenFile, OpenPreferences, OpenRecentFile, PreviousTab,
-    QuitApplication, SaveDocument, SaveDocumentAs, SelectLanguage, SelectTheme, ShowAbout,
-    ToggleWorkspace, UninstallCliTool,
+    AddLanguageConfig, AddThemeConfig, CheckForUpdates, ClearRecentFiles, CloseWindow, CopyHtml,
+    CopyMarkdown, ExportDocx, ExportHtml, ExportPdf, InstallCliTool, NewWindow, NoRecentFiles,
+    OpenFile, OpenPreferences, OpenRecentFile, QuitApplication, SaveDocument, SaveDocumentAs,
+    SelectLanguage, SelectTheme, ShowAbout, ToggleWorkspace, UninstallCliTool,
 };
 use crate::config::{
     PendingConfigRecovery, apply_configured_language, apply_configured_theme, clear_recent_files,
     import_language_config_and_select, import_theme_config_and_select, open_preferences_window,
     read_recent_files, record_recent_file, remove_recent_file,
 };
-use crate::editor::{DocumentHost, Editor, WindowCloseFlow, read_error_detail, read_markdown_file};
+use crate::editor::{Editor, read_error_detail, read_markdown_file};
 use crate::i18n::I18nManager;
 #[cfg(any(target_os = "macos", test))]
 use crate::i18n::I18nSnapshot;
@@ -46,31 +45,16 @@ pub(crate) fn rumark_window_options(bounds: Bounds<Pixels>) -> WindowOptions {
 #[derive(Default)]
 pub(crate) struct MenuState {
     window_closed_subscription: Option<Subscription>,
-    /// 退出流程待关闭的编辑器窗口队列（逐窗确认未保存，全部关闭后归零退出）。
-    quit_remaining: Vec<AnyWindowHandle>,
-    /// 是否处于退出流程（防止普通关窗误触发队列推进）。
-    quitting: bool,
 }
 
 impl Global for MenuState {}
 
-/// 确保 `MenuState` 已注册（测试 app 不一定调用过 `init`，退出/取消路径也要可用）。
-fn ensure_menu_state(cx: &mut App) {
-    if cx.try_global::<MenuState>().is_none() {
-        cx.set_global(MenuState::default());
-    }
-}
-
 /// 按给定 Markdown 内容与可选路径打开编辑器窗口。
-///
-/// 窗口根视图是多文档容器 [`DocumentHost`]：它内含首个 tab（编辑器）。关闭守卫
-/// 由活动 Editor 首次渲染时自行安装（`install_close_guard`），切 tab 后新 Editor
-/// 渲染会重装，因此这里不再显式安装。
 pub(crate) fn open_editor_window(
     cx: &mut App,
     markdown: String,
     file_path: Option<PathBuf>,
-) -> WindowHandle<DocumentHost> {
+) -> WindowHandle<Editor> {
     const DEFERRED_LOAD_THRESHOLD: usize = 128 * 1024;
     let (initial_markdown, deferred_markdown) = if markdown.len() >= DEFERRED_LOAD_THRESHOLD {
         (
@@ -88,19 +72,17 @@ pub(crate) fn open_editor_window(
     let bounds = Bounds::centered(None, size(px(1080.), px(720.)), cx);
     let handle = cx
         .open_window(rumark_window_options(bounds), move |_window, cx| {
-            cx.new(move |cx| DocumentHost::new(initial_markdown, initial_file_path, cx))
+            cx.new(move |cx| Editor::from_markdown(cx, initial_markdown, initial_file_path))
         })
         .unwrap();
 
     handle
-        .update(cx, move |host, window, cx| {
+        .update(cx, move |editor, window, cx| {
             window.activate_window();
+            editor.force_install_close_guard(cx, window);
             show_pending_config_recovery(cx, window);
             if let Some(markdown) = deferred_markdown {
-                let editor = host.active_editor();
-                editor.update(cx, |editor, cx| {
-                    editor.defer_large_document_load(markdown, deferred_path, cx);
-                });
+                editor.defer_large_document_load(markdown, deferred_path, cx);
             }
         })
         .expect("newly opened editor window should be updateable");
@@ -112,7 +94,7 @@ pub(crate) fn open_editor_window(
 ///
 /// 配置文件损坏时启动流程已备份原文件并重建默认配置，此处告知用户备份位置，
 /// 否则用户只会看到键位、主题与语言"没生效"，而不知原配置已被移走。
-fn show_pending_config_recovery(cx: &mut App, window: &mut Window) {
+fn show_pending_config_recovery(cx: &mut Context<Editor>, window: &mut Window) {
     let Some(recovery) = PendingConfigRecovery::take(cx) else {
         return;
     };
@@ -127,8 +109,7 @@ fn show_pending_config_recovery(cx: &mut App, window: &mut Window) {
     let ok = i18n.t("dialog_ok", &[]);
     let buttons = [ok.as_str()];
     let prompt = window.prompt(PromptLevel::Critical, &title, Some(&detail), &buttons, cx);
-    // 这里拿到的是 `App`（而非某个实体的 Context），spawn 闭包只有 cx 一个参数。
-    cx.spawn(async move |_cx| {
+    cx.spawn(async move |_this, _cx| {
         let _ = prompt.await;
     })
     .detach();
@@ -164,54 +145,31 @@ pub(crate) fn show_read_failure_prompt(
 /// 返回是否已复用当前窗口（`false` 表示调用方应改为新建窗口）。
 /// 读取失败时不会改动窗口状态，交由调用方按新建窗口路径统一报错。
 fn try_load_into_active_blank_window(cx: &mut App, path: &Path) -> bool {
-    let Some(window) = cx.active_window() else {
+    let Some(window) = cx
+        .active_window()
+        .and_then(|window| window.downcast::<Editor>())
+    else {
         return false;
     };
+    let blank = window
+        .read_with(cx, |editor, cx| editor.is_blank_document(cx))
+        .unwrap_or(false);
+    if !blank {
+        return false;
+    }
+
     let path = path.to_path_buf();
-
-    // standalone 编辑器窗口（测试直接以 Editor 为根）：保持原有路径。
-    if let Some(editor_window) = window.downcast::<Editor>() {
-        let blank = editor_window
-            .read_with(cx, |editor, cx| editor.is_blank_document(cx))
-            .unwrap_or(false);
-        if !blank {
-            return false;
-        }
-        return editor_window
-            .update(cx, |editor, window, cx| {
-                if editor.replace_document_from_path(&path, cx).is_ok() {
-                    window.set_window_edited(false);
-                    window.activate_window();
-                    true
-                } else {
-                    false
-                }
-            })
-            .unwrap_or(false);
-    }
-
-    // 多文档窗口：复用活动 tab 的空白编辑器，不改变 tab 数量。
-    if let Some(host_window) = window.downcast::<DocumentHost>() {
-        let blank = host_window
-            .read_with(cx, |host, cx| host.active_is_blank(cx))
-            .unwrap_or(false);
-        if !blank {
-            return false;
-        }
-        return host_window
-            .update(cx, |host, window, cx| {
-                if host.load_active_from_path(&path, cx) {
-                    window.set_window_edited(false);
-                    window.activate_window();
-                    true
-                } else {
-                    false
-                }
-            })
-            .unwrap_or(false);
-    }
-
-    false
+    window
+        .update(cx, |editor, window, cx| {
+            if editor.replace_document_from_path(&path, cx).is_ok() {
+                window.set_window_edited(false);
+                window.activate_window();
+                true
+            } else {
+                false
+            }
+        })
+        .unwrap_or(false)
 }
 
 /// 打开单个文件：优先把内容载入当前空白窗口，否则新建窗口。
@@ -539,45 +497,11 @@ fn with_active_editor(
     let Some(window) = cx.active_window() else {
         return;
     };
-    // 双路径：standalone 编辑器（测试等直接以 Editor 为窗口根）与多文档容器。
-    // 两者都必须经 spawn 延后，动作分发期间同步 update 活动窗口必失败（F12 教训）。
-    if let Some(editor_window) = window.downcast::<Editor>() {
-        cx.spawn(async move |cx| {
-            let _ = editor_window.update(cx, |editor, window, cx| update(editor, window, cx));
-        })
-        .detach();
-    } else if let Some(host_window) = window.downcast::<DocumentHost>() {
-        cx.spawn(async move |cx| {
-            let _ = host_window.update(cx, |host, window, cx| {
-                let editor = host.active_editor();
-                // Context<DocumentHost> 解引用为 App，可直接 update 子 Editor；
-                // window 由外层闭包捕获并传给回调，借用互不冲突。
-                editor.update(cx, |editor, editor_cx| {
-                    update(editor, window, editor_cx);
-                });
-            });
-        })
-        .detach();
-    }
-}
-
-/// 对当前活动的多文档容器执行一次更新操作（tab 级动作入口）。
-///
-/// 与 [`with_active_editor`] 同款处理：动作分发期间活动窗口被 take，同步
-/// `update` 必失败，故统一经 `spawn` 延后；standalone Editor 窗口（测试等）
-/// 没有 host，直接忽略。
-fn with_active_host(
-    cx: &mut App,
-    update: impl FnOnce(&mut DocumentHost, &mut Window, &mut Context<DocumentHost>) + 'static,
-) {
-    let Some(window) = cx.active_window() else {
-        return;
-    };
-    let Some(host_window) = window.downcast::<DocumentHost>() else {
+    let Some(window) = window.downcast::<Editor>() else {
         return;
     };
     cx.spawn(async move |cx| {
-        let _ = host_window.update(cx, |host, window, cx| update(host, window, cx));
+        let _ = window.update(cx, |editor, window, cx| update(editor, window, cx));
     })
     .detach();
 }
@@ -605,6 +529,31 @@ fn recent_files_for_menu() -> Vec<PathBuf> {
             Vec::new()
         }
     }
+}
+
+/// 最近文件菜单项的最大标签字符数（按 Unicode 标量计）；超长路径的中间部分用省略号代替。
+const RECENT_MENU_LABEL_MAX_CHARS: usize = 48;
+
+/// 缩短最近文件菜单标签：优先保留文件名与末尾目录，前面加省略号。
+///
+/// 完整路径仍保存在 `OpenRecentFile` 动作里（打开文件不受影响），这里只压缩
+/// 显示文本，避免长路径撑满菜单。短路径原样返回。
+fn shorten_recent_menu_label(path: &Path) -> String {
+    let full = path.to_string_lossy();
+    if full.chars().count() <= RECENT_MENU_LABEL_MAX_CHARS {
+        return full.into_owned();
+    }
+    // 从尾部按字符截取，尽量保住文件名与直接父目录。
+    let keep = RECENT_MENU_LABEL_MAX_CHARS.saturating_sub(1);
+    let tail: String = full
+        .chars()
+        .rev()
+        .take(keep)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("…{tail}")
 }
 
 /// 打开最近文件（错误提示定位到当前活动窗口）。
@@ -672,21 +621,15 @@ fn current_window_candidates(cx: &mut App) -> Vec<AnyWindowHandle> {
 /// 泛化到任意 `AppContext`，以便既能在同步路径调用，也能在 `spawn` 出
 /// 的异步任务（`AsyncApp`）中调用。
 fn request_close_editor_window(window: AnyWindowHandle, cx: &mut impl AppContext) -> bool {
-    if let Some(window) = window.downcast::<Editor>() {
-        return window
-            .update(cx, |editor, window, cx| {
-                editor.request_close_current_window(window, cx);
-            })
-            .is_ok();
-    }
-    if let Some(window) = window.downcast::<DocumentHost>() {
-        return window
-            .update(cx, |host, window, cx| {
-                host.request_window_close(WindowCloseFlow::CloseWindow, window, cx);
-            })
-            .is_ok();
-    }
-    false
+    let Some(window) = window.downcast::<Editor>() else {
+        return false;
+    };
+
+    window
+        .update(cx, |editor, window, cx| {
+            editor.request_close_current_window(window, cx);
+        })
+        .is_ok()
 }
 
 /// 请求关闭当前编辑器窗口。
@@ -712,92 +655,34 @@ fn request_close_current_editor_window(cx: &mut App) {
 }
 
 /// 逐窗确认后请求退出应用。
-///
-/// 退出是「逐窗关闭」：把所有编辑器窗口放进队列，每次只请求关闭一个；
-/// 该窗口的未保存确认由自身负责，确认后 `window.remove_window()` 触发
-/// `handle_window_closed` 推进下一个；全部窗口归零时统一 `cx.quit()`。
-/// 这样混合场景（host 窗口 + standalone 编辑器窗口）里每个窗口的未保存内容
-/// 都会得到提示，不再因首个 host 命中就直接退出而漏掉其他窗口。
 pub(crate) fn request_quit_application(cx: &mut App) {
-    ensure_menu_state(cx);
     let candidates = current_window_candidates(cx);
     if candidates.is_empty() {
         cx.quit();
         return;
     }
 
-    // 只保留编辑器窗口（host 或 standalone Editor）；偏好设置等非编辑器窗口
-    // 不参与未保存确认队列，最后随应用退出一并消失。
-    let editor_windows = candidates
-        .into_iter()
-        .filter(|window| {
-            window.downcast::<DocumentHost>().is_some() || window.downcast::<Editor>().is_some()
-        })
-        .collect::<Vec<_>>();
-    {
-        let state = cx.global_mut::<MenuState>();
-        state.quitting = true;
-        state.quit_remaining = editor_windows;
-    }
-
-    // 见 `request_close_current_editor_window`：动作分发期间同步 `update` 活动
-    // 窗口必失败，必须延后到下一次循环。
+    // 见 `request_close_current_editor_window`：必须延后执行，否则同步 `update`
+    // 必失败，导致单窗口下退出/关闭菜单静默失效。
     cx.spawn(async move |cx| {
-        cx.update(advance_quit_window);
+        for window in candidates {
+            let Some(window) = window.downcast::<Editor>() else {
+                continue;
+            };
+
+            let should_close = window
+                .update(cx, |editor, window, cx| {
+                    editor.on_window_should_close(window, cx)
+                })
+                .unwrap_or(false);
+            if !should_close {
+                return;
+            }
+        }
+
+        cx.update(|cx| cx.quit());
     })
     .detach();
-}
-
-/// 推进退出流程：找到第一个「有未保存修改」的窗口并对它弹确认框，其余窗口保持原样；
-/// 所有窗口都干净时统一退出。脏窗口确认关闭后会触发 `handle_window_closed`，
-/// 再次进入本函数检查剩余窗口——如此逐窗提示，直到全部干净才退出。
-fn advance_quit_window(cx: &mut App) {
-    ensure_menu_state(cx);
-    let candidates = cx.global::<MenuState>().quit_remaining.clone();
-    for window in candidates {
-        // 先判断该窗口是否有未保存内容（窗口已关闭则 update 失败，自动跳过）。
-        let dirty = if let Some(host_window) = window.downcast::<DocumentHost>() {
-            host_window
-                .update(cx, |host, _, cx| host.any_dirty(cx))
-                .unwrap_or(false)
-        } else if let Some(editor_window) = window.downcast::<Editor>() {
-            editor_window
-                .update(cx, |editor, _, _| editor.is_document_dirty())
-                .unwrap_or(false)
-        } else {
-            false
-        };
-        if !dirty {
-            continue;
-        }
-        // 只对这个脏窗口弹确认框，不关闭其他任何窗口（遇脏即停，兼容既有语义）。
-        if let Some(host_window) = window.downcast::<DocumentHost>() {
-            // host 内部逐 tab 确认；确认完成后由 handle_window_closed 推进下一轮。
-            let _ = host_window.update(cx, |host, window, cx| {
-                host.request_window_close(WindowCloseFlow::Quit, window, cx);
-            });
-        } else if let Some(editor_window) = window.downcast::<Editor>() {
-            let _ = editor_window.update(cx, |editor, window, cx| {
-                editor.on_window_should_close(window, cx);
-            });
-        }
-        return;
-    }
-
-    // 走到这里说明所有编辑器窗口都干净：清掉退出态并退出（quit 会关闭全部窗口）。
-    cx.global_mut::<MenuState>().quitting = false;
-    cx.global_mut::<MenuState>().quit_remaining.clear();
-    cx.quit();
-}
-
-/// 用户取消退出中的某窗口确认：清空退出队列，中止整个退出流程。
-pub(crate) fn cancel_quit_flow(cx: &mut App) {
-    ensure_menu_state(cx);
-    let state = cx.global_mut::<MenuState>();
-    if state.quitting {
-        state.quitting = false;
-        state.quit_remaining.clear();
-    }
 }
 
 /// 按当前应用状态执行应用菜单动作。
@@ -891,16 +776,6 @@ pub(crate) fn dispatch_menu_action(action: &dyn Action, cx: &mut App) {
         request_quit_application(cx);
     } else if action.as_any().is::<CloseWindow>() {
         request_close_current_editor_window(cx);
-    } else if action.as_any().is::<NewTab>() {
-        with_active_host(cx, |host, _window, cx| host.open_new_tab(cx));
-    } else if action.as_any().is::<CloseTab>() {
-        with_active_host(cx, |host, window, cx| {
-            host.request_close_active_tab(window, cx)
-        });
-    } else if action.as_any().is::<NextTab>() {
-        with_active_host(cx, |host, _window, cx| host.select_next_tab(cx));
-    } else if action.as_any().is::<PreviousTab>() {
-        with_active_host(cx, |host, _window, cx| host.select_previous_tab(cx));
     }
 }
 
@@ -967,10 +842,10 @@ fn build_menus(
         let mut items = recent_files
             .iter()
             .map(|path| {
-                // `into_owned` 在常见的有效 UTF-8 路径下复用 `Cow::Owned` 不再拷贝，
-                // 仅在兜底转码时分配；此前的写法每次都会分配。
-                let label = path.to_string_lossy().into_owned();
-                MenuItem::action(label.clone(), OpenRecentFile { path: label })
+                // 显示标签做省略以限制长度；动作里仍传完整路径，保证能打开。
+                let label = shorten_recent_menu_label(path);
+                let full_path = path.to_string_lossy().into_owned();
+                MenuItem::action(label, OpenRecentFile { path: full_path })
             })
             .collect::<Vec<_>>();
         items.push(MenuItem::separator());
@@ -1003,8 +878,6 @@ fn build_menus(
                 name: i18n_manager.t("menu_file", &[]).into(),
                 items: vec![
                     MenuItem::action(i18n_manager.t("menu_file_new_window", &[]), NewWindow),
-                    MenuItem::action(i18n_manager.t("menu_file_new_tab", &[]), NewTab),
-                    MenuItem::action(i18n_manager.t("menu_file_close_tab", &[]), CloseTab),
                     MenuItem::action(i18n_manager.t("menu_file_close_window", &[]), CloseWindow),
                     MenuItem::action(i18n_manager.t("menu_file_open", &[]), OpenFile),
                     MenuItem::submenu(Menu {
@@ -1046,8 +919,6 @@ fn build_menus(
             name: i18n_manager.t("menu_file", &[]).into(),
             items: vec![
                 MenuItem::action(i18n_manager.t("menu_file_new_window", &[]), NewWindow),
-                MenuItem::action(i18n_manager.t("menu_file_new_tab", &[]), NewTab),
-                MenuItem::action(i18n_manager.t("menu_file_close_tab", &[]), CloseTab),
                 MenuItem::action(i18n_manager.t("menu_file_close_window", &[]), CloseWindow),
                 MenuItem::action(i18n_manager.t("menu_file_open", &[]), OpenFile),
                 MenuItem::submenu(Menu {
@@ -1086,7 +957,7 @@ fn build_menus(
 
     #[cfg(target_os = "macos")]
     let help_items = {
-        // 顺序与下方 mac 测试一致：检查更新 / 分隔符 / 安装或卸载 CLI / 分隔符 / 关于。
+        // 顺序：检查更新 / 分隔符 / 安装或卸载 CLI / 分隔符 / 关于。
         let mut items = vec![MenuItem::action(
             i18n_manager.t("menu_help_check_updates", &[]),
             CheckForUpdates,
@@ -1306,17 +1177,8 @@ fn prompt_and_import_theme_config_with_error_window(
     .detach();
 }
 
-/// 窗口关闭后的调度：退出流程中重新检查剩余窗口的未保存内容，普通关窗归零时退出应用。
+/// 窗口全部关闭后退出应用。
 fn handle_window_closed(cx: &mut App, _: WindowId) {
-    ensure_menu_state(cx);
-    if cx.global::<MenuState>().quitting {
-        // 延后重新检查，避免在窗口关闭回调里同步 update 其他窗口。
-        cx.spawn(async move |cx| {
-            cx.update(advance_quit_window);
-        })
-        .detach();
-        return;
-    }
     if cx.windows().is_empty() {
         cx.quit();
     }
@@ -1394,18 +1256,6 @@ pub(crate) fn init(cx: &mut App) {
     cx.on_action(|_: &CloseWindow, cx| {
         dispatch_menu_action(&CloseWindow, cx);
     });
-    cx.on_action(|_: &NewTab, cx| {
-        dispatch_menu_action(&NewTab, cx);
-    });
-    cx.on_action(|_: &CloseTab, cx| {
-        dispatch_menu_action(&CloseTab, cx);
-    });
-    cx.on_action(|_: &NextTab, cx| {
-        dispatch_menu_action(&NextTab, cx);
-    });
-    cx.on_action(|_: &PreviousTab, cx| {
-        dispatch_menu_action(&PreviousTab, cx);
-    });
 
     install_menus(cx);
     cx.activate(true);
@@ -1413,7 +1263,7 @@ pub(crate) fn init(cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{applescript_string_literal, build_menus};
+    use super::{applescript_string_literal, build_menus, shorten_recent_menu_label};
     use crate::components::{
         AddLanguageConfig, AddThemeConfig, CheckForUpdates, ClearRecentFiles, NoRecentFiles,
         OpenRecentFile, SelectLanguage, SelectTheme, ShowAbout,
@@ -1423,6 +1273,22 @@ mod tests {
     use rgpui::MenuItem;
     use rgpui::{Bounds, WindowBackgroundAppearance, WindowDecorations, point, px, size};
     use std::path::PathBuf;
+
+    /// 最近文件菜单标签：短路径原样，超长路径省略中间、保留文件名末尾。
+    #[test]
+    fn recent_menu_label_shrinks_only_long_paths() {
+        let short = PathBuf::from(r"C:\docs\one.md");
+        assert_eq!(shorten_recent_menu_label(&short), r"C:\docs\one.md");
+
+        let long = PathBuf::from(format!(
+            "{}/ very-long-directory-segment /another/deep/nested/folder/my-article.md",
+            "C:".to_owned() + &"\\长目录名".repeat(8)
+        ));
+        let label = shorten_recent_menu_label(&long);
+        assert!(label.chars().count() <= super::RECENT_MENU_LABEL_MAX_CHARS);
+        assert!(label.starts_with('…'), "超长路径应以省略号开头: {label}");
+        assert!(label.ends_with("my-article.md"), "应保留文件名: {label}");
+    }
 
     /// 命令行工具提示文案随语言切换，且占位符都要填上。
     #[test]
@@ -1553,41 +1419,29 @@ mod tests {
         #[cfg(not(target_os = "macos"))]
         assert_eq!(action_name(&menus[0].items[0]), "New Window");
 
-        // 新建/关闭标签页紧随新建窗口之后。
-        #[cfg(target_os = "macos")]
-        {
-            assert_eq!(action_name(&menus[1].items[1]), "New Tab");
-            assert_eq!(action_name(&menus[1].items[2]), "Close Tab");
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            assert_eq!(action_name(&menus[0].items[1]), "New Tab");
-            assert_eq!(action_name(&menus[0].items[2]), "Close Tab");
-        }
-
         // 最近文件子菜单位置因平台而异。
         #[cfg(target_os = "macos")]
         assert_eq!(
-            submenu(&menus[1].items[5]).name.to_string(),
+            submenu(&menus[1].items[3]).name.to_string(),
             "Open Recent File"
         );
         #[cfg(not(target_os = "macos"))]
         assert_eq!(
-            submenu(&menus[0].items[5]).name.to_string(),
+            submenu(&menus[0].items[3]).name.to_string(),
             "Open Recent File"
         );
 
         // 关闭窗口与新建窗口同在文件菜单中。
         #[cfg(target_os = "macos")]
-        assert_eq!(action_name(&menus[1].items[3]), "Close Window");
+        assert_eq!(action_name(&menus[1].items[1]), "Close Window");
         #[cfg(not(target_os = "macos"))]
-        assert_eq!(action_name(&menus[0].items[3]), "Close Window");
+        assert_eq!(action_name(&menus[0].items[1]), "Close Window");
 
         // 偏好设置位置因平台而异。
         #[cfg(target_os = "macos")]
         assert_eq!(action_name(&menus[0].items[0]), "Preferences");
         #[cfg(not(target_os = "macos"))]
-        assert_eq!(action_name(&menus[0].items[6]), "Preferences");
+        assert_eq!(action_name(&menus[0].items[4]), "Preferences");
 
         assert_eq!(
             action_name(&menus[LANGUAGE_MENU_INDEX].items[0]),
@@ -1611,12 +1465,12 @@ mod tests {
 
         #[cfg(target_os = "macos")]
         assert_eq!(
-            submenu(&menus[1].items[5]).name.to_string(),
+            submenu(&menus[1].items[3]).name.to_string(),
             i18n_manager.t("menu_file_recent", &[])
         );
         #[cfg(not(target_os = "macos"))]
         assert_eq!(
-            submenu(&menus[0].items[5]).name.to_string(),
+            submenu(&menus[0].items[3]).name.to_string(),
             i18n_manager.t("menu_file_recent", &[])
         );
 
@@ -1673,11 +1527,11 @@ mod tests {
             &[],
         );
 
-        // macOS 下文件菜单序号为 1，其他平台为 0；新建/关闭标签页插入两项后，打开最近文件为第 5 项。
+        // macOS 下文件菜单序号为 1，其中打开最近文件为第 3 项；其他平台文件菜单序号为 0，同样第 3 项。
         #[cfg(target_os = "macos")]
-        let recent_menu = submenu(&menus[1].items[5]);
+        let recent_menu = submenu(&menus[1].items[3]);
         #[cfg(not(target_os = "macos"))]
-        let recent_menu = submenu(&menus[0].items[5]);
+        let recent_menu = submenu(&menus[0].items[3]);
 
         assert_eq!(recent_menu.name.to_string(), "Open Recent File");
         assert_eq!(recent_menu.items.len(), 1);
@@ -1705,9 +1559,9 @@ mod tests {
         );
 
         #[cfg(target_os = "macos")]
-        let recent_menu = submenu(&menus[1].items[5]);
+        let recent_menu = submenu(&menus[1].items[3]);
         #[cfg(not(target_os = "macos"))]
-        let recent_menu = submenu(&menus[0].items[5]);
+        let recent_menu = submenu(&menus[0].items[3]);
 
         assert_eq!(recent_menu.items.len(), 4);
         assert_eq!(action_name(&recent_menu.items[0]), r"C:\docs\one.md");
@@ -1729,6 +1583,39 @@ mod tests {
                 assert!(action.as_any().is::<ClearRecentFiles>());
             }
             _ => panic!("expected clear-recent-files action item"),
+        }
+    }
+
+    /// 超长路径的菜单标签被缩短，但动作里仍保留完整路径用于打开。
+    #[test]
+    fn long_recent_path_keeps_full_path_in_action() {
+        let i18n_manager = I18nManager::default();
+        let full = format!(r"C:\{}\my-article.md", "长目录名".repeat(12));
+        let recent_files = vec![PathBuf::from(&full)];
+        let menus = build_menus(
+            "rumark",
+            &crate::theme::bundled_theme_catalog(),
+            &i18n_manager,
+            &recent_files,
+        );
+
+        #[cfg(target_os = "macos")]
+        let recent_menu = submenu(&menus[1].items[3]);
+        #[cfg(not(target_os = "macos"))]
+        let recent_menu = submenu(&menus[0].items[3]);
+
+        let label = action_name(&recent_menu.items[0]);
+        assert!(label.chars().count() <= super::RECENT_MENU_LABEL_MAX_CHARS);
+        assert!(label.starts_with('…'), "标签应被缩短: {label}");
+        match &recent_menu.items[0] {
+            MenuItem::Action { action, .. } => {
+                let action = action
+                    .as_any()
+                    .downcast_ref::<OpenRecentFile>()
+                    .expect("recent file should dispatch OpenRecentFile");
+                assert_eq!(action.path, full, "动作必须保留完整路径");
+            }
+            _ => panic!("expected recent-file action item"),
         }
     }
 

@@ -5559,9 +5559,9 @@ dependencies = [
 
 [[package]]
 name = "rgpui"
-version = "1.8.1"
+version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd68b2e9f5820e75730f53c1f91208ac75a29eb99ea0b7f222b660a3c882e2b2"
+checksum = "68b7ae4ac24372b81cab48bed2922b4dcd81aa60ec399b8fdad9a4117cd033d1"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -5679,15 +5679,31 @@ dependencies = [
 
 [[package]]
 name = "rgpui-dom"
-version = "1.8.1"
+version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ccaf41805841b53c57198af5149aab8d2f05ec72057a1e54d6146f94bf0bbfa6"
+checksum = "34ebebee24ddd138fcd65a43a8d7751e145334d401194bbf28cc5b4de6c56217"
 dependencies = [
  "js-sys",
  "rgpui",
  "rustc-hash 2.1.3",
  "wasm-bindgen",
  "web-sys",
+]
+
+[[package]]
+name = "rgpui-extra"
+version = "0.1.0"
+source = "git+https://github.com/launcher-rs/rgpui-extra.git#c0a57ee7cefa655c00fbb5565414a7843d463902"
+dependencies = [
+ "anyhow",
+ "flate2",
+ "futures",
+ "reqwest",
+ "rgpui",
+ "serde",
+ "serde_json",
+ "tar",
+ "zip 2.6.1",
 ]
 
 [[package]]
@@ -5717,9 +5733,9 @@ dependencies = [
 
 [[package]]
 name = "rgpui-linux"
-version = "1.8.1"
+version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5141ceaa0dbe7fc81837a4b4ef514dafe23767781569dae82971171f5b105466"
+checksum = "902f2c90875ce5f5518e2ceeb6203d4954c0a45735d826b0f4ea12e6208fb283"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -5766,9 +5782,9 @@ dependencies = [
 
 [[package]]
 name = "rgpui-macos"
-version = "1.8.1"
+version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b106d0b9dba9d2d823da639d4534eaa1766056c3907c1ada2c710ddce60b6811"
+checksum = "6124abff2d80db58eb7137ae60ed1c8b2a46c3bb495e751c649e8a5beaff5ab0"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -5812,9 +5828,9 @@ dependencies = [
 
 [[package]]
 name = "rgpui-macros"
-version = "1.8.1"
+version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b80c0988743c1c009b86b0c4910ac5d03005ac8d06d6f23f896be52c4b89660f"
+checksum = "665549262d185ea7752c12130e99ce3291031d9710b45f0c79638de7b271d542"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
@@ -5824,9 +5840,9 @@ dependencies = [
 
 [[package]]
 name = "rgpui-platform"
-version = "1.8.1"
+version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f160cf19ec1ca98ca994651101156b7cfec38a7dbd5a0d2eb8fa5501af6b76c"
+checksum = "7ecf2b2c94eb4c16ff440e692b1f777eb0dd83d0ef15c43cc9c61620d5bd3462"
 dependencies = [
  "console_error_panic_hook",
  "rgpui",
@@ -5838,9 +5854,9 @@ dependencies = [
 
 [[package]]
 name = "rgpui-web"
-version = "1.8.1"
+version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ef85abd002304ae52c327fcc3059fca06a0384e231a51199658ad6382098947"
+checksum = "8cf5d1849bf373d491889a2af40757255c4e4384d392740a2844549f05afd8c7"
 dependencies = [
  "anyhow",
  "futures",
@@ -5861,9 +5877,9 @@ dependencies = [
 
 [[package]]
 name = "rgpui-wgpu"
-version = "1.8.1"
+version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f7147941a0d40610dcc46812d400759a733ba3b93e96cd3e08bfdfa2fe42933"
+checksum = "3d117ba1789474c525624e4d94c8428d0d5d400726e82d5a18318f6150c4ab2b"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -5893,9 +5909,9 @@ dependencies = [
 
 [[package]]
 name = "rgpui-windows"
-version = "1.8.1"
+version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b62abcc2ce9cfdfc70a80429e9e238371a2fbe36b7b9038d5a3ac522f27246f4"
+checksum = "93336b7517172cf6aeacb6b34f89ef2de134184829c61cf6ce9a82983249634d"
 dependencies = [
  "accesskit",
  "accesskit_windows",
@@ -5974,7 +5990,7 @@ dependencies = [
 
 [[package]]
 name = "rumark"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "adot-tree-sitter-toml",
  "anyhow",
@@ -5994,6 +6010,7 @@ dependencies = [
  "reqwest",
  "resvg 0.48.1",
  "rgpui",
+ "rgpui-extra",
  "rgpui-platform",
  "schemars",
  "serde",
@@ -6936,6 +6953,17 @@ dependencies = [
  "core-foundation-sys",
  "libc",
  "objc",
+]
+
+[[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+ "xattr",
 ]
 
 [[package]]

@@ -3,7 +3,9 @@
 //! 框架 `StatusBar` 为纯值驱动（每帧直接收条目，无实体同步），
 //! 本模块只负责按偏好组装条目。字数统计（含单测）保留在此。
 
-use rgpui::components::{StatusBar, StatusBarItem};
+use std::path::Path;
+
+use rgpui::components::{AnimatedProgress, AnimatedProgressSize, StatusBar, StatusBarItem};
 use rgpui::*;
 
 use super::Editor;
@@ -21,12 +23,30 @@ impl Editor {
         crate::config::preferences::EditorSettings::status_bar_preferences(cx)
     }
 
+    /// 当前文档的文件名（无路径时返回 `None`，状态栏不显示该条目）。
+    pub(super) fn current_file_name(file_path: Option<&Path>) -> Option<String> {
+        let name = file_path?.file_name()?.to_string_lossy().into_owned();
+        (!name.is_empty()).then_some(name)
+    }
+
+    /// 当前文件所在文件夹的展示信息：末级文件夹名 + 完整父路径（悬停提示）。
+    ///
+    /// 无文件路径、无父目录或位于根目录时返回 `None`，状态栏不显示该条目。
+    pub(super) fn current_folder_info(file_path: Option<&Path>) -> Option<(String, String)> {
+        let parent = file_path?.parent()?;
+        let name = parent.file_name()?.to_string_lossy().into_owned();
+        if name.is_empty() {
+            return None;
+        }
+        Some((name, parent.to_string_lossy().into_owned()))
+    }
+
     /// 按偏好与实时状态组装框架状态栏（纯值驱动，每帧直接构造）。
     pub(super) fn status_bar_element(
         &self,
         i18n: &I18nSnapshot,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
         let prefs = self.status_bar_preferences(cx);
         let editor = cx.entity().downgrade();
 
@@ -61,6 +81,29 @@ impl Editor {
             ));
         }
 
+        // 当前文档文件名 + 所在文件夹：文件名常驻显示，文件夹悬停查看完整路径。
+        if let Some(file_name) = Self::current_file_name(self.file_path.as_deref()) {
+            let tooltip = self
+                .file_path
+                .as_deref()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            left_items.push(
+                StatusBarItem::new(file_name)
+                    .id("current-file")
+                    .tooltip(tooltip),
+            );
+        }
+        if let Some((folder_name, full_path)) = Self::current_folder_info(self.file_path.as_deref())
+        {
+            left_items.push(
+                StatusBarItem::new(folder_name)
+                    .id("current-folder")
+                    .tooltip(full_path)
+                    .muted(true),
+            );
+        }
+
         let mut right_items = Vec::new();
         if prefs.show_cursor_position || prefs.show_word_count {
             let stats = self.status_stats(cx);
@@ -82,11 +125,32 @@ impl Editor {
             }
         }
 
+        // 更新检查 / 下载进度：文本进度 + 状态栏上方的细进度条。
+        if let Some(label) = self.update_status.label(
+            &i18n.t("update_checking", &[]),
+            &i18n.t("update_downloading", &[]),
+            &i18n.t("update_download_complete", &[]),
+        ) {
+            right_items.push(StatusBarItem::new(label).id("update-progress").muted(true));
+        }
+
         for button in &prefs.custom_buttons {
             right_items.push(StatusBarItem::new(button.label.clone()).id(button.id.clone()));
         }
 
-        StatusBar::new().left(left_items).right(right_items)
+        let mut wrapper = div().w_full().flex().flex_col();
+        if let Some(fraction) = self.update_status.fraction() {
+            wrapper = wrapper.child(
+                div().w_full().h(px(3.0)).child(
+                    AnimatedProgress::new("update-progress-bar")
+                        .value(fraction)
+                        .size(AnimatedProgressSize::Sm),
+                ),
+            );
+        }
+        wrapper
+            .child(StatusBar::new().left(left_items).right(right_items))
+            .into_any_element()
     }
 
     /// 取状态栏统计：字数只在内容指纹变化时重算，行列只在指纹或光标偏移
@@ -309,6 +373,33 @@ mod tests {
             rgpui::theme::init(cx);
             crate::components::init(cx);
         });
+    }
+
+    #[test]
+    fn current_file_name_shows_file_name() {
+        assert_eq!(
+            Editor::current_file_name(Some(std::path::Path::new("/work/notes/hello.md"))),
+            Some("hello.md".to_string())
+        );
+        assert_eq!(
+            Editor::current_file_name(Some(std::path::Path::new("hello.md"))),
+            Some("hello.md".to_string())
+        );
+        assert_eq!(Editor::current_file_name(None), None);
+    }
+
+    #[test]
+    fn current_folder_info_shows_parent_name_and_full_path() {
+        assert_eq!(
+            Editor::current_folder_info(Some(std::path::Path::new("/work/notes/hello.md"))),
+            Some(("notes".to_string(), "/work/notes".to_string()))
+        );
+        // 无路径、无父目录时不显示文件夹条目。
+        assert_eq!(Editor::current_folder_info(None), None);
+        assert_eq!(
+            Editor::current_folder_info(Some(std::path::Path::new("hello.md"))),
+            None
+        );
     }
 
     #[test]

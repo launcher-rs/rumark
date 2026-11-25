@@ -5,6 +5,10 @@
 
 ## 1. 工作区状态与改动分组
 
+2026-11-25 **0.2.5 发布收口**：版本号从测试用 0.2.3 定为 **0.2.5**，`Cargo.toml` / `Cargo.lock` 同步，打 `v0.2.5` tag 触发 release 工作流。下方 2026-11-24 条目里「临时降到 0.2.3 待恢复」的状态**已解除**。本版包含：更新组件改为 git 源依赖并支持 GitHub/Gitee/GitLab/自定义发布源、下载后自动替换重启、暂存复用避免重复下载、进度泵与完成态修复、更新说明 Markdown 渲染与滚动、大文档加载动画、移除多文档 tab；rgpui-extra 对应提交已推 github main（`c0a57ee`）。
+
+2026-11-24 **更新功能优化与组件抽离（未提交）**：① 组件抽到独立仓 [launcher-rs/rgpui-extra](https://github.com/launcher-rs/rgpui-extra)（单 crate 多 feature：`updater` 与 `ui` 均为显式 feature（默认都不开启，`ui` 含 `updater`）；rumark 以 crates.io 版本依赖（0.1.0 已发布占位），规则见该仓 GOVERNANCE.md）：核心层不依赖 GUI，提供 `Config`（仓库/应用名/资产名/镜像偏好全部注入）、`Version`/`parse_version`/`is_newer`、`UpdateCheck`、`fetch_latest_release`/`check`、`download_and_stage`（`copy_to` 分块 + 进度回调，zip 与 tar.gz 均支持解压）、`open_release_page`、`run_blocking`；可选 `ui` feature 提供 `render_update_dialog`（说明区限高 + `overflow_y_scrollbar`）、`UpdateChoice`、`UpdateStatus`/`UpdatePhase`。rumark 的 `src/update.rs` 退化为配置薄层。② 偏好新增 `use_mirrors`，默认 false：关闭时仅直连，开启时自定义 → 内置 → 直连；更新页加开关 + 「填入推荐镜像」按钮。③ 更新说明对话框不再用平台 `window.prompt` 长文本，改为框架的 `Dialog` 覆盖层，说明区 `max_h(220px)` 可滚动。④ 下载进度：`mpsc` 从后台线程投递 `DownloadProgress`，Editor 的 `update_status` 驱动状态栏文本（百分比/字节数）与 `AnimatedProgress` 细进度条。⑤ 修复 tar.gz 解包此前的 `bail!` 缺口。新增测试：组件 8 个（版本/镜像开关/URL/进度/JSON）、偏好镜像往返、编辑器更新覆盖层绘制冒烟。验证见第 5 节。**版本号仍临时为 0.2.3，待测试完恢复 0.2.4。**
+
 2026-11-21 **检查更新功能（未提交）**：新增 `src/update.rs`（纯逻辑：语义版本比较、平台资产名、镜像 URL 拼接、Release JSON 解析、reqwest blocking 下载与 zip 解压；内置镜像 ghfast.top/ghproxy.net + 直连兜底，实测 moeyy 已失效）+ `src/editor/update.rs`（UI 驱动：`cx.spawn` + `run_blocking` 独立线程跑网络、`window.prompt` 弹结果/下载/错误，忙态防重入）。Help 菜单加「检查更新」（`CheckForUpdates` 动作）、偏好设置加「更新」页（自定义镜像多行输入 + 检查按钮），偏好文件新增 `update.custom_mirrors`。**手动触发、不自动检查**。zip 从 dev-dep 提为正式依赖。验证：1046 passed（原 1041 + 5 个 update 单测）、clippy --all-targets 0 警告。设计见 `docs/auto-update.md`。遗留：Linux/macOS 的 tar.gz 解包未实现（提示手动下载）；跨进程自动替换 exe 脚本未做（当前落地 `.new` + 手动替换说明）。
 
 2026-11-21 ~ 11-22 **rgpui 1.8 兼容性测试与正式版切换（未提交）**：发版前先把 `Cargo.toml` 的 `rgpui`、`rgpui-platform`（含 dev-dependencies）从 crates.io `1.7` 临时切到 git `https://github.com/launcher-rs/rgpui` 的 `feat/1.8.0` 分支做兼容性测试（锁定 `#924299da`）——`cargo test --bin rumark` **1041 passed / 0 failed / 9 ignored**，无需任何 rumark 侧 API 适配，确认 1.8 向后兼容。1.8 正式发布后（2026-11-22）已切回 crates.io：`rgpui` / `rgpui-platform` 均为 `version = "1.8.1"`（1.8.0 发布后用户指定再升到 1.8.1；主依赖保留 `inspector`，dev-dependencies 保留 `test-support` 且 1.8 起必须在 platform 上显式转发），`Cargo.lock` 锁定 registry 源 `rgpui v1.8.1`，**无任何 git 依赖残留**。1.8.0 切换验证：`cargo test --bin rumark` **1053 passed / 0 failed / 9 ignored**、clippy `--all-targets -D warnings` 0 警告、fmt `--check`、`--no-default-features` 全绿（crates.io 版与 git 测试分支 API 完全一致，无需适配）。1.8.1 用 `cargo update -p rgpui --precise 1.8.1` 升级：rgpui 全家桶（含 platform/macros/wgpu/web/linux/windows/dom）同步到 1.8.1，依赖树调整较大（字体栈换 zed-font-kit→rust-fontconfig/skrifa，新增 x11rb/zbus/rgpui-xim，移除 sha2/shlex/tiny-skia-path 等）。升级后全套验证同样全绿：`cargo check --bin rumark --tests`、`cargo test --bin rumark` **1053 passed / 0 failed / 9 ignored**、clippy `--all-targets -D warnings` 0 警告、fmt `--check`、`--no-default-features`，无需 rumark 侧 API 适配。注意：1.8 引入 `aws-lc-sys`（TLS 链）导致首次全量编译很慢；Windows 上 `cargo update` 写 lock 偶发 os error 5（被并发 `cargo check` 占用），重试即可。
@@ -50,6 +54,20 @@
 
 后续改动按主题归组提交（多主题文件按「主主题」归组；要严格按主题落提交就用 `git add -p` 分块暂存）。提交信息风格 `type: 中文描述`（`fix:` / `perf:` / `test:` / `chore:` / `docs:`）。
 
+2026-11-24 **rgpui 升级 1.8.2（未提交）**：`Cargo.toml` 三处版本号 1.8.1→1.8.2，`cargo update -p rgpui --precise` + `-p rgpui-platform --precise` 更新 lock（全家桶 dom/wgpu/web/macos/linux/windows/macros 同步，其余依赖未动）。验证：fmt/clippy --all-targets 0 警告、test 1053 passed、--no-default-features 全绿。注意本机镜像为 `rsproxy-sparse`，`cargo search` 需 `--registry crates-io` 但 `cargo update` 正常。
+
+2026-11-24 **rgpui 升级 1.8.3（未提交）**：`Cargo.toml` 三处版本号 1.8.2→1.8.3（两处依赖 + dev-dependencies 的 test-support），`cargo update -p rgpui --precise 1.8.3` + `-p rgpui-platform --precise 1.8.3` 更新 lock（全家桶 dom/wgpu/web/macos/linux/windows/macros 同步 1.8.3，其余依赖未动，无 1.8.2 残留）。验证见第 5 节命令。
+
+2026-11-24 **多文档 tab 功能已彻底移除（未提交）**：用户与 Typora 对比后判断多 tab 设计不佳（真实点击体验差、后续还要考虑分屏），决定回归一窗一文档，且不留分支存档（改动都在 main 历史 dde1398 里，随时可取）。dde1398 是混合提交（多 tab + 检查更新 + 十几个独立 bug 修复 + rgpui 1.8 升级），本次以 13c2bcc 为参考基线精确剥离 tab，保留其余全部内容。删除 `src/editor/document_host.rs`、`docs/multi-document-tabs.md`；Editor 移除 `owner_host`/`multi_tab_enabled`/`top_strip`/`CloseScope` 等字段与 `set_top_strip`，关闭/保存/拖放/开窗流程恢复单文档语义；移除 tab 快捷键、菜单项、偏好开关、i18n 文案与全部 tab 测试；`with_active_editor` 恢复「窗口根就是 Editor」单一路径。检查更新（含偏好页与镜像设置）、rgpui 1.8.2 升级、最近文件限制（RECENT_LIMIT=10）与所有独立 bug 修复均保留。验证：全量 1035 passed / 0 failed（较删除前 1059 少 24 个 tab 测试）、clippy 0 警告、fmt/CRLF、`--no-default-features` 全绿。
+
+2026-11-24 **拖放落点策略 + 当前文件夹名显示（未提交）**：① 用户不采用「有内容但未修改就替换」，理由：脏标记对用户不可见、会静默丢失阅读上下文，且与菜单「打开文件」行为不一致。最终策略：拖入 Markdown 时 `is_blank_document` 为真则就地载入（走原有 `request_dropped_markdown_replace`），否则 `open_dropped_markdown_in_new_window` 经 spawn 调 `app_menu::open_file_in_new_window` 新开窗口；拖入的正是当前已打开的文件则只 `activate_window`，不重复开窗。工作区文件树 `open_workspace_file` 仍走就地替换，不受影响。② `window_title` 改为 `Rumark - 文件名 (末级文件夹名)`（无父目录时不加括号），同名文档跨目录可区分；`status_bar.rs` 新增 `current_folder_info`，状态栏左侧常驻末级文件夹名条目（id `current-folder`），悬停显示完整父路径。③ 新增 4 个回归测试（空窗口就地载入 / 非空开窗 / 同文件不重开 / 状态栏文件夹信息），并改写标题测试为「文件名 + 末级目录 + 脏标记」三段式。全量 1039 passed / 0 failed（原 1035）。验证见本文件第 5 节命令。
+
+2026-11-24 **大文件加载动画（未提交）**：用户觉得「正在加载大型文档…」一行静态文本太简陋，且想借机验证 rgpui 动画支持。`render.rs` 新增 `loading_pulse_opacity`（0.6~1.0 呼吸曲线）+ `Editor::render_document_loading_view`：`Spinner`（`ElementSize::Large` + accent 色，内置无限旋转动画）+ 文案经 `with_animation`（1200ms repeat + `ease_in_out`）做透明度呼吸；复用现有 i18n key `message_loading_document`，未新增文案。`render()` 在 `document_loading` 为真时用该视图**替换正文区**（`content_area`），标题栏/工作区/状态栏外壳保持渲染。首次在 rumark 源码中使用 rgpui 动画 API（`AnimationExt::with_animation`、`Spinner`）。新增 2 个测试：opacity 曲线边界 + 加载态/完成态绘制冒烟（rgpui 动画集成验证）。全量 1041 passed / 0 failed（原 1039）。
+
+2026-11-24 **加载动画不可见修复 + 状态栏文件名（未提交）**：用户实机反馈"测试并没有动画效果"、状态栏只有文件夹名没有文件名。动画根因：`defer_large_document_load` 置 `document_loading=true` 后未 `cx.notify()`（首帧不重绘），且 100ms 启动延迟 + 8ms×N 的加载窗口太短（Spinner 周期 800ms、呼吸 1200ms，还没转起来就被正文替换）。修复：置位后立即 `cx.notify()`，并把启动延迟改为 `MIN_LOADING_DISPLAY`（900ms）先展示满一个动画周期再分块构建；测试里 `assert_deferred_load_matches_reference` 的时钟推进从 150ms 改为 `MIN_LOADING_DISPLAY`。状态栏新增 `current_file_name`（id `current-file`，tooltip 为完整路径），排在文件夹条目前；新增对应单测。验证见第 5 节。
+
+> ⚠️ **临时状态（2026-11-24 晚）**：`Cargo.toml` / `Cargo.lock` 版本号已从 0.2.4 **临时降到 0.2.3**，用于实机测试「检查更新」能否检测到 GitHub 上的 v0.2.4。检测链路已用真实网络端到端验证通过（current=0.2.3 → remote=0.2.4 → 判定为新版本 → 找到平台资产）。**测试完必须把两处版本号恢复为 0.2.4**。下载落地环节在本机失败是代理环境问题（本机 `http_proxy=127.0.0.1:3377`，reqwest 未配系统代理，curl 走代理可完整下载 11MB），非代码 bug。
+
 ## 2. 待决事项（需要拍板）
 
 暂无。
@@ -88,61 +106,11 @@
 **剩余（低优先，需单独回归）**
 
 - 保存 / HTML 导出移后台 + 进度提示（步骤 7 的另一半）：涉及 `atomic_file` 的 `sync_all`/rename 重试与对话框/关闭保护的状态机，改动面大且难用单测覆盖，暂留 UI 线程同步写；数据丢失风险已由上面的「写盘前重取 + 写后比对」消除。
-- 粘贴图片后台编码/落盘、内嵌图改引用、启动先出窗再并行加载、最近文件写入防抖合并（步骤 10 的异步化子集）：都属于启动/事件时序重构，建议连同 4.1 的多文档 tab 改造一起做，避免重复改动 `app_menu.rs` / `main.rs`。
+- 粘贴图片后台编码/落盘、内嵌图改引用、启动先出窗再并行加载、最近文件写入防抖合并（步骤 10 的异步化子集）：都属于启动/事件时序重构，建议单独排期做，避免重复改动 `app_menu.rs` / `main.rs`。
 
 **已确认无问题（别误改）**：光标闪烁已睡到边界（`editing/mod.rs:2184`）、滚动条淡出是一次性定时器（`events.rs:1145`）、拖拽自动滚动仅拖拽期 16ms 运行（`selection.rs:547`）、右键/图片菜单轻量（`context_menu.rs:253`、`image_menu.rs:181`）、PDF `wrap_text` 为 O(n)、DOCX 不加载字体文件。
 
 **已完成的同类优化**：渲染「先分组、后建元素」两趟 + 只为视口内行建元素 + 每帧不再克隆与块数等长的实体句柄（`render.rs`）；光标闪烁前半秒睡到边界（`editing/mod.rs`）。
-
-## 4. 计划中的功能：一个窗口内多文档 tab
-
-> 需求（用户提出）：目前**一个文件一个窗口**，希望一个窗口里用 tab 打开多个文件，并且 tab 可以**拖出来成为独立窗口**、也能**拖回窗口合并**。
-> 详细方案见 `docs/multi-document-tabs.md`（现状调查、渲染拆分、路由改造清单、关闭状态机、跨窗口拖拽 spike、测试与验收、工作量粗估）；本节只留摘要与待拍板项。
-
-### 4.1 现状（已调查，证据位置）
-
-- 建窗链路：CLI 逐文件 `open_editor_window`（`src/app_menu.rs:52-72`，调用点 `src/main.rs:248-274`），窗口根视图**直接就是 `Editor`**（`cx.open_window` 内部自动包 `Root`）；菜单「打开/最近文件」走 `open_file_preferring_blank_window`（`src/app_menu.rs:120`）→ `open_file_in_new_window`（`:75`）。
-- 动作路由建立在「窗口根 == 唯一 Editor」之上：菜单动作统一 `with_active_editor`（`src/app_menu.rs:396-410`）= `cx.active_window()` + `downcast::<Editor>()`；编辑器自身的动作在根元素注册（`src/editor/render.rs:1187-1235`）。**一窗多文档后这里必须改成「先解析窗口 → 再解析活动文档」**，否则保存/查找/视图切换会打到错误文档或静默失败。
-- 拖入文件是**替换当前文档**而非新开窗口：`src/editor/render.rs:1185-1186` 的 `can_drop::<ExternalPaths>`/`on_drop` → `src/editor/file_drop.rs:31` → `replace_document_from_path`（`file_drop.rs:97`）；左侧工作区侧栏点文件同理（`src/editor/workspace.rs:378`）。
-- rgpui 1.4.1（`Cargo.lock`）**有可复用的 UI 件**：`Tabs`/`TabsItem`（`rgpui-1.4.1/src/tabs/tabs.rs:62/25`，项目已在用，见 `src/editor/workspace.rs:503`）、`TabBar`/`Tab`（`tabs/tab_bar.rs:40`、`tabs/tab.rs:411`）、同窗拖拽重排 `TabDragDrop`/`TabDragData`（`tabs/tab_drag.rs:154/47`，**只支持同窗口内排序**）、`components/split_pane.rs`、`components/drag_drop.rs`（`Draggable`/`DropZone`）。
-- **跨窗口拖拽没有原生支持**：拖拽态是 App 级共享（`rgpui app.rs:685` 的 `active_drag`），但鼠标事件与放置监听按窗口各自派发（`rgpui window.rs:5400` 的 `dispatch_mouse_event`），未发现跨窗口 drop 路由。**这是本需求风险最高、最可能需要平台层补齐的点**。
-- `src/editor/workspace.rs` 是**左侧工作区侧边栏**（文件树 + 大纲），与多文档管理无关，别混。
-
-### 4.2 已拍板的问题
-
-1. tab 拖出/拖回放第二期，第一期只做「一窗多文档 + 同窗切换/关闭」。用户选择**薄壳 host** 渲染架构：窗口根改 `DocumentHost`，活动 `Editor` 作为子元素正常挂载、`Editor::render` 不动，tab 条经 `top_strip` 插槽插在标题栏下方。
-2. 拖入文件、侧栏点文件的语义在第一期改为「新建 tab」（有宿主时）；standalone 编辑器保持原「替换当前文档」语义。
-3. 关窗与退出语义：逐 tab 串行确认未保存（一次一个对话框），任一取消即中止整个流程。
-4. 会话持久化（重开恢复 tab 集合）列后续期，不做。
-
-### 4.3 分期与进度
-
-**第一期：一窗多文档 tab（不含跨窗口拖拽）—— 已完成（未提交）**
-
-1. ✅ 新增 `src/editor/document_host.rs`：薄壳 `DocumentHost`（`Vec<TabEntry>` + `active` + `TabStrip`），窗口根由 `Editor` 改为 host；`open_editor_window` 返回 `WindowHandle<DocumentHost>`。standalone 编辑器（测试路径）完全不变。
-2. ✅ 路由改造：`with_active_editor` / `with_active_host` / `request_close_editor_window` / `request_quit_application` / `try_load_into_active_blank_window`（空白 tab 就地载入）；菜单与 CLI 开窗循环适配新返回类型。
-3. ✅ tab 条用 `TabBar`/`Tab` 渲染，点击切换、`×` 关闭（走脏检查）、脏点（标签前缀 `●`）、无路径显示「未命名」。
-4. ✅ 键位重排：`ctrl-tab`/`cmd-tab` 让给「下一个 tab」，`ctrl/cmd-shift-tab` 上一个，`ctrl/cmd-alt-n` 新建，`ctrl/cmd-f4` 关闭；`ToggleViewMode` 改 `ctrl-/`、`ctrl/cmd-alt-v`。新增 `NewTab`/`CloseTab`/`NextTab`/`PreviousTab` 动作 + 菜单项 + `zh-CN`/`en-US` 文案。
-5. ✅ 拖入 Markdown / 侧栏点文件：有宿主时经 `DocumentHost::open_path_in_tab` 新建 tab（空白 tab 复用），否则替换当前文档。
-6. ✅ 关闭状态机：Editor 加 `close_scope`（Window/Tab/WindowFlow）+ `owner_host` 弱引用；关单 tab 与关窗/退出均走未保存确认，保存/放弃后按目标关闭 tab 或推进下一个脏 tab，取消则中止。用 spawn 打破 host→editor→host 的重入。
-7. ✅ 验收：新增/切换/关闭/回绕/空白复用/保存只写活动 tab/键位动作等单测；全量 `cargo test -p rumark` 通过。
-
-2026-11-21 **用户实测反馈收尾（未提交）**：① 拖入 Markdown 崩溃——根因是在 `Editor::update` 中同步 `host.update` 又读回同一 Editor，触发实体重入；改为先同步校验文件/记录 recent，`host.update` 用 `cx.spawn` 延后，并加回归测试（修复前可复现同一 panic）。② tab 条贴左边缘——`TabStrip` 外层补 `pl(TITLE_BAR_LEFT_PADDING)` / `pr(12px)`，抵消 `TabBar` 默认 `px(-1.)` 的负 padding，与标题栏菜单按钮对齐。③ tab 点击无效——点击派发从单个 `Tab::on_click` 改为 `TabBar::on_change`（框架文档明确设置后由栏统一处理选中），并用真实坐标点击单测锁住；关闭按钮仍以 `stop_propagation` 独立处理。④ 新增偏好 `editor.multi_tab_enabled`（`AppPreferences` / `PreferencesFile` / `EditorSettings` / File-Startup Switch，默认 true，写入 `config.toml`，重开窗口生效）：关闭时 `DocumentHost` 只保留一个 tab、不注入 tab 条，tab 动作无操作，关闭走原「关闭窗口」语义，窗口返回类型不变以免回归。⑤ 偏好设置窗口由 800×560 调大到 900×640。验证：`cargo test --bin rumark` 1040 passed / 0 failed、`cargo clippy --all-targets -- -D warnings` 0 警告、`cargo fmt --check` 通过、改动 `.rs` 均 CRLF 无 BOM。
-
-2026-11-21 **窗口脏状态聚合（未提交）**：`DocumentHost` 现在每帧汇总所有 tab 的 `document_dirty` 写入系统 edited 标记与标题脏标记；标题文件名仍取活动 tab。Editor 在 host 模式下不再自行写窗口标题/edited；子 Editor 脏状态变化时通过 `App::notify(host.entity_id())` 通知 host，避免 `editor.update → host.update → editor.read` 重入。新增 `window_chrome_aggregates_dirty_state_across_tabs`：非活动 tab 变脏时标题仍带标记，全部干净后标记清除。
-
-**第一期遗留（低优先）—— 2026-11-21 已完成（未提交）**
-
-- ✅ 同窗拖拽重排、tab 条中键关闭、右键菜单：用框架 `Tab` 的 `on_drag`/`drag_over`/`on_drop` + 自持 `PopupMenu`（照 `table_axis_menu.rs` 的 deferred+anchored 模式）实现。`TabStrip` 加 `menu` 字段；右键菜单含「关闭/关闭其他/关闭右侧/新窗口打开」，i18n 加 4 个 key（zh-CN/en-US 一致）。拖拽用 `TabDragData`（框架已导出），落点即目标 tab 下标，`move_tab(from,to)` 让被拖 tab 保持活动。中键关闭走 `request_close_tab_at`。
-- ✅ 关闭非活动 tab 不切换：`request_close_tab_at(index, window, cx)` 直接对指定 editor 设 `CloseScope::Tab` 走确认，`close_editor_tab` 按实体定位移除，全程不改 `active`；× 按钮、中键、右键「关闭」共用此路径。单文档模式退化为关窗。
-- ✅ 批量关闭（右键「关闭其他/右侧」）：`DocumentHost.pending_batch_close` 存待关 editor 集合，`advance_batch_close` 先移除干净 tab、脏 tab 逐个设 `CloseScope::BatchFlow` 弹确认，确认后由 `close_editor_tab` 推进下一个；取消时 `cancel_batch_close` 清空。close.rs 的取消分支按 scope 分派 WindowFlow/BatchFlow。
-- ✅ 多窗口混合退出：`MenuState` 加 `quit_remaining`/`quitting`，`request_quit_application` 收集所有编辑器窗口（host + standalone）进队列，`advance_quit_window` 逐个请求关闭；`DocumentHost::advance_window_close` 的 Quit 流程不再直接 `cx.quit()`，只 remove 本窗口，`handle_window_closed` 推进下一个、归零时 quit；用户在任一窗口点「继续编辑」经 `cancel_quit_flow` 中止整个退出。新增 4 个 host 层测试（拖拽重排、非活动关闭、关闭其他/右侧）+ 2 个真实坐标 UI 测试（中键关闭、右键菜单）。
-- 手动开 3 文件逐屏目检尚未做（仅自动化单测覆盖）。
-
-**第二期：tab 拖出成窗口 / 拖回合并（未开始）**
-
-8. ✅ 跨窗口拖拽 spike（2026-11-21 完成，结论：原生不可行）：rgpui 1.8 的拖拽**状态**是 App 级共享（`app.rs:804` `active_drag`），但**事件派发与命中检测是单窗口级**——`Window::dispatch_event` 按单个 `&mut self` 派发、监听器只取自本窗口 `rendered_frame`（`window.rs:5572/5733-5792`），`on_drop` 用本窗口 `hitbox.is_hovered(window)` 判定（`elements/div.rs:2869-2899`）；Windows 平台按下即 `SetCapture`（`rgpui-windows/src/events.rs:509`），整个拖拽过程的 move/up 被锁在源窗口 HWND；`MouseDownEvent.position` 是窗口客户区局部坐标（`interactive.rs:137`），没有「屏幕点 → 窗口」的 App 级 API（全仓 `window_at*` 搜索无结果）。因此标准 `on_drag`/`on_drop` 无法实现跨窗口 tab 拖出/拖回；纯应用层只能靠 `Window::dispatch_event`（pub）+ `AnyWindowHandle::update` + `window.bounds()` 近似换算来合成跨窗口事件，但 bounds 含非客户区、多显示器/DPI/重叠/焦点切换均需自理，且 drag ghost 绑在源窗口越过边界即被裁剪——能跑特例但不可靠，不建议。
-9. 若原生不可行，先提供等效键盘/菜单命令，把「拖拽」留到平台层支持之后。**建议路线**：第二期先用纯应用层命令实现 tab「移出新窗口 / 合入目标窗口」——`cx.open_window` 建窗、`cx.windows()` 遍历 + `downcast::<DocumentHost>()` + `AnyWindowHandle::update` 跨窗口改 tab 列表，`Entity<Editor>` 是 App 级可跨窗口共享；复杂度低到中、零框架改动。原生跨窗口拖拽需框架三处增强：① 平台拖拽期放开 `SetCapture`/透传全局屏幕坐标（`rgpui-windows/events.rs:503-539` + macOS/Linux 对应）；② 新增 `App::window_at_point(screen)` 与 `Window` 局部↔屏幕坐标换算（处理非客户区与 DPI）；③ 把 active_drag 的 MouseMove/MouseUp 按屏幕点路由到目标窗口、drag ghost 改覆盖层。`active_drag` 已是 App 级，①+③ 后 `div.rs` 现有 drop 命中逻辑基本可复用。
 
 ## 5. 验证流程（每次改完照跑）
 

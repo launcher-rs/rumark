@@ -17,7 +17,8 @@ pub(crate) use preferences::{
     read_app_preferences,
 };
 
-pub(crate) const RECENT_LIMIT: usize = 20;
+/// 最近文件历史保留上限：菜单逐条列出，数量过多既占空间又难查找。
+pub(crate) const RECENT_LIMIT: usize = 10;
 
 // 测试用：按线程统计 `recent_path_key` 调用次数，防止去重退回 O(N²) 的 canonicalize。
 #[cfg(test)]

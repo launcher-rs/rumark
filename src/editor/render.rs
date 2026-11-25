@@ -20,6 +20,12 @@ pub(crate) const GITHUB_URL: &str = "https://github.com/launcher-rs/rumark";
 /// 距视口此像素内的行保持挂载，快速滚动时提前绘制，避免露出空白边缘。
 const OVERDRAW_PX: f32 = 800.0;
 
+/// 加载视图文字的透明度呼吸曲线：`delta` 在一个动画周期内 0→1 循环，
+/// 本函数让透明度在 0.6~1.0 间平滑往返（两端最暗、中点最亮）。
+fn loading_pulse_opacity(delta: f32) -> f32 {
+    0.6 + 0.4 * (1.0 - (2.0 * delta - 1.0).abs())
+}
+
 /// 在浏览器中打开关于页的仓库链接。
 pub(crate) fn open_about_github_url(cx: &mut App) {
     cx.open_url(GITHUB_URL);
@@ -442,11 +448,7 @@ impl Editor {
     }
 
     /// 同步窗口的已编辑标记。
-    /// 多文档模式下由 `DocumentHost` 聚合所有 tab 统一设置，这里不再单独写。
     fn sync_window_edited_state(&mut self, window: &mut Window) {
-        if self.owner_host.is_some() {
-            return;
-        }
         if self.pending_window_edited {
             self.pending_window_edited = false;
             window.set_window_edited(true);
@@ -468,11 +470,7 @@ impl Editor {
     }
 
     /// 同步系统窗口标题（有挂起刷新时才执行）。
-    /// 多文档模式下由 `DocumentHost` 统一设置，这里不再单独写。
     fn sync_window_title(&mut self, window: &mut Window, i18n: &I18nSnapshot) {
-        if self.owner_host.is_some() {
-            return;
-        }
         if self.pending_window_title_refresh {
             self.pending_window_title_refresh = false;
             let title = Self::window_title(self.file_path.as_deref(), self.document_dirty, i18n);
@@ -977,6 +975,44 @@ impl Editor {
         self.render_rows_cache = Some(cache.clone());
         cache
     }
+
+    /// 大文件分批载入期间的占位视图：旋转指示器 + 文案呼吸动画。
+    ///
+    /// 用框架 `Spinner`（自带无限旋转动画）与 `with_animation`（透明度呼吸）
+    /// 两条动画路径替换原来的一行静态文本，使加载状态更明确。
+    /// 返回 `Stateful<Div>`，与正文内容区同类型，渲染时整体替换而非叠加。
+    fn render_document_loading_view(&self, theme: &Theme, i18n: &I18nSnapshot) -> Stateful<Div> {
+        let message = i18n.t("message_loading_document", &[]);
+        div()
+            .id("document-loading-view")
+            .w_full()
+            .h_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(20.0))
+            .child(
+                Spinner::new()
+                    .with_size(ElementSize::Large)
+                    // accent 是「强调背景色」，在加载区的普通背景上对比度极低，
+                    // 图标几乎看不见；用主前景色确保旋转指示器清晰可辨。
+                    .color(theme.foreground),
+            )
+            .child(
+                div()
+                    .text_size(px(15.0))
+                    .text_color(theme.muted_foreground)
+                    .child(message)
+                    .with_animation(
+                        "document-loading-text",
+                        Animation::new(Duration::from_millis(1200))
+                            .repeat()
+                            .with_easing(ease_in_out),
+                        |this, delta| this.opacity(loading_pulse_opacity(delta)),
+                    ),
+            )
+    }
 }
 
 impl Render for Editor {
@@ -1430,13 +1466,6 @@ impl Render for Editor {
                     .children(menu_buttons),
             ),
         );
-        // 多文档 tab 条带：由窗口容器注入，紧随标题栏之后、正文之前。
-        // standalone 编辑器没有条带，布局与改造前完全一致。
-        let base = if let Some(strip) = self.top_strip.clone() {
-            base.child(strip)
-        } else {
-            base
-        };
         let workspace_width =
             self.workspace_effective_panel_width(f32::from(window.viewport_size().width));
         let is_resizing_workspace = self.workspace.resize_drag.is_some();
@@ -1486,6 +1515,13 @@ impl Render for Editor {
                 .on_double_click(cx.listener(Self::on_workspace_panel_resize_reset));
             main_content = main_content.child(workspace_panel).child(resize_handle);
         }
+        // 大文档分批载入期间用动画占位视图替换正文，避免只有一行静态文本；
+        // 外壳（标题栏、工作区、状态栏）保持渲染，窗口看起来仍是完整编辑器。
+        let content_area = if self.document_loading {
+            self.render_document_loading_view(&theme, &i18n)
+        } else {
+            content_area
+        };
         let base = base.child(main_content.child(content_area));
         let base = if let Some(find_bar) = self.render_find_bar(&theme, cx) {
             base.child(find_bar)
@@ -1494,6 +1530,11 @@ impl Render for Editor {
         };
         let base = if self.status_bar_enabled(cx) {
             base.child(self.status_bar_element(&i18n, cx))
+        } else {
+            base
+        };
+        let base = if let Some(update_dialog) = self.render_update_dialog_overlay(&i18n, cx) {
+            base.child(update_dialog)
         } else {
             base
         };
@@ -1517,11 +1558,24 @@ impl Render for Editor {
 #[cfg(test)]
 mod tests {
     use super::{
-        RowSpacingInfo, callout_row_top_gap, editor_text_font, rendered_row_top_gap,
-        supports_in_window_menu_for_target_os, tibetan_font_fallbacks_for_target_os,
+        RowSpacingInfo, callout_row_top_gap, editor_text_font, loading_pulse_opacity,
+        rendered_row_top_gap, supports_in_window_menu_for_target_os,
+        tibetan_font_fallbacks_for_target_os,
     };
     use crate::theme::ThemeDimensions;
     use uuid::Uuid;
+
+    #[test]
+    fn loading_pulse_opacity_breaths_between_bounds() {
+        // 周期两端最暗、中点最亮，其余区间不越界。
+        assert!((loading_pulse_opacity(0.0) - 0.6).abs() < 1e-6);
+        assert!((loading_pulse_opacity(0.5) - 1.0).abs() < 1e-6);
+        assert!((loading_pulse_opacity(1.0) - 0.6).abs() < 1e-6);
+        for delta in [0.1, 0.25, 0.75, 0.9] {
+            let opacity = loading_pulse_opacity(delta);
+            assert!((0.6..=1.0).contains(&opacity), "opacity: {opacity}");
+        }
+    }
 
     #[test]
     fn contiguous_quote_rows_collapse_inter_row_gap() {
