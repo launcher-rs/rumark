@@ -30,6 +30,11 @@ pub(crate) struct UpdateDialogState {
 }
 
 impl super::Editor {
+    /// 返回更新重启时可恢复的当前文档路径。
+    pub(crate) fn update_restart_document_path(&self) -> Option<PathBuf> {
+        self.file_path.clone()
+    }
+
     /// 从菜单 / 偏好设置触发的手动检查更新。
     pub(crate) fn check_for_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.update_status.phase != UpdatePhase::Idle {
@@ -370,12 +375,18 @@ async fn confirm_and_install(
 
     let current_exe =
         cx.update(|_| std::env::current_exe().unwrap_or_else(|_| PathBuf::from("rumark")));
+    let (editor_window_count, current_file_path) =
+        cx.update(|cx| crate::app_menu::editor_update_restart_context(cx, window_handle));
     let options = updater::InstallOptions {
         current_exe,
         staged_exe: path,
         process_id: std::process::id(),
-        // 更新后按正常的空文档启动，不重放中文文件路径或试图重建多个窗口。
-        restart_args: restart_args_after_update(),
+        // 单窗口可恢复启动时打开的文件；多窗口无法仅凭启动参数完整恢复，改为空文档启动。
+        restart_args: restart_args_after_update(
+            editor_window_count,
+            std::env::args().skip(1).collect(),
+            current_file_path,
+        ),
     };
 
     match updater::spawn_install_helper(&options) {
@@ -417,9 +428,21 @@ fn drain_latest_progress(
     (latest, disconnected)
 }
 
-/// 更新后启动新实例时不重放文件路径，避免 Windows Unicode 参数损坏并统一窗口状态。
-fn restart_args_after_update() -> Vec<String> {
-    Vec::new()
+/// 仅单编辑器窗口时恢复启动参数，多个窗口无法由原始参数完整重建。
+fn restart_args_after_update(
+    editor_window_count: usize,
+    original_args: Vec<String>,
+    current_file_path: Option<PathBuf>,
+) -> Vec<String> {
+    if editor_window_count != 1 {
+        Vec::new()
+    } else if !original_args.is_empty() {
+        original_args
+    } else {
+        current_file_path
+            .map(|path| vec![path.to_string_lossy().into_owned()])
+            .unwrap_or_default()
+    }
 }
 
 #[cfg(test)]
@@ -465,7 +488,34 @@ mod tests {
     }
 
     #[test]
-    fn update_restart_does_not_replay_document_paths() {
-        assert!(restart_args_after_update().is_empty());
+    fn update_restart_preserves_args_for_one_editor_window() {
+        let args = vec!["D:\\文档\\测试.md".to_string()];
+        assert_eq!(restart_args_after_update(1, args.clone(), None), args);
+    }
+
+    #[test]
+    fn update_restart_uses_current_file_when_original_args_are_empty() {
+        let path = PathBuf::from("D:\\文档\\测试.md");
+        assert_eq!(
+            restart_args_after_update(1, Vec::new(), Some(path.clone())),
+            vec![path.to_string_lossy().into_owned()]
+        );
+    }
+
+    #[test]
+    fn update_restart_does_not_replay_args_for_multiple_editor_windows() {
+        assert!(
+            restart_args_after_update(
+                2,
+                vec!["one.md".into(), "two.md".into()],
+                Some(PathBuf::from("one.md"))
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn update_restart_does_not_replay_args_without_editor_windows() {
+        assert!(restart_args_after_update(0, vec!["one.md".into()], None).is_empty());
     }
 }

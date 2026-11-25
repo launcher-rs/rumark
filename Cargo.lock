@@ -5687,7 +5687,7 @@ dependencies = [
 [[package]]
 name = "rgpui-extra"
 version = "0.1.0"
-source = "git+https://github.com/launcher-rs/rgpui-extra.git#f55fdfbc09df720c601d99d292f058e3f7d3da7c"
+source = "git+https://github.com/launcher-rs/rgpui-extra.git#d36d74ac6b34255435c0cba1cdbf12ee3f7dd93b"
 dependencies = [
  "anyhow",
  "flate2",

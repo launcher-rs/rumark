@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use rgpui::components::{AnimatedProgress, AnimatedProgressSize, StatusBar, StatusBarItem};
+use rgpui::components::{StatusBar, StatusBarItem};
 use rgpui::*;
 
 use super::Editor;
@@ -27,18 +27,6 @@ impl Editor {
     pub(super) fn current_file_name(file_path: Option<&Path>) -> Option<String> {
         let name = file_path?.file_name()?.to_string_lossy().into_owned();
         (!name.is_empty()).then_some(name)
-    }
-
-    /// 当前文件所在文件夹的展示信息：末级文件夹名 + 完整父路径（悬停提示）。
-    ///
-    /// 无文件路径、无父目录或位于根目录时返回 `None`，状态栏不显示该条目。
-    pub(super) fn current_folder_info(file_path: Option<&Path>) -> Option<(String, String)> {
-        let parent = file_path?.parent()?;
-        let name = parent.file_name()?.to_string_lossy().into_owned();
-        if name.is_empty() {
-            return None;
-        }
-        Some((name, parent.to_string_lossy().into_owned()))
     }
 
     /// 按偏好与实时状态组装框架状态栏（纯值驱动，每帧直接构造）。
@@ -81,7 +69,7 @@ impl Editor {
             ));
         }
 
-        // 当前文档文件名 + 所在文件夹：文件名常驻显示，文件夹悬停查看完整路径。
+        // 仅显示当前文档文件名；悬停文件名仍可查看完整路径。
         if let Some(file_name) = Self::current_file_name(self.file_path.as_deref()) {
             let tooltip = self
                 .file_path
@@ -92,15 +80,6 @@ impl Editor {
                 StatusBarItem::new(file_name)
                     .id("current-file")
                     .tooltip(tooltip),
-            );
-        }
-        if let Some((folder_name, full_path)) = Self::current_folder_info(self.file_path.as_deref())
-        {
-            left_items.push(
-                StatusBarItem::new(folder_name)
-                    .id("current-folder")
-                    .tooltip(full_path)
-                    .muted(true),
             );
         }
 
@@ -140,12 +119,21 @@ impl Editor {
 
         let mut wrapper = div().w_full().flex().flex_col();
         if let Some(fraction) = self.update_status.fraction() {
+            let theme = cx.theme();
             wrapper = wrapper.child(
-                div().w_full().h(px(3.0)).child(
-                    AnimatedProgress::new("update-progress-bar")
-                        .value(fraction)
-                        .size(AnimatedProgressSize::Sm),
-                ),
+                div()
+                    .w_full()
+                    .h(px(3.0))
+                    .rounded(theme.radius_lg)
+                    .bg(*theme.tokens.muted)
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .h_full()
+                            .w(relative(fraction))
+                            .rounded(theme.radius_lg)
+                            .bg(*theme.tokens.primary),
+                    ),
             );
         }
         wrapper
@@ -386,20 +374,6 @@ mod tests {
             Some("hello.md".to_string())
         );
         assert_eq!(Editor::current_file_name(None), None);
-    }
-
-    #[test]
-    fn current_folder_info_shows_parent_name_and_full_path() {
-        assert_eq!(
-            Editor::current_folder_info(Some(std::path::Path::new("/work/notes/hello.md"))),
-            Some(("notes".to_string(), "/work/notes".to_string()))
-        );
-        // 无路径、无父目录时不显示文件夹条目。
-        assert_eq!(Editor::current_folder_info(None), None);
-        assert_eq!(
-            Editor::current_folder_info(Some(std::path::Path::new("hello.md"))),
-            None
-        );
     }
 
     #[test]

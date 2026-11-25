@@ -622,6 +622,36 @@ fn current_window_candidates(cx: &mut App) -> Vec<AnyWindowHandle> {
     candidates
 }
 
+/// 返回编辑器窗口数及单窗口当前文档路径（不计偏好设置等辅助窗口）。
+pub(crate) fn editor_update_restart_context(
+    cx: &mut App,
+    current_window: AnyWindowHandle,
+) -> (usize, Option<PathBuf>) {
+    let mut candidates = current_window_candidates(cx);
+    if candidates
+        .iter()
+        .all(|candidate| candidate.window_id() != current_window.window_id())
+    {
+        candidates.push(current_window);
+    }
+    let editors: Vec<_> = candidates
+        .into_iter()
+        .filter_map(|window| window.downcast::<Editor>())
+        .collect();
+    let count = editors.len();
+    let file_path = if count == 1 {
+        editors.into_iter().next().and_then(|window| {
+            window
+                .read(cx)
+                .ok()
+                .and_then(Editor::update_restart_document_path)
+        })
+    } else {
+        None
+    };
+    (count, file_path)
+}
+
 /// 请求关闭指定编辑器窗口（含未保存确认）。
 ///
 /// 泛化到任意 `AppContext`，以便既能在同步路径调用，也能在 `spawn` 出
