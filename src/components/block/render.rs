@@ -39,24 +39,22 @@ fn bulleted_list_marker(depth: usize, theme: &Theme, text_size: f32) -> Div {
     }
 }
 
-/// 判断列轴槽是否可见。
-fn column_axis_gutter_visible(
-    preview_marker: Option<AxisMarker>,
-    selected_marker: Option<AxisMarker>,
-) -> bool {
-    matches!(
-        preview_marker,
-        Some(AxisMarker {
-            kind: TableAxisKind::Column,
-            ..
-        })
-    ) || matches!(
-        selected_marker,
-        Some(AxisMarker {
-            kind: TableAxisKind::Column,
-            ..
-        })
-    )
+/// 表格悬停区的常驻占位尺寸：列轴带、追加列区、追加行区。
+///
+/// 列轴高亮带与追加按钮的悬停目标都贴在表格边界上。占位若随悬停/预览状态变化，
+/// 目标会随布局位移并触发反向悬停事件，形成「进入→位移→离开→弹回」的自持抖动。
+/// 因此三种占位一律常驻，悬停只切换高亮色与绝对定位按钮的显隐，不改变表格布局。
+/// 状态参数仅用于测试中锁定「占位与状态无关」这一不变量。
+fn table_hover_gutters(
+    _preview: Option<AxisMarker>,
+    _selected: Option<AxisMarker>,
+    _column_hovered: bool,
+    _row_hovered: bool,
+    d: &ThemeDimensions,
+) -> (Pixels, Pixels, Pixels) {
+    let band = px(d.table_append_activation_band);
+    let append = px(d.table_append_button_extent) + px(d.table_append_button_inset);
+    (band, append, append)
 }
 
 /// 让行轴高亮色更不透明（更实但仍半透明），供表头行使用，保持主题色相，使表头手柄呈现为正文行手柄的加强版。
@@ -2885,28 +2883,22 @@ impl Render for Block {
                 let append_extent = px(d.table_append_button_extent);
                 let append_inset = px(d.table_append_button_inset);
                 let activation_band = px(d.table_append_activation_band);
-                let top_gutter = if column_axis_gutter_visible(preview_marker, selected_marker) {
-                    activation_band
-                } else {
-                    px(0.0)
-                };
+                // 三种占位常驻：悬停只切换高亮色与绝对定位按钮的显隐，不再改变
+                // 表格自身的位置和尺寸，避免悬停目标位移与悬停状态互相触发。
+                let (top_gutter, right_gutter, bottom_gutter) = table_hover_gutters(
+                    preview_marker,
+                    selected_marker,
+                    self.table_append_column_hovered,
+                    self.table_append_row_hovered,
+                    d,
+                );
                 let column_append_top = top_gutter + activation_band;
                 let column_control_visible = self.table_append_column_hovered;
                 let row_control_visible = self.table_append_row_hovered;
-                let right_gutter = if column_control_visible {
-                    append_extent + append_inset
-                } else {
-                    px(0.0)
-                };
-                let bottom_gutter = if row_control_visible {
-                    append_extent + append_inset
-                } else {
-                    px(0.0)
-                };
                 let weak_table_block = cx.entity().downgrade();
 
                 let header_cells = runtime.header;
-                let column_axis_row = (top_gutter > px(0.0)).then(|| {
+                let column_axis_row = {
                     div().w_full().h(top_gutter).flex().gap(px(0.0)).children(
                         header_cells.iter().enumerate().map(|(column, _cell)| {
                             let hover_block = weak_table_block.clone();
@@ -2994,7 +2986,7 @@ impl Render for Block {
                                 )
                         }),
                     )
-                });
+                };
 
                 let header_hover_block = weak_table_block.clone();
                 let header_select_block = weak_table_block.clone();
@@ -3244,9 +3236,7 @@ impl Render for Block {
 
                 {
                     let mut rows = Vec::with_capacity(2 + body_row_count);
-                    if let Some(column_axis_row) = column_axis_row {
-                        rows.push(column_axis_row.into_any_element());
-                    }
+                    rows.push(column_axis_row.into_any_element());
                     rows.push(header_row.into_any_element());
                     rows.extend(body_rows.map(|row| row.into_any_element()));
 
@@ -3675,14 +3665,15 @@ fn inline_word_chunks(text: &str, code: bool, has_background: bool) -> Vec<&str>
 #[cfg(test)]
 mod tests {
     use super::{
-        HtmlStyle, column_axis_gutter_visible, embedded_image_source_preview,
-        html_is_whitespace_text, html_node_is_block_level, html_node_visual_style,
-        inline_word_chunks, split_html_text_at_blank_line,
+        HtmlStyle, embedded_image_source_preview, html_is_whitespace_text,
+        html_node_is_block_level, html_node_visual_style, inline_word_chunks,
+        split_html_text_at_blank_line, table_hover_gutters,
     };
     use crate::components::{AxisMarker, TableAxisKind};
     use crate::components::{Block, BlockKind, BlockRecord, InlineTextTree, parse_html_document};
     use crate::i18n::I18nManager;
-    use rgpui::{Hsla, Rgba, TestAppContext, px};
+    use crate::theme::ThemeDimensions;
+    use rgpui::{Hsla, Pixels, Rgba, TestAppContext, px};
 
     #[test]
     fn embedded_image_preview_truncates_on_char_boundaries() {
@@ -3700,29 +3691,37 @@ mod tests {
     }
 
     #[test]
-    fn top_gutter_only_appears_for_column_axis_state() {
-        assert!(!column_axis_gutter_visible(
-            Some(AxisMarker {
-                kind: TableAxisKind::Row,
-                index: 0,
-            }),
-            None,
-        ));
-        assert!(!column_axis_gutter_visible(None, None));
-        assert!(column_axis_gutter_visible(
-            Some(AxisMarker {
-                kind: TableAxisKind::Column,
-                index: 0,
-            }),
-            None,
-        ));
-        assert!(column_axis_gutter_visible(
-            None,
-            Some(AxisMarker {
-                kind: TableAxisKind::Column,
-                index: 0,
-            }),
-        ));
+    fn table_hover_gutters_are_independent_of_hover_state() {
+        // 占位必须常驻：一旦随悬停/预览状态变化，贴在表格边界上的悬停目标会随布局
+        // 位移并触发反向悬停事件，形成抖动。这里穷举所有状态组合锁定该不变量。
+        let d = &ThemeDimensions::DEFAULT;
+        let expected: (Pixels, Pixels, Pixels) = (
+            px(d.table_append_activation_band),
+            px(d.table_append_button_extent) + px(d.table_append_button_inset),
+            px(d.table_append_button_extent) + px(d.table_append_button_inset),
+        );
+        assert!(expected.0 > px(0.0) && expected.1 > px(0.0) && expected.2 > px(0.0));
+
+        let column = Some(AxisMarker {
+            kind: TableAxisKind::Column,
+            index: 0,
+        });
+        let row = Some(AxisMarker {
+            kind: TableAxisKind::Row,
+            index: 0,
+        });
+        for preview in [None, column, row] {
+            for selected in [None, column, row] {
+                for column_hovered in [false, true] {
+                    for row_hovered in [false, true] {
+                        assert_eq!(
+                            table_hover_gutters(preview, selected, column_hovered, row_hovered, d,),
+                            expected,
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// 断言颜色接近。
