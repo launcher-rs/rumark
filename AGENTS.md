@@ -19,7 +19,7 @@
 ## 依赖与 Feature 约定
 
 - 本仓是 cargo workspace（根 `Cargo.toml` 即 workspace 根，`[profile.*]` 只能定义在这里；唯一成员是根包 rumark）。`cargo fmt --check` / `cargo clippy --all-targets` / `cargo test` 覆盖本包全部目标。
-- `rgpui` / `rgpui-platform` 为 crates.io 版本依赖（当前 `1.7`，`Cargo.lock` 锁定精确版本）。框架升级时同步改 `Cargo.toml` 两处版本号 + `dev-dependencies` 的 `test-support` 项（三处必须同版本，不要留旧号靠 `^` 兜底），跑通后提交 `Cargo.lock`。不要改回 path 依赖，不要在本仓 patch 框架代码。
+- `rgpui` / `rgpui-platform` 使用 git 源码依赖 `https://github.com/launcher-rs/rgpui.git`（上游有尚未发版的平台更新，尤其 Linux 后端），四处依赖（两个正式依赖 + `dev-dependencies` 的两个 `test-support` 项）必须同 URL，不写 `version` 以免上游 git 内 bump 版本后构建失败，`Cargo.lock` 锁定精确 commit。仓库内 `[patch.crates-io]` 把 `rgpui-extra` 传递依赖的 crates.io 版也指向同一 git 源，删掉会造成双版本类型冲突。不要改回 path 依赖，不要在本仓 patch 框架代码。
 - `mermaid-renderer` 为 crates.io 版本依赖（当前 `0.1`），由独立仓 [launcher-rs/mermaid-renderer](https://github.com/launcher-rs/mermaid-renderer)（MIT）维护。改布局代码请在该仓提交、发包并升级版本号；本地联调临时用 `[patch.crates-io]` 指向旁边 checkout，不要长期改回 git 依赖。该 crate 的测试套件（10 个 suite）是布局回归防线，更新依赖前先确认其全绿。
 - 代码高亮是可选裁剪的：`code-highlight-core/official/config`、`html-native` 控制 `tree-sitter*` 依赖。默认全开。各 `build_*_config` 的 `#[cfg]` 必须与注册表里的调用点门控一致（yaml 归 `official`、toml 归 `config`），否则最小构建会引用未链接的 crate。
   - 最小编译验证：`cargo check -p rumark --no-default-features`

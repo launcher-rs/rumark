@@ -6,7 +6,7 @@ resolver = "3"
 
 [package]
 name = "rumark"
-version = "0.2.7"
+version = "0.2.8"
 edition = "2024"
 license = "Apache-2.0"
 description = "拾墨 Rumark：基于 rgpui 的块式 Markdown 编辑器"
@@ -19,9 +19,10 @@ repository = "https://github.com/launcher-rs/rumark"
 anyhow = "1"
 base64 = "0.23"
 uuid = "1.23"
-# rgpui 与 rgpui-platform 必须同版本，避免双版本类型冲突；Cargo.lock 锁定精确版本。
-rgpui = { version = "1.8.4", features = ["inspector"] }
-rgpui-platform = "1.8.4"
+# rgpui 与 rgpui-platform 同走 git 源码（Linux 等平台有大量尚未发版的更新）；
+# 不写 version 以免上游在 git 上 bump 版本后构建失败，Cargo.lock 锁定精确 commit。
+rgpui = { git = "https://github.com/launcher-rs/rgpui.git", features = ["inspector"] }
+rgpui-platform = { git = "https://github.com/launcher-rs/rgpui.git" }
 unicode-segmentation = "1.13"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -110,9 +111,15 @@ winreg = "0.56"
 embed-resource = "3.0.12"
 
 [dev-dependencies]
-rgpui = { version = "1.8.4", features = ["test-support"] }
+rgpui = { git = "https://github.com/launcher-rs/rgpui.git", features = ["test-support"] }
 # 1.8 起 test-support 必须同时在 platform 上转发，否则窗口级测试辅助方法缺失。
-rgpui-platform = { version = "1.8.4", features = ["test-support"] }
+rgpui-platform = { git = "https://github.com/launcher-rs/rgpui.git", features = ["test-support"] }
+
+# rgpui-extra 仍声明 crates.io 的 rgpui，统一改指同一 git 源码，
+# 否则会同时编进 crates.io 版与 git 版两个 rgpui，产生类型不兼容。
+[patch.crates-io]
+rgpui = { git = "https://github.com/launcher-rs/rgpui.git" }
+rgpui-platform = { git = "https://github.com/launcher-rs/rgpui.git" }
 
 # 本 crate 开一档优化：块布局、文本测量与逐帧重绘这些热路径在 opt-level 0 下慢
 # 一个数量级；opt-level 1 相比 2 的运行时差别很小，但增量编译快得多。

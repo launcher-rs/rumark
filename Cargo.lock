@@ -2556,18 +2556,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "git2"
-version = "0.21.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ddddbf932745a6be37109b6112d3ee09696106f848449069d3a57bba937ab82e"
-dependencies = [
- "bitflags 2.13.2",
- "libc",
- "libgit2-sys",
- "log",
-]
-
-[[package]]
 name = "gl-context-loader"
 version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3470,18 +3458,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
-name = "libgit2-sys"
-version = "0.18.8+1.9.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f7c568b25d7489bc3fb2988ed69ab111d2944d2f5fec3d5c987fe545ea97b50"
-dependencies = [
- "cc",
- "libc",
- "libz-sys",
- "pkg-config",
-]
-
-[[package]]
 name = "libloading"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3504,18 +3480,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61ff90caf6077a803a240f62fdbe88645a890bbca49ef8174c3cb0404362171d"
 dependencies = [
  "libc",
-]
-
-[[package]]
-name = "libz-sys"
-version = "1.1.33"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fee3f59f4321dab0c78d828942e7aa09d0bd8ad6e78a501977e6bf3d02938045"
-dependencies = [
- "cc",
- "libc",
- "pkg-config",
- "vcpkg",
 ]
 
 [[package]]
@@ -5554,8 +5518,7 @@ dependencies = [
 [[package]]
 name = "rgpui"
 version = "1.8.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ca02889ba06b411376b70fba5c4e16eccccac8d5d0c776f9d46ad522623755f"
+source = "git+https://github.com/launcher-rs/rgpui.git#e841f07ae706bb89332ad9340b2edeb98292d466"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -5593,7 +5556,6 @@ dependencies = [
  "futures-concurrency",
  "futures-lite",
  "getrandom 0.4.3",
- "git2",
  "globset",
  "heapless",
  "http",
@@ -5674,8 +5636,7 @@ dependencies = [
 [[package]]
 name = "rgpui-dom"
 version = "1.8.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26a34c1eab337d67aa9a3d019cdcccfbe41fcf59123948862175ea9d54554c22"
+source = "git+https://github.com/launcher-rs/rgpui.git#e841f07ae706bb89332ad9340b2edeb98292d466"
 dependencies = [
  "js-sys",
  "rgpui",
@@ -5728,8 +5689,7 @@ dependencies = [
 [[package]]
 name = "rgpui-linux"
 version = "1.8.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a94759edb5b95b1e7da8c4b9b6dc19e2091e1f1e7d7b250efee36931783da25c"
+source = "git+https://github.com/launcher-rs/rgpui.git#e841f07ae706bb89332ad9340b2edeb98292d466"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -5777,8 +5737,7 @@ dependencies = [
 [[package]]
 name = "rgpui-macos"
 version = "1.8.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8658b9b3e234589d4c7ae3b538880968bcc54702b2cc0405d365ac45ea70deb6"
+source = "git+https://github.com/launcher-rs/rgpui.git#e841f07ae706bb89332ad9340b2edeb98292d466"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -5814,6 +5773,7 @@ dependencies = [
  "pathfinder_geometry",
  "raw-window-handle",
  "rgpui",
+ "rgpui-font-kit",
  "semver",
  "smallvec",
  "strum",
@@ -5823,8 +5783,7 @@ dependencies = [
 [[package]]
 name = "rgpui-macros"
 version = "1.8.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09ff03150154fcc7b4ff45935ef0b9a4a5a69a52237c693809a9532235341c59"
+source = "git+https://github.com/launcher-rs/rgpui.git#e841f07ae706bb89332ad9340b2edeb98292d466"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
@@ -5835,8 +5794,7 @@ dependencies = [
 [[package]]
 name = "rgpui-platform"
 version = "1.8.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e83dd2d0e27a0d346e9da571bf85b5d9c3d77ee6f033ff1ffdb8396260b9efb8"
+source = "git+https://github.com/launcher-rs/rgpui.git#e841f07ae706bb89332ad9340b2edeb98292d466"
 dependencies = [
  "console_error_panic_hook",
  "rgpui",
@@ -5849,8 +5807,7 @@ dependencies = [
 [[package]]
 name = "rgpui-web"
 version = "1.8.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab76a1bc4dc422fcd91c7115d775d90a144a69b7d6d316e3f2dbda9c91d75d5a"
+source = "git+https://github.com/launcher-rs/rgpui.git#e841f07ae706bb89332ad9340b2edeb98292d466"
 dependencies = [
  "anyhow",
  "futures",
@@ -5872,8 +5829,7 @@ dependencies = [
 [[package]]
 name = "rgpui-wgpu"
 version = "1.8.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b90cefe23a0686f2d2d42cc71a5278cdd60673dca7ef4279de585f44e986f623"
+source = "git+https://github.com/launcher-rs/rgpui.git#e841f07ae706bb89332ad9340b2edeb98292d466"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -5904,8 +5860,7 @@ dependencies = [
 [[package]]
 name = "rgpui-windows"
 version = "1.8.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2151abe03e7e7c104ace561bea38768dfe575063259a084eb6840d6aa633789"
+source = "git+https://github.com/launcher-rs/rgpui.git#e841f07ae706bb89332ad9340b2edeb98292d466"
 dependencies = [
  "accesskit",
  "accesskit_windows",
@@ -6002,7 +5957,7 @@ dependencies = [
 
 [[package]]
 name = "rumark"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "adot-tree-sitter-toml",
  "anyhow",
@@ -7807,12 +7762,6 @@ name = "value-bag"
 version = "1.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2799ffb329a792ecfd902b71306c8a815a6ef1c0470fa9953a6aa4d4cecbe511"
-
-[[package]]
-name = "vcpkg"
-version = "0.2.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "version-compare"
