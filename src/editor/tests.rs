@@ -22,6 +22,9 @@ fn init_editor_test_app(cx: &mut TestAppContext) {
         I18nManager::init_with_language_id(cx, "en-US");
         rgpui::theme::init(cx);
         crate::components::init(cx);
+        // 取消未保存对话框会经 `cancel_pending_application_quit` 访问该 global；
+        // 生产由 app_menu::init 注册，测试只补这一项，避免装上退出应用的订阅。
+        crate::app_menu::init_pending_application_quit_for_test(cx);
     });
 }
 

@@ -745,6 +745,13 @@ pub(crate) fn cancel_pending_application_quit(cx: &mut Context<Editor>) {
     cx.update_global::<PendingApplicationQuit, _>(|pending, _cx| pending.0 = false);
 }
 
+/// 仅供测试初始化退出请求 global：生产路径由 `init` 注册，但测试只需这一个 global，
+/// 不能调用 `init`（它会装窗口关闭订阅，最后一窗关闭即退出应用，破坏测试进程）。
+#[cfg(test)]
+pub(crate) fn init_pending_application_quit_for_test(cx: &mut App) {
+    cx.set_global(PendingApplicationQuit::default());
+}
+
 /// 按当前应用状态执行应用菜单动作。
 pub(crate) fn dispatch_menu_action(action: &dyn Action, cx: &mut App) {
     if action.as_any().is::<NewWindow>() {
