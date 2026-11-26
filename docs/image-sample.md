@@ -32,9 +32,9 @@
 
 ![上级目录](../docs/assets/icon.png)
 
-绝对路径（本机不存在时渲染为错误态，可自行改成真实路径）：
+绝对路径（示例占位，本机不存在时渲染为错误态）：
 
-![绝对路径](C:\Windows\Web\Wallpaper\red.png)
+![绝对路径](/nonexistent/path/to/example-image.png)
 
 ## 4. 重复引用同一文件
 
