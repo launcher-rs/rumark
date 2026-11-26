@@ -34,7 +34,8 @@ const FALLBACK_LANGUAGE_ID: &str = "en-US";
 ///
 /// 缺失该字段的旧配置按版本 1 处理；高于当前版本说明配置由更新的版本写入，
 /// 此时不得回写默认值，否则新版本写入的字段会被抹掉。
-const PREFERENCES_FILE_VERSION: u32 = 1;
+// v2：导出目录默认关闭，旧配置中的 `export.include_toc` 一并重置为关闭。
+const PREFERENCES_FILE_VERSION: u32 = 2;
 
 /// 配置损坏时的恢复信息。
 #[derive(Debug)]
@@ -226,7 +227,7 @@ impl Default for AppPreferences {
             default_theme_id: FALLBACK_THEME_ID.into(),
             table_headers_visible: true,
             image_paste_behavior: ImagePasteBehavior::None,
-            export_include_toc: true,
+            export_include_toc: false,
             export_theme: ExportThemeMode::FollowEditor,
             keybindings: BTreeMap::new(),
             status_bar: StatusBarPreferences::default(),
@@ -722,11 +723,16 @@ fn app_preferences_from_toml_value(
         .and_then(|value| value.as_str())
         .map(ImagePasteBehavior::from_str)
         .unwrap_or(ImagePasteBehavior::None);
-    let export_include_toc = value
+    let mut export_include_toc = value
         .get("export")
         .and_then(|export| export.get("include_toc"))
         .and_then(|value| value.as_bool())
-        .unwrap_or(true);
+        .unwrap_or(false);
+    // v1 配置的 `include_toc = true` 只是当年默认值，未必是用户主动开启；
+    // 默认改为关闭时同步迁移旧配置，避免升级后导出仍凭空多出目录。
+    if preferences_file_version(value) < 2 {
+        export_include_toc = false;
+    }
     let export_theme = value
         .get("export")
         .and_then(|export| export.get("theme"))
@@ -2922,6 +2928,34 @@ mod tests {
     }
 
     #[test]
+    fn legacy_config_toc_is_migrated_to_disabled() {
+        // v1 配置里的 `include_toc = true` 是旧默认值，升级后应重置为关闭并回写 v2。
+        let root = std::env::temp_dir().join(format!(
+            "rumark-preferences-toc-migration-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("temp root should exist");
+        let dirs = RumarkConfigDirs::from_root(&root);
+        std::fs::write(
+            dirs.app_config_file(),
+            "version = 1\n[export]\ninclude_toc = true\n",
+        )
+        .expect("legacy preferences should be written");
+
+        let (preferences, _) =
+            load_or_create_app_preferences_with_dirs_and_locales(&dirs, ["zh-CN"])
+                .expect("legacy config should load");
+        assert!(
+            !preferences.export_include_toc,
+            "旧配置的目录开关应迁移为关闭"
+        );
+        let text = std::fs::read_to_string(dirs.app_config_file()).expect("config should exist");
+        assert!(text.contains("version = 2"), "text: {text}");
+        assert!(text.contains("include_toc = false"), "text: {text}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn mirror_toggle_preference_roundtrips_and_defaults_to_direct_first() {
         let defaults = AppPreferences::default();
         assert!(defaults.use_mirrors, "镜像作为直连失败后的回退默认开启");
@@ -3003,6 +3037,7 @@ mod tests {
                 .expect("preferences should be created");
         assert!(recovery.is_none(), "fresh config needs no recovery");
         assert_eq!(preferences.default_language_id, "zh-CN");
+        assert!(!preferences.export_include_toc, "新建配置默认不带目录");
         assert!(dirs.app_config_file().exists());
         let text =
             std::fs::read_to_string(dirs.app_config_file()).expect("config.toml should exist");

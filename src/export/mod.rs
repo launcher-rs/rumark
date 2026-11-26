@@ -127,6 +127,11 @@ pub(crate) enum Block {
     Html(String),
 }
 
+/// HTML 注释按 Markdown 渲染语义不展示，导出同样跳过（如样张头部的说明）。
+fn is_html_comment(text: &str) -> bool {
+    text.trim_start().starts_with("<!--")
+}
+
 /// 取行内节点的展示纯文本（标题/目录/表格度量共用）。
 pub(crate) fn inline_text(inline: &[Inline]) -> String {
     let mut out = String::new();
@@ -277,7 +282,7 @@ where
                         _ => {}
                     }
                 }
-                if !raw.trim().is_empty() {
+                if !raw.trim().is_empty() && !is_html_comment(&raw) {
                     blocks.push(Block::Html(raw));
                 }
             }
@@ -299,7 +304,7 @@ where
                 blocks.push(Block::Paragraph(vec![Inline::Math(math.into_string())]));
             }
             Event::Html(html) | Event::InlineHtml(html) => {
-                if !html.trim().is_empty() {
+                if !html.trim().is_empty() && !is_html_comment(&html) {
                     blocks.push(Block::Html(html.into_string()));
                 }
             }
@@ -417,7 +422,7 @@ where
             Event::DisplayMath(math) => buffer.push(Block::Math(math.into_string())),
             Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => {
                 let text = text.into_string();
-                if text.trim().is_empty() {
+                if text.trim().is_empty() || is_html_comment(&text) {
                     continue;
                 }
                 match buffer.last_mut() {
@@ -539,7 +544,9 @@ where
             Event::SoftBreak => inline.push(Inline::Text(" ".to_string())),
             Event::HardBreak => inline.push(Inline::Break),
             Event::Html(html) | Event::InlineHtml(html) => {
-                inline.push(Inline::Text(html.into_string()));
+                if !is_html_comment(&html) {
+                    inline.push(Inline::Text(html.into_string()));
+                }
             }
             Event::FootnoteReference(label) => {
                 inline.push(Inline::FootnoteRef(label.into_string()));
@@ -748,6 +755,16 @@ mod tests {
             "missing a strike node; inline: {inline:?}"
         );
         assert_eq!(inline_text(inline), "粗与斜与码与文与公式与删");
+    }
+
+    #[test]
+    fn walker_skips_html_comments() {
+        let blocks = parse_blocks("<!--\n说明文字\n-->\n\n正文\n");
+        assert_eq!(blocks.len(), 1, "注释不应成为导出块：{blocks:?}");
+        let Block::Paragraph(inline) = &blocks[0] else {
+            panic!("expected paragraph: {blocks:?}");
+        };
+        assert_eq!(inline_text(inline), "正文");
     }
 
     #[test]
